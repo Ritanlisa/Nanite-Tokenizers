@@ -355,6 +355,29 @@ def _resolve_paging_target(command: str, current_page: int, total_pages: int) ->
     )
 
 
+def _selected_rag_db_names() -> list[str]:
+    names: list[str] = []
+    for item in config.settings.RAG_DB_NAMES:
+        value = (item or "").strip()
+        if value and value not in names:
+            names.append(value)
+    fallback = (config.settings.RAG_DB_NAME or "").strip()
+    if not names and fallback:
+        names.append(fallback)
+    return names
+
+
+def _require_selected_rag_db() -> str | None:
+    if not config.settings.ENABLE_RAG:
+        return _t("RAG 功能已禁用。", "RAG is disabled.")
+    if _selected_rag_db_names():
+        return None
+    return _t(
+        "当前未选择 RAG 数据库，请先在前端选择数据库后再使用 RAG 工具。",
+        "No RAG database is selected. Please select one in the UI before using RAG tools.",
+    )
+
+
 class RAGDocListInput(BaseModel):
     pass
 
@@ -605,6 +628,10 @@ class RAGDocListTool(BaseTool):
         call_id = start_current_tool_call(self.name, {})
         output_text = ""
         try:
+            scope_error = _require_selected_rag_db()
+            if scope_error:
+                output_text = scope_error
+                return output_text
             docs = await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(None, rag_engine.list_documents),
                 timeout=config.settings.RAG_TOOL_TIMEOUT,
@@ -643,6 +670,10 @@ class RAGDocCatalogTool(BaseTool):
         call_id = start_current_tool_call(self.name, {"doc_name": doc_name})
         output_text = ""
         try:
+            scope_error = _require_selected_rag_db()
+            if scope_error:
+                output_text = scope_error
+                return output_text
             catalog = await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(None, rag_engine.get_document_catalog, doc_name),
                 timeout=config.settings.RAG_TOOL_TIMEOUT,
@@ -688,6 +719,10 @@ class RAGRegexSearchTool(BaseTool):
         })
         output_text = ""
         try:
+            scope_error = _require_selected_rag_db()
+            if scope_error:
+                output_text = scope_error
+                return output_text
             page_size = max(1, min(int(limit), 50))
             result = await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(
@@ -792,6 +827,10 @@ class RAGVectorSearchTool(BaseTool):
         })
         output_text = ""
         try:
+            scope_error = _require_selected_rag_db()
+            if scope_error:
+                output_text = scope_error
+                return output_text
             page_size = max(1, min(int(limit), 50))
             result = await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(
@@ -936,6 +975,10 @@ class RAGGetPagesTool(BaseTool):
         )
         output_text = ""
         try:
+            scope_error = _require_selected_rag_db()
+            if scope_error:
+                output_text = scope_error
+                return output_text
             page_start = max(1, int(page_start))
             if page_end is not None:
                 page_end = max(page_start, int(page_end))

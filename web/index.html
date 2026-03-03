@@ -1273,6 +1273,7 @@
       };
       let currentLang = normalizeLang(localStorage.getItem(LANG_STORAGE_KEY));
       let activeStream = { sessionId: null, nodeId: null };
+      let streamDurationTicker = null;
       let selectedRagManagerDb = "";
       let selectedRagUseDbs = [];
       let ragDbOptionsReqId = 0;
@@ -2009,10 +2010,43 @@
           names.push(name);
         };
 
-        append(ragDbSelect && ragDbSelect.value ? ragDbSelect.value : "");
         (selectedRagUseDbs || []).forEach(append);
         getSessionRagDbNames(current).forEach(append);
         return names;
+      };
+
+      const stopStreamDurationTicker = () => {
+        if (streamDurationTicker) {
+          clearInterval(streamDurationTicker);
+          streamDurationTicker = null;
+        }
+      };
+
+      const startStreamDurationTicker = () => {
+        stopStreamDurationTicker();
+        streamDurationTicker = setInterval(() => {
+          if (!activeStream.nodeId || !activeStream.sessionId) {
+            stopStreamDurationTicker();
+            return;
+          }
+          const current = getActiveSession();
+          if (!current || current.id !== activeStream.sessionId) {
+            return;
+          }
+          refreshNodeBubble(current, activeStream.nodeId);
+        }, 200);
+      };
+
+      const setActiveStream = (sessionIdValue, nodeIdValue) => {
+        activeStream = {
+          sessionId: sessionIdValue || null,
+          nodeId: nodeIdValue || null,
+        };
+        if (activeStream.sessionId && activeStream.nodeId) {
+          startStreamDurationTicker();
+          return;
+        }
+        stopStreamDurationTicker();
       };
 
       const persistSessionRagDbNames = (session, names) => {
@@ -2720,7 +2754,7 @@
         });
         addChildNode(currentSession, userNode.id, agentNode);
         currentSession.updatedAt = Date.now();
-        activeStream = { sessionId: currentSession.id, nodeId: agentNode.id };
+        setActiveStream(currentSession.id, agentNode.id);
         saveSessions();
         renderChatFromSession();
         try {
@@ -2756,7 +2790,7 @@
           refreshNodeBubble(currentSession, agentNode.id);
         } finally {
           if (activeStream.nodeId === agentNode.id) {
-            activeStream = { sessionId: null, nodeId: null };
+            setActiveStream(null, null);
             refreshNodeBubble(currentSession, agentNode.id);
           }
           setBusy(false);
@@ -2802,7 +2836,7 @@
         });
         addChildNode(session, message.id, responseNode);
         session.updatedAt = Date.now();
-        activeStream = { sessionId: session.id, nodeId: responseNode.id };
+        setActiveStream(session.id, responseNode.id);
         saveSessions();
         renderChatFromSession();
 
@@ -2841,7 +2875,7 @@
           refreshNodeBubble(session, responseNode.id);
         } finally {
           if (activeStream.nodeId === responseNode.id) {
-            activeStream = { sessionId: null, nodeId: null };
+            setActiveStream(null, null);
             refreshNodeBubble(session, responseNode.id);
           }
           setBusy(false);
@@ -2866,7 +2900,7 @@
         });
         addChildNode(session, parent.id, responseNode);
         session.updatedAt = Date.now();
-        activeStream = { sessionId: session.id, nodeId: responseNode.id };
+        setActiveStream(session.id, responseNode.id);
         saveSessions();
         renderChatFromSession();
 
@@ -2904,7 +2938,7 @@
           refreshNodeBubble(session, responseNode.id);
         } finally {
           if (activeStream.nodeId === responseNode.id) {
-            activeStream = { sessionId: null, nodeId: null };
+            setActiveStream(null, null);
             refreshNodeBubble(session, responseNode.id);
           }
           setBusy(false);
@@ -3268,7 +3302,11 @@
         const picked = selectedRagUseDbs.filter(Boolean);
         if (!picked.length) {
           await updateRagSelection([], false);
+          if (ragDbSelect) {
+            ragDbSelect.value = "";
+          }
           persistSessionRagDbNames(getActiveSession(), []);
+          updateRagCurrentInfo();
           closeRagUseModal();
           return;
         }
