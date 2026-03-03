@@ -776,6 +776,54 @@
       .rag-doc-list {
         width: 100%;
         height: 360px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        overflow-y: auto;
+        padding: 2px;
+      }
+
+      .rag-doc-item {
+        position: relative;
+        padding: 9px 10px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        color: var(--text);
+        font-size: 13px;
+        cursor: pointer;
+        overflow: hidden;
+      }
+
+      .rag-doc-item.active {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px rgba(245, 194, 107, 0.25);
+      }
+
+      .rag-doc-item.uploading {
+        border-color: rgba(107, 209, 245, 0.45);
+      }
+
+      .rag-doc-name {
+        position: relative;
+        z-index: 2;
+        word-break: break-word;
+      }
+
+      .rag-doc-progress-track {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        height: 4px;
+        background: rgba(255, 255, 255, 0.08);
+      }
+
+      .rag-doc-progress-fill {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, var(--accent), var(--accent-2));
+        transition: width 0.16s linear;
       }
 
       .rag-db-stats {
@@ -1075,7 +1123,7 @@
             <div id="ragDetailPane" class="rag-col rag-detail collapsed">
               <div id="ragDbStats" class="rag-db-stats"></div>
               <div id="ragDocTitle" class="rag-col-title">Documents</div>
-              <select id="ragDocSelect" class="rag-doc-list" size="18"></select>
+              <div id="ragDocSelect" class="rag-doc-list" role="listbox" aria-label="RAG documents"></div>
               <div class="rag-doc-actions" style="margin-top: 10px;">
                 <button id="ragDocAddBtn">Add Doc</button>
                 <button id="ragDocDeleteBtn">Delete Doc</button>
@@ -1224,6 +1272,10 @@
       let ragDbDocsReqId = 0;
       let ragDbStatsReqId = 0;
       let requestResolver = null;
+      let suppressChatAutoScroll = false;
+      let selectedRagDocName = "";
+      let ragDocNames = [];
+      let ragUploadingDocs = [];
 
       const translations = {
         en: {
@@ -1640,7 +1692,9 @@
         }
 
         chat.appendChild(wrapper);
-        chat.scrollTop = chat.scrollHeight;
+        if (!suppressChatAutoScroll) {
+          chat.scrollTop = chat.scrollHeight;
+        }
         return { wrapper, bubble, textBlock, actions };
       };
 
@@ -2815,9 +2869,16 @@
       };
 
       const renderChatFromSession = () => {
+        const previousTop = chat.scrollTop;
+        const previousHeight = chat.scrollHeight;
+        const wasNearBottom = previousHeight - (previousTop + chat.clientHeight) <= 24;
+        suppressChatAutoScroll = true;
         chat.innerHTML = "";
         const current = getActiveSession();
-        if (!current) return;
+        if (!current) {
+          suppressChatAutoScroll = false;
+          return;
+        }
         ensureSessionTree(current);
         const path = getActivePath(current);
         path.forEach((nodeId) => {
@@ -2838,6 +2899,14 @@
             renderMessageActions(current, rendered.actions, message);
           }
         });
+        suppressChatAutoScroll = false;
+        if (wasNearBottom) {
+          chat.scrollTop = chat.scrollHeight;
+        } else {
+          const maxScrollTop = Math.max(0, chat.scrollHeight - chat.clientHeight);
+          const adjustedTop = previousTop + (chat.scrollHeight - previousHeight);
+          chat.scrollTop = Math.min(Math.max(0, adjustedTop), maxScrollTop);
+        }
         updateGraphFromSession(current);
         sessionIdLabel.textContent = current.id;
       };
@@ -2950,6 +3019,62 @@
             renderRagDbList(dbs);
           });
           ragDbList.appendChild(button);
+        });
+      };
+
+      const getMergedRagDocs = () => {
+        const map = new Map();
+        ragDocNames.forEach((name) => {
+          map.set(name, { name, uploading: false, progress: 100 });
+        });
+        ragUploadingDocs.forEach((item) => {
+          map.set(item.name, {
+            name: item.name,
+            uploading: true,
+            progress: Math.max(0, Math.min(100, Number(item.progress) || 0)),
+          });
+        });
+        return Array.from(map.values());
+      };
+
+      const renderRagDocList = () => {
+        if (!ragDocSelect) return;
+        ragDocSelect.innerHTML = "";
+        const items = getMergedRagDocs();
+
+        if (!selectedRagDocName && items.length) {
+          selectedRagDocName = items[0].name;
+        }
+        if (selectedRagDocName && !items.some((item) => item.name === selectedRagDocName)) {
+          selectedRagDocName = items.length ? items[0].name : "";
+        }
+
+        items.forEach((item) => {
+          const row = document.createElement("div");
+          row.className = `rag-doc-item${item.name === selectedRagDocName ? " active" : ""}${item.uploading ? " uploading" : ""}`;
+          row.setAttribute("role", "option");
+          row.setAttribute("aria-selected", item.name === selectedRagDocName ? "true" : "false");
+          row.addEventListener("click", () => {
+            selectedRagDocName = item.name;
+            renderRagDocList();
+          });
+
+          const name = document.createElement("div");
+          name.className = "rag-doc-name";
+          name.textContent = item.name;
+          row.appendChild(name);
+
+          if (item.uploading) {
+            const track = document.createElement("div");
+            track.className = "rag-doc-progress-track";
+            const fill = document.createElement("div");
+            fill.className = "rag-doc-progress-fill";
+            fill.style.width = `${item.progress}%`;
+            track.appendChild(fill);
+            row.appendChild(track);
+          }
+
+          ragDocSelect.appendChild(row);
         });
       };
 
@@ -3381,9 +3506,15 @@
       async function loadRagDbDocs(dbName) {
         if (!ragDocSelect) return;
         const requestId = ++ragDbDocsReqId;
-        ragDocSelect.innerHTML = "";
+        const previousSelectedDoc = selectedRagDocName;
+        ragDocNames = [];
+        selectedRagDocName = previousSelectedDoc;
+        renderRagDocList();
         if (!dbName) {
           if (requestId !== ragDbDocsReqId) return;
+          ragUploadingDocs = [];
+          selectedRagDocName = "";
+          renderRagDocList();
           renderRagDbStats(null);
           return;
         }
@@ -3400,12 +3531,12 @@
           const data = await response.json();
           if (requestId !== ragDbDocsReqId) return;
           const docs = Array.isArray(data.documents) ? data.documents : [];
-          docs.forEach((docName) => {
-            const opt = document.createElement("option");
-            opt.value = docName;
-            opt.textContent = docName;
-            ragDocSelect.appendChild(opt);
-          });
+          ragDocNames = docs;
+          ragUploadingDocs = ragUploadingDocs.filter((item) => !ragDocNames.includes(item.name));
+          if (!selectedRagDocName || !ragDocNames.includes(selectedRagDocName)) {
+            selectedRagDocName = ragDocNames.length ? ragDocNames[0] : "";
+          }
+          renderRagDocList();
         } catch (err) {
           if (requestId !== ragDbDocsReqId) return;
           ragStatus.textContent = `${t("ragFail")} ${err}`;
@@ -3539,7 +3670,7 @@
 
       async function deleteRagDoc() {
         const dbName = getSelectedRagDb();
-        const docName = ragDocSelect && ragDocSelect.value ? ragDocSelect.value : "";
+        const docName = selectedRagDocName || "";
         if (!dbName) {
           ragStatus.textContent = t("ragNoDb");
           return;
@@ -3580,24 +3711,53 @@
         }
         if (!files || !files.length) return;
         ragStatus.textContent = t("ragUploading");
+        const uploadingNames = Array.from(files).map((item) => item.name).filter(Boolean);
+        ragUploadingDocs = uploadingNames.map((name) => ({ name, progress: 0 }));
+        if (!selectedRagDocName && ragUploadingDocs.length) {
+          selectedRagDocName = ragUploadingDocs[0].name;
+        }
+        renderRagDocList();
+
         const form = new FormData();
         Array.from(files).forEach((item) => form.append("files", item));
         try {
-          const response = await fetch(`/api/rag/dbs/${encodeURIComponent(dbName)}/docs/upload`, {
-            method: "POST",
-            body: form,
+          const response = await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", `/api/rag/dbs/${encodeURIComponent(dbName)}/docs/upload`);
+            xhr.upload.onprogress = (event) => {
+              if (!event.lengthComputable) return;
+              const progress = Math.round((event.loaded / event.total) * 100);
+              ragUploadingDocs = ragUploadingDocs.map((item) => ({ ...item, progress }));
+              renderRagDocList();
+            };
+            xhr.onerror = () => reject(new Error("Upload failed"));
+            xhr.onload = () => {
+              const responseText = xhr.responseText || "";
+              resolve({
+                ok: xhr.status >= 200 && xhr.status < 300,
+                text: () => Promise.resolve(responseText),
+                json: () => Promise.resolve(responseText ? JSON.parse(responseText) : {}),
+              });
+            };
+            xhr.send(form);
           });
           if (!response.ok) {
             const error = await response.text();
             ragStatus.textContent = `${t("ragFail")} ${error}`;
+            ragUploadingDocs = [];
+            renderRagDocList();
             return;
           }
+          ragUploadingDocs = ragUploadingDocs.map((item) => ({ ...item, progress: 100 }));
+          renderRagDocList();
           ragStatus.textContent = t("ragBuilding");
           const data = await response.json();
           ragStatus.textContent = `${t("ragSuccess")} (${data.added || 0})`;
           await loadRagDbDocs(dbName);
         } catch (err) {
           ragStatus.textContent = `${t("ragFail")} ${err}`;
+          ragUploadingDocs = [];
+          renderRagDocList();
         }
       }
 
@@ -3933,31 +4093,15 @@
           }
         });
       }
-      settingsModal.addEventListener("click", (event) => {
-        if (event.target === settingsModal) {
-          closeSettingsModal();
-        }
-      });
+      settingsModal.addEventListener("click", () => {});
       if (ragManagerModal) {
-        ragManagerModal.addEventListener("click", (event) => {
-          if (event.target === ragManagerModal) {
-            closeRagManagerModal();
-          }
-        });
+        ragManagerModal.addEventListener("click", () => {});
       }
       if (ragUseModal) {
-        ragUseModal.addEventListener("click", (event) => {
-          if (event.target === ragUseModal) {
-            closeRagUseModal();
-          }
-        });
+        ragUseModal.addEventListener("click", () => {});
       }
       if (requestModal) {
-        requestModal.addEventListener("click", (event) => {
-          if (event.target === requestModal) {
-            closeRequestModal(null);
-          }
-        });
+        requestModal.addEventListener("click", () => {});
       }
       document.addEventListener("keydown", (event) => {
         if (event.key === "Escape") {
