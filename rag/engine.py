@@ -333,7 +333,24 @@ class RAGEngine:
             or "attempt to write a readonly database" in message
         )
 
+    @staticmethod
+    def _clear_chroma_system_cache() -> None:
+        try:
+            from chromadb.api.client import SharedSystemClient  # type: ignore
+
+            SharedSystemClient.clear_system_cache()
+        except Exception as exc:
+            logger.debug("Failed to clear Chroma shared system cache: %s", exc)
+
+    def invalidate_runtime_state(self, *, clear_chroma_cache: bool = False) -> None:
+        self.index = None
+        self.query_engine = None
+        if clear_chroma_cache and config.settings.VECTOR_STORE_TYPE == "chroma":
+            self._clear_chroma_system_cache()
+
     def _reset_persisted_index_artifacts(self, persist_dir: str) -> None:
+        if config.settings.VECTOR_STORE_TYPE == "chroma":
+            self._clear_chroma_system_cache()
         removable_paths = [
             os.path.join(persist_dir, "chroma"),
             os.path.join(persist_dir, "faiss.index"),
@@ -449,8 +466,7 @@ class RAGEngine:
         if current_persist_dir == self._active_persist_dir:
             return
         self._active_persist_dir = current_persist_dir
-        self.index = None
-        self.query_engine = None
+        self.invalidate_runtime_state(clear_chroma_cache=(config.settings.VECTOR_STORE_TYPE == "chroma"))
         self.doc_registry = DocumentRegistry(current_persist_dir)
         logger.info("Switched RAG context to %s", current_persist_dir)
 
@@ -740,6 +756,7 @@ class RAGEngine:
                     "Detected read-only Chroma storage under %s, resetting persisted index artifacts and retrying once",
                     persist_dir,
                 )
+                self.invalidate_runtime_state(clear_chroma_cache=True)
                 self._reset_persisted_index_artifacts(persist_dir)
                 _build_once()
             else:
@@ -791,6 +808,7 @@ class RAGEngine:
             logger.info("Loaded index from storage")
         except FileNotFoundError:
             logger.info("No persisted index found, building a new one")
+            self.invalidate_runtime_state(clear_chroma_cache=(config.settings.VECTOR_STORE_TYPE == "chroma"))
             if selected_db_mode:
                 built = self._build_index_for_selected_db()
                 if not built:
@@ -799,6 +817,9 @@ class RAGEngine:
                 self._build_index()
         except Exception as exc:
             logger.error("Failed to load index, rebuilding: %s", exc)
+            if config.settings.VECTOR_STORE_TYPE == "chroma" and self._is_readonly_db_error(exc):
+                self.invalidate_runtime_state(clear_chroma_cache=True)
+                self._reset_persisted_index_artifacts(persist_dir)
             if selected_db_mode:
                 built = self._build_index_for_selected_db()
                 if not built:

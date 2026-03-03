@@ -703,9 +703,11 @@ def create_app() -> FastAPI:
             if _is_valid_db(name):
                 raise HTTPException(status_code=400, detail="Database already exists")
             os.makedirs(docs_dir, exist_ok=True)
+            RAGEngine().invalidate_runtime_state(clear_chroma_cache=True)
             RAGEngine().clear_query_cache()
             return {"status": "ok", "database": name, "repaired": True}
         os.makedirs(docs_dir, exist_ok=True)
+        RAGEngine().invalidate_runtime_state(clear_chroma_cache=True)
         RAGEngine().clear_query_cache()
         return {"status": "ok", "database": name}
 
@@ -730,6 +732,7 @@ def create_app() -> FastAPI:
         if (primary or "") == old_name:
             primary = new_name
         _persist_rag_selection(primary, deduped_names)
+        RAGEngine().invalidate_runtime_state(clear_chroma_cache=True)
         RAGEngine().clear_query_cache()
         return {"status": "ok", "database": new_name}
 
@@ -744,6 +747,7 @@ def create_app() -> FastAPI:
         if os.path.exists(target_dir):
             raise HTTPException(status_code=400, detail="Target database already exists")
         shutil.copytree(source_dir, target_dir)
+        RAGEngine().invalidate_runtime_state(clear_chroma_cache=True)
         RAGEngine().clear_query_cache()
         return {"status": "ok", "database": target_name}
 
@@ -759,6 +763,7 @@ def create_app() -> FastAPI:
         if (primary or "") == name:
             primary = selected_names[0] if selected_names else None
         _persist_rag_selection(primary, selected_names)
+        RAGEngine().invalidate_runtime_state(clear_chroma_cache=True)
         RAGEngine().clear_query_cache()
         return {"status": "ok", "database": name}
 
