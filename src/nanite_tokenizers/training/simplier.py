@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import random
 
 import torch
@@ -23,6 +24,12 @@ MODEL_IDS = [
 def train_simplier(model_index: int = 0) -> None:
     accelerator = Accelerator()
     device = accelerator.device
+    offline_only = os.getenv("OFFLINE_ONLY", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
     d_model = 768
     nhead = 12
@@ -44,8 +51,13 @@ def train_simplier(model_index: int = 0) -> None:
         device_map="auto",
         output_hidden_states=True,
         trust_remote_code=True,
+        local_files_only=offline_only,
     )
-    tokenizer = AutoTokenizer.from_pretrained(llm_model_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        llm_model_path,
+        trust_remote_code=True,
+        local_files_only=offline_only,
+    )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 

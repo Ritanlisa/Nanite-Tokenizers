@@ -21,6 +21,18 @@ PROMPTS = [
 ]
 
 
+def _format_generation_output(generated_text: str) -> tuple[str, str | None]:
+    if "<think>" not in generated_text:
+        return generated_text, None
+
+    think_text = generated_text.replace("<think>", "").strip()
+    if "</think>" not in think_text:
+        return think_text, None
+
+    think_block, remainder = think_text.split("</think>", maxsplit=1)
+    return think_block.strip(), remainder.strip() or None
+
+
 def run_demo() -> None:
     model_id = "google-t5/t5-large"
     cache_dir = "./models"
@@ -33,13 +45,9 @@ def run_demo() -> None:
         print(color(f"\n[{idx}] Prompt:", "1;33"))
         print(color(prompt, "0;37"))
         print(color("Generated:", "1;32"))
-        if "<think>" in generated_text:
-            if "</think>" in generated_text:
-                parts = generated_text.split("</think>")
-                parts[0] = parts[0].replace("<think>", "").strip()
-                print(color(parts[0], "1;34"))
-                print(color(parts[1].strip(), "0;37"))
-            else:
-                print(color(generated_text.replace("<think>", "").strip(), "1;34"))
-        else:
-            print(color(generated_text, "0;37"))
+        think_text, final_text = _format_generation_output(generated_text)
+        if final_text is None:
+            print(color(think_text, "0;37"))
+            continue
+        print(color(think_text, "1;34"))
+        print(color(final_text, "0;37"))

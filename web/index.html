@@ -35,9 +35,79 @@
       }
 
       .app {
-        max-width: 1080px;
+        max-width: 1280px;
         margin: 0 auto;
         padding: 32px 20px 48px;
+      }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: minmax(220px, 260px) 1fr;
+        gap: 18px;
+      }
+
+      .sidebar {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        height: fit-content;
+      }
+
+      .sidebar-header {
+        font-size: 12px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+      }
+
+      .session-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-height: 60vh;
+        overflow-y: auto;
+      }
+
+      .session-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .session-item {
+        text-align: left;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 10px 12px;
+        color: var(--text);
+        font-size: 13px;
+      }
+
+      .session-delete {
+        width: 38px;
+        height: 38px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+      }
+
+      .session-item.active {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px rgba(245, 194, 107, 0.3);
+      }
+
+      .session-meta {
+        display: block;
+        margin-top: 4px;
+        font-size: 11px;
+        color: var(--muted);
       }
 
       header {
@@ -47,6 +117,12 @@
         align-items: center;
         justify-content: space-between;
         margin-bottom: 24px;
+      }
+
+      .header-actions {
+        display: flex;
+        gap: 10px;
+        align-items: center;
       }
 
       .title {
@@ -124,6 +200,89 @@
         gap: 18px;
       }
 
+      .viz-grid {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 14px;
+      }
+
+      .graph-wrap {
+        width: 100%;
+        height: 240px;
+        border-radius: 14px;
+        background: rgba(10, 12, 18, 0.7);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        position: relative;
+        overflow: hidden;
+      }
+
+      #toolGraph {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      .agent-text {
+        white-space: normal;
+        word-break: break-word;
+      }
+
+      .think-box {
+        margin-top: 10px;
+        padding: 8px 10px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px dashed rgba(255, 255, 255, 0.14);
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .think-box summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .think-content {
+        margin-top: 8px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .thinking-body {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 10px;
+        display: none;
+      }
+
+      .thinking-body.visible {
+        display: block;
+      }
+
+      .call-entry {
+        border-bottom: 1px dashed rgba(255, 255, 255, 0.1);
+        padding: 6px 0;
+      }
+
+      .call-entry:last-child {
+        border-bottom: none;
+      }
+
+      .call-entry summary {
+        cursor: pointer;
+        color: var(--text);
+        font-size: 12px;
+      }
+
+      .call-detail {
+        margin-top: 6px;
+        font-size: 12px;
+        color: var(--muted);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
       .chat {
         height: 520px;
         overflow-y: auto;
@@ -133,13 +292,166 @@
         padding: 10px;
       }
 
+      .input-wrap {
+        position: relative;
+        display: flex;
+        align-items: stretch;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        background: rgba(15, 17, 21, 0.7);
+        width: 100%;
+      }
+
+      .input-wrap textarea {
+        padding: 12px 140px 12px 12px;
+        border: none;
+        background: transparent;
+        resize: none;
+        width: 100%;
+        flex: 1 1 auto;
+        overflow-y: hidden;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(245, 194, 107, 0.55) rgba(255, 255, 255, 0.04);
+      }
+
+      .input-wrap textarea::-webkit-scrollbar {
+        width: 8px;
+      }
+
+      .input-wrap textarea::-webkit-scrollbar-track {
+        background: rgba(255, 255, 255, 0.04);
+        border-radius: 999px;
+      }
+
+      .input-wrap textarea::-webkit-scrollbar-thumb {
+        background: rgba(245, 194, 107, 0.55);
+        border-radius: 999px;
+        border: 2px solid rgba(15, 17, 21, 0.6);
+      }
+
+      .input-actions {
+        position: absolute;
+        right: 10px;
+        bottom: 10px;
+        display: inline-flex;
+        gap: 8px;
+      }
+
+      .input-actions button {
+        width: 32px;
+        height: 32px;
+        border-radius: 10px;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+      }
+
+      .db-checklist {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-height: 320px;
+        overflow-y: auto;
+        margin-top: 12px;
+      }
+
+      .db-check-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .db-check-item.active {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px rgba(245, 194, 107, 0.25);
+      }
+
+      .request-input {
+        width: 100%;
+        margin-top: 12px;
+      }
+
+      .chat,
+      .session-list,
+      .modal {
+        scrollbar-width: thin;
+        scrollbar-color: rgba(245, 194, 107, 0.5) rgba(255, 255, 255, 0.06);
+      }
+
+      .chat::-webkit-scrollbar,
+      .session-list::-webkit-scrollbar,
+      .modal::-webkit-scrollbar {
+        width: 8px;
+      }
+
+      .chat::-webkit-scrollbar-track,
+      .session-list::-webkit-scrollbar-track,
+      .modal::-webkit-scrollbar-track {
+        background: rgba(255, 255, 255, 0.04);
+        border-radius: 999px;
+      }
+
+      .chat::-webkit-scrollbar-thumb,
+      .session-list::-webkit-scrollbar-thumb,
+      .modal::-webkit-scrollbar-thumb {
+        background: rgba(245, 194, 107, 0.55);
+        border-radius: 999px;
+        border: 2px solid rgba(15, 17, 21, 0.6);
+      }
+
       .bubble {
-        max-width: 75%;
+        max-width: 82%;
         padding: 12px 14px;
         border-radius: 14px;
         line-height: 1.45;
-        white-space: pre-wrap;
+        white-space: normal;
         word-break: break-word;
+      }
+
+      .bubble table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 8px 0;
+        font-size: 13px;
+      }
+
+      .bubble th,
+      .bubble td {
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        padding: 6px 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .bubble p {
+        margin: 0;
+      }
+
+      .bubble ul,
+      .bubble ol {
+        margin: 0 0 8px 16px;
+        padding: 0;
+      }
+
+      .bubble li + li {
+        margin-top: 4px;
+      }
+
+      .bubble pre {
+        margin: 8px 0;
+        padding: 10px;
+        border-radius: 10px;
+        background: rgba(10, 12, 18, 0.65);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        overflow-x: auto;
       }
 
       .bubble.user {
@@ -154,16 +466,447 @@
         border: 1px solid rgba(107, 209, 245, 0.35);
       }
 
+      .bubble.editing {
+        outline: 2px solid rgba(245, 194, 107, 0.5);
+        box-shadow: 0 0 0 3px rgba(245, 194, 107, 0.2);
+      }
+
+      .chat-item {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .chat-item.user {
+        align-items: flex-end;
+      }
+
+      .chat-item.agent {
+        align-items: flex-start;
+      }
+
+      .chat-item.streaming {
+        opacity: 0.9;
+      }
+
+      .stream-indicator {
+        margin-top: 8px;
+        font-size: 12px;
+        color: var(--muted);
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .stream-indicator::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--accent);
+        box-shadow: 0 0 8px rgba(245, 194, 107, 0.6);
+        animation: pulse 1.2s ease-in-out infinite;
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          transform: scale(0.9);
+          opacity: 0.6;
+        }
+        50% {
+          transform: scale(1.1);
+          opacity: 1;
+        }
+      }
+
+      .bubble-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        font-size: 12px;
+      }
+
+      .bubble-actions button {
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        padding: 6px 8px;
+        border-radius: 10px;
+        font-size: 14px;
+        font-weight: 500;
+        min-width: 32px;
+        min-height: 30px;
+      }
+
+      .bubble-actions button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+      }
+
+      .bubble-actions button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        box-shadow: none;
+        transform: none;
+      }
+
+      .chat.busy .bubble-actions button,
+      .chat.busy .variant-nav {
+        pointer-events: none;
+        opacity: 0.45;
+      }
+
+      .chat.busy .bubble-actions .variant-nav {
+        pointer-events: auto;
+        opacity: 1;
+      }
+
+      .variant-switch {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 12px;
+      }
+
+      .variant-nav {
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(255, 255, 255, 0.08);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        color: var(--text);
+      }
+
+      .variant-count {
+        min-width: 46px;
+        text-align: center;
+        color: var(--text);
+      }
+
       .composer {
         display: grid;
-        grid-template-columns: 1fr auto auto;
+        grid-template-columns: 1fr;
         gap: 12px;
+      }
+
+      .banner {
+        background: #b91c1c;
+        color: #fff;
+        padding: 10px 14px;
+        border-radius: 12px;
+        font-weight: 600;
+        margin-bottom: 16px;
+        display: none;
+      }
+
+      .banner.visible {
+        display: block;
+      }
+
+      .icon-button {
+        width: 40px;
+        height: 40px;
+        border-radius: 12px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+      }
+
+      .mono-book-icon {
+        width: 18px;
+        height: 18px;
+        display: block;
+      }
+
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(5, 6, 10, 0.7);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        z-index: 30;
+      }
+
+      .modal-backdrop.visible {
+        display: flex;
+      }
+
+      .modal {
+        width: min(920px, 100%);
+        max-height: 90vh;
+        overflow-y: auto;
+      }
+
+      .attachments {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 10px;
+      }
+
+      .rag-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+        margin-top: 12px;
+      }
+
+      .rag-actions select {
+        min-width: 180px;
+      }
+
+      .rag-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .rag-status {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .rag-current-info {
+        margin-top: 10px;
+        font-size: 12px;
+        color: var(--muted);
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+      }
+
+      .submenu-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .submenu-close {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        padding: 0;
+        background: #d32f2f;
+        color: #ffffff;
+        border: 1px solid #ef5350;
+      }
+
+      .submenu-close:hover {
+        background: #b71c1c;
+        color: #ffffff;
+      }
+
+      .rag-manager-layout {
+        margin-top: 14px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+
+      .rag-col {
+        border: 1px dashed rgba(255, 255, 255, 0.16);
+        border-radius: 12px;
+        padding: 12px;
+        background: rgba(255, 255, 255, 0.03);
+        min-height: 460px;
+      }
+
+      .rag-col-title {
+        font-size: 12px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 10px;
+      }
+
+      .rag-db-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        height: 320px;
+        overflow-y: auto;
+        margin-bottom: 10px;
+      }
+
+      .rag-db-item {
+        text-align: left;
+        width: 100%;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+      }
+
+      .rag-db-item.active {
+        border-color: var(--accent);
+      }
+
+      .rag-left-actions,
+      .rag-doc-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .rag-detail.collapsed {
+        display: none;
+      }
+
+      .rag-doc-list {
+        width: 100%;
+        height: 360px;
+      }
+
+      .rag-db-stats {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+
+      .rag-db-stat-item {
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 10px;
+        padding: 8px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .rag-db-stat-label {
+        font-size: 11px;
+        color: var(--muted);
+      }
+
+      .rag-db-stat-value {
+        margin-top: 4px;
+        font-size: 13px;
+        color: var(--text);
+      }
+
+      .attachment {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 10px;
+        padding: 6px 10px;
+        font-size: 12px;
+      }
+
+      .attachment img {
+        width: 36px;
+        height: 36px;
+        object-fit: cover;
+        border-radius: 6px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+      }
+
+      .attachment button {
+        background: rgba(255, 255, 255, 0.1);
+        color: var(--text);
+        padding: 4px 8px;
+        border-radius: 8px;
+        font-weight: 500;
+      }
+
+      .settings-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 12px;
+      }
+
+      .settings-section {
+        margin-top: 18px;
+        padding-top: 12px;
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .section-title {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: var(--muted);
+        margin-bottom: 12px;
+      }
+
+      .range-row {
+        display: grid;
+        grid-template-columns: 1fr 80px;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .mcp-editor {
+        display: grid;
+        gap: 10px;
+        margin-top: 14px;
+        padding: 12px;
+        border: 1px dashed rgba(255, 255, 255, 0.12);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .mcp-input {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+      }
+
+      .mcp-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .mcp-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        font-size: 12px;
+      }
+
+      .settings-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      .status {
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 8px;
       }
 
       textarea {
         min-height: 52px;
-        max-height: 120px;
-        resize: vertical;
+        max-height: none;
+        resize: none;
         font-family: inherit;
         font-size: 14px;
         color: var(--text);
@@ -171,6 +914,11 @@
         border: 1px solid rgba(255, 255, 255, 0.08);
         border-radius: 12px;
         padding: 12px;
+        overflow-y: hidden;
+      }
+
+      .input-wrap textarea {
+        border: none;
       }
 
       .footer {
@@ -180,6 +928,14 @@
       }
 
       @media (max-width: 720px) {
+        .workspace {
+          grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+          order: 2;
+        }
+
         .composer {
           grid-template-columns: 1fr;
         }
@@ -189,46 +945,182 @@
         }
       }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   </head>
   <body>
     <div class="app">
-      <header>
-        <div>
-          <div class="title">Nanite Agent</div>
-          <div class="subtitle">RAG + MCP agent with a static front-end and API server</div>
-        </div>
-        <button id="newSession">New Session</button>
-      </header>
+      <div class="workspace">
+        <aside class="panel sidebar">
+          <div class="sidebar-header">Conversations</div>
+          <div id="sessionList" class="session-list"></div>
+          <button id="newSession">New Session</button>
+        </aside>
 
-      <div class="panel layout">
-        <div class="toolbar">
-          <div class="field">
-            <label for="model">Model override (optional)</label>
-            <input id="model" type="text" placeholder="gpt-4o-mini" />
-          </div>
-          <div class="field">
-            <label for="temperature">Temperature</label>
-            <input id="temperature" type="number" min="0" max="2" step="0.1" value="0" />
-          </div>
-          <div class="field">
-            <label for="stream">Stream response</label>
-            <select id="stream">
-              <option value="true" selected>Enabled</option>
-              <option value="false">Disabled</option>
-            </select>
-          </div>
-        </div>
+        <main>
+          <header>
+            <div>
+              <div id="appTitle" class="title">Nanite Agent</div>
+              <div id="appSubtitle" class="subtitle">
+                RAG + MCP agent with a static front-end and API server
+              </div>
+            </div>
+            <div class="header-actions">
+              <button id="langToggle" class="icon-button" title="Language">&#127760;</button>
+              <button id="ragManagerHeaderToggle" class="icon-button" title="Manage RAG DB" aria-label="Manage RAG DB"><svg class="mono-book-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H20v18H7.5A2.5 2.5 0 0 0 5 22V4.5Zm0 0A2.5 2.5 0 0 0 2.5 7v12.5A2.5 2.5 0 0 1 5 22" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M8.5 6.5H17.5M8.5 10H17.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+              <button id="settingsToggle" class="icon-button" title="Settings">&#9881;</button>
+            </div>
+          </header>
 
-        <div id="chat" class="chat"></div>
+          <div id="toolBanner" class="banner">
+            Tool calling disabled: current model does not support tools.
+          </div>
 
-        <div class="composer">
-          <textarea id="message" placeholder="Ask anything about your docs or tools..."></textarea>
-          <button id="send">Send</button>
-          <button id="reset">Reset</button>
+          <div class="panel layout">
+            <div class="toolbar">
+              <div class="field">
+                <label id="labelModel" for="model">Model override (optional)</label>
+                <input id="model" type="text" placeholder="gpt-4o-mini" />
+              </div>
+              <div class="field">
+                <label id="labelTemp" for="temperature">Temperature</label>
+                <input id="temperature" type="number" min="0" max="2" step="0.1" value="0.7" />
+              </div>
+              <div class="field">
+                <label id="labelStream" for="stream">Stream response</label>
+                <select id="stream">
+                  <option id="streamEnabled" value="true" selected>Enabled</option>
+                  <option id="streamDisabled" value="false">Disabled</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="chat" class="chat"></div>
+
+            <div class="composer">
+              <div class="input-wrap">
+                <textarea id="message" placeholder="Ask anything about your docs or tools..."></textarea>
+                <div class="input-actions">
+                  <button id="attach" title="Attach" aria-label="Attach">📎</button>
+                  <button id="ragQuickSelect" title="Use RAG DB" aria-label="Use RAG DB"><svg class="mono-book-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H20v18H7.5A2.5 2.5 0 0 0 5 22V4.5Zm0 0A2.5 2.5 0 0 0 2.5 7v12.5A2.5 2.5 0 0 1 5 22" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M8.5 6.5H17.5M8.5 10H17.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+                  <button id="send" title="Send" aria-label="Send">➤</button>
+                  <button id="reset" title="Reset" aria-label="Reset">⟲</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="ragCurrentInfo" class="rag-current-info"></div>
+
+            <input id="imageInput" type="file" accept="image/*" multiple hidden />
+            <div id="attachments" class="attachments"></div>
+            <select id="ragDbSelect" hidden></select>
+          </div>
+
+          <div class="panel viz-grid" style="margin-top: 18px;">
+            <div>
+              <div id="graphTitle" class="title" style="font-size: 18px;">Tool Relationship Flow</div>
+              <div id="graphSubtitle" class="subtitle">
+                Live intensity view of tool usage in this session.
+              </div>
+            </div>
+            <div class="graph-wrap">
+              <canvas id="toolGraph"></canvas>
+            </div>
+          </div>
+
+          
+        </main>
+      </div>
+
+      <div id="settingsModal" class="modal-backdrop" aria-hidden="true">
+        <div class="panel modal">
+          <div class="submenu-head">
+            <div id="settingsTitle" class="title" style="font-size: 20px;">Settings</div>
+            <button id="settingsCloseX" class="submenu-close" aria-label="Close">×</button>
+          </div>
+          <div id="settingsSubtitle" class="subtitle">Edit settings.yaml and restart the service.</div>
+          <div class="mcp-editor">
+            <div id="mcpTitle" class="subtitle" style="margin: 0;">MCP Services</div>
+            <div class="mcp-input">
+              <input id="mcpLink" type="text" placeholder="Paste MCP URL..." />
+              <button id="addMcp">Add</button>
+            </div>
+            <div id="mcpList" class="mcp-list"></div>
+          </div>
+          <div id="settingsForm" class="settings-grid" style="margin-top: 16px;"></div>
+          <div class="settings-actions">
+            <button id="reloadSettings">Reload Settings</button>
+            <button id="saveRestart">Save & Restart</button>
+          </div>
+          <div id="settingsStatus" class="status"></div>
         </div>
       </div>
 
-      <div class="footer">Session id: <span id="sessionId"></span></div>
+      <div id="ragManagerModal" class="modal-backdrop" aria-hidden="true">
+        <div class="panel modal">
+          <div class="submenu-head">
+            <div id="ragManagerTitle" class="title" style="font-size: 20px;">RAG Database Manager</div>
+            <button id="ragManagerCloseX" class="submenu-close" aria-label="Close">×</button>
+          </div>
+          <div class="rag-manager-layout">
+            <div class="rag-col">
+              <div id="ragDbListTitle" class="rag-col-title">RAG Databases</div>
+              <div id="ragDbList" class="rag-db-list"></div>
+              <div class="rag-left-actions">
+                <button id="ragDbCreateBtn">Create</button>
+                <button id="ragDbRenameBtn">Rename</button>
+                <button id="ragDbCloneBtn">Clone</button>
+                <button id="ragDbDeleteBtn">Delete</button>
+              </div>
+            </div>
+            <div id="ragDetailPane" class="rag-col rag-detail collapsed">
+              <div id="ragDbStats" class="rag-db-stats"></div>
+              <div id="ragDocTitle" class="rag-col-title">Documents</div>
+              <select id="ragDocSelect" class="rag-doc-list" size="18"></select>
+              <div class="rag-doc-actions" style="margin-top: 10px;">
+                <button id="ragDocAddBtn">Add Doc</button>
+                <button id="ragDocDeleteBtn">Delete Doc</button>
+                <button id="ragDocRefreshBtn">Refresh</button>
+              </div>
+              <div id="ragManagerStatus" class="status"></div>
+            </div>
+          </div>
+          <input id="ragDbDocInput" type="file" accept=".pdf,application/pdf,.doc,application/msword,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.txt,text/plain,.md,.markdown,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xls,application/vnd.ms-excel,.csv,text/csv" multiple hidden />
+        </div>
+      </div>
+
+      <div id="ragUseModal" class="modal-backdrop" aria-hidden="true">
+        <div class="panel modal" style="max-width: 560px;">
+          <div class="submenu-head">
+            <div id="ragUseTitle" class="title" style="font-size: 20px;">Use RAG Databases</div>
+            <button id="ragUseCloseX" class="submenu-close" aria-label="Close">×</button>
+          </div>
+          <div id="ragUseSubtitle" class="subtitle">Select one or more databases for RAG usage.</div>
+          <div id="ragUseMeta" class="status"></div>
+          <div id="ragUseDbList" class="db-checklist"></div>
+          <div class="settings-actions" style="margin-top: 14px;">
+            <button id="ragUseApplyBtn">Apply</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="requestModal" class="modal-backdrop" aria-hidden="true">
+        <div class="panel modal" style="max-width: 560px;">
+          <div class="submenu-head">
+            <div id="requestTitle" class="title" style="font-size: 20px;">Confirm</div>
+            <button id="requestCloseX" class="submenu-close" aria-label="Close">×</button>
+          </div>
+          <div id="requestMessage" class="subtitle"></div>
+          <input id="requestInput" class="request-input" type="text" style="display: none;" />
+          <div class="settings-actions" style="margin-top: 14px;">
+            <button id="requestCancelBtn">Cancel</button>
+            <button id="requestConfirmBtn">Confirm</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <span id="sessionLabel">Session id:</span> <span id="sessionId"></span>
+      </div>
     </div>
 
     <script>
@@ -241,86 +1133,1991 @@
       const modelInput = document.getElementById("model");
       const temperatureInput = document.getElementById("temperature");
       const streamSelect = document.getElementById("stream");
+      const attachButton = document.getElementById("attach");
+      const ragDbSelect = document.getElementById("ragDbSelect");
+      const ragCurrentInfo = document.getElementById("ragCurrentInfo");
+      const ragManagerHeaderToggle = document.getElementById("ragManagerHeaderToggle");
+      const ragQuickSelect = document.getElementById("ragQuickSelect");
+      const imageInput = document.getElementById("imageInput");
+      const attachments = document.getElementById("attachments");
+      const ragStatus = document.getElementById("ragManagerStatus");
+      const ragManagerTitle = document.getElementById("ragManagerTitle");
+      const ragDbListTitle = document.getElementById("ragDbListTitle");
+      const ragDocTitle = document.getElementById("ragDocTitle");
+      const ragDbList = document.getElementById("ragDbList");
+      const ragDbCreateBtn = document.getElementById("ragDbCreateBtn");
+      const ragDbRenameBtn = document.getElementById("ragDbRenameBtn");
+      const ragDbCloneBtn = document.getElementById("ragDbCloneBtn");
+      const ragDocAddBtn = document.getElementById("ragDocAddBtn");
+      const ragDocDeleteBtn = document.getElementById("ragDocDeleteBtn");
+      const ragDbDeleteBtn = document.getElementById("ragDbDeleteBtn");
+      const ragDocRefreshBtn = document.getElementById("ragDocRefreshBtn");
+      const ragDocSelect = document.getElementById("ragDocSelect");
+      const ragDbStats = document.getElementById("ragDbStats");
+      const ragDbDocInput = document.getElementById("ragDbDocInput");
+      const ragDetailPane = document.getElementById("ragDetailPane");
+      const toolBanner = document.getElementById("toolBanner");
+      const settingsForm = document.getElementById("settingsForm");
+      const reloadSettingsButton = document.getElementById("reloadSettings");
+      const saveRestartButton = document.getElementById("saveRestart");
+      const settingsStatus = document.getElementById("settingsStatus");
+      const settingsToggle = document.getElementById("settingsToggle");
+      const langToggle = document.getElementById("langToggle");
+      const settingsModal = document.getElementById("settingsModal");
+      const settingsCloseX = document.getElementById("settingsCloseX");
+      const ragManagerModal = document.getElementById("ragManagerModal");
+      const ragManagerCloseX = document.getElementById("ragManagerCloseX");
+      const ragUseModal = document.getElementById("ragUseModal");
+      const ragUseCloseX = document.getElementById("ragUseCloseX");
+      const ragUseTitle = document.getElementById("ragUseTitle");
+      const ragUseSubtitle = document.getElementById("ragUseSubtitle");
+      const ragUseMeta = document.getElementById("ragUseMeta");
+      const ragUseDbList = document.getElementById("ragUseDbList");
+      const ragUseApplyBtn = document.getElementById("ragUseApplyBtn");
+      const requestModal = document.getElementById("requestModal");
+      const requestCloseX = document.getElementById("requestCloseX");
+      const requestTitle = document.getElementById("requestTitle");
+      const requestMessage = document.getElementById("requestMessage");
+      const requestInput = document.getElementById("requestInput");
+      const requestCancelBtn = document.getElementById("requestCancelBtn");
+      const requestConfirmBtn = document.getElementById("requestConfirmBtn");
+      const sessionList = document.getElementById("sessionList");
+      const toolGraph = document.getElementById("toolGraph");
+      const mcpLinkInput = document.getElementById("mcpLink");
+      const addMcpButton = document.getElementById("addMcp");
+      const mcpList = document.getElementById("mcpList");
+      const appTitle = document.getElementById("appTitle");
+      const appSubtitle = document.getElementById("appSubtitle");
+      const labelModel = document.getElementById("labelModel");
+      const labelTemp = document.getElementById("labelTemp");
+      const labelStream = document.getElementById("labelStream");
+      const streamEnabled = document.getElementById("streamEnabled");
+      const streamDisabled = document.getElementById("streamDisabled");
+      const graphTitle = document.getElementById("graphTitle");
+      const graphSubtitle = document.getElementById("graphSubtitle");
+      
+      const settingsTitle = document.getElementById("settingsTitle");
+      const settingsSubtitle = document.getElementById("settingsSubtitle");
+      const mcpTitle = document.getElementById("mcpTitle");
+      const sessionLabel = document.getElementById("sessionLabel");
 
-      let sessionId = localStorage.getItem("nanite_session_id");
-      if (!sessionId) {
-        sessionId = crypto.randomUUID();
-        localStorage.setItem("nanite_session_id", sessionId);
-      }
-      sessionIdLabel.textContent = sessionId;
+      const SESSION_STORAGE_KEY = "nanite_sessions";
+      const ACTIVE_SESSION_KEY = "nanite_active_session";
+      const LANG_STORAGE_KEY = "nanite_lang";
+      let sessions = [];
+      let sessionId = null;
+      let attachmentsState = [];
+      let mcpLinks = [];
+      let graphState = { counts: {}, calls: [] };
+      let graphAnimationId = null;
+      let capabilities = { tool_calling_supported: null, multimodal_supported: null };
+      const normalizeLang = (value) => {
+        if (value === "zh" || value === "en") return value;
+        if (typeof value === "string" && value.toLowerCase().startsWith("zh")) return "zh";
+        return "en";
+      };
+      let currentLang = normalizeLang(localStorage.getItem(LANG_STORAGE_KEY));
+      let activeStream = { sessionId: null, nodeId: null };
+      let selectedRagManagerDb = "";
+      let selectedRagUseDbs = [];
+      let ragDbOptionsReqId = 0;
+      let ragDbDocsReqId = 0;
+      let ragDbStatsReqId = 0;
+      let requestResolver = null;
 
-      const appendBubble = (text, role) => {
+      const translations = {
+        en: {
+          title: "Nanite Agent",
+          subtitle: "RAG + MCP agent with a static front-end and API server",
+          conversations: "Conversations",
+          newSession: "New Session",
+          newChat: "New chat",
+          deleteChat: "Delete chat",
+          toolBanner: "Tool calling disabled: current model does not support tools.",
+          labelModel: "Model override (optional)",
+          labelTemp: "Temperature",
+          labelStream: "Stream response",
+          streamEnabled: "Enabled",
+          streamDisabled: "Disabled",
+          messagePlaceholder: "Ask anything about your docs or tools...",
+          attach: "Attach",
+          send: "Send",
+          reset: "Reset",
+          addDocs: "Add Docs",
+          buildRag: "Build RAG",
+          useRag: "Use RAG",
+          ragDb: "RAG DB",
+          ragManage: "Manage RAG DB",
+          ragUseTitle: "Use RAG Databases",
+          ragUseSubtitle: "Select one or more databases for RAG usage.",
+          ragUseMeta: "Primary: {primary} · Selected: {count}",
+          ragUseMetaNone: "Primary: none · Selected: 0",
+          ragPrepared: "Using RAG DB(s): {dbs}",
+          ragPreparedNone: "Using RAG DB(s): none",
+          ragUseApplyBtn: "Apply",
+          ragManagerTitle: "RAG Database Manager",
+          ragDbListTitle: "RAG Databases",
+          ragDocTitle: "Selected DB Documents",
+          ragDbCreateBtn: "Create",
+          ragDbRenameBtn: "Rename",
+          ragDbCloneBtn: "Clone",
+          ragDocAddBtn: "Add Doc",
+          ragDocDeleteBtn: "Delete Doc",
+          ragDbDeleteBtn: "Delete",
+          ragDocRefreshBtn: "Refresh",
+          ragStatsDocs: "Documents",
+          ragStatsChunks: "Chunks",
+          ragStatsSize: "Size",
+          ragStatsUpdated: "Updated",
+          ragStatsUnknown: "Unknown",
+          ragUploading: "Uploading documents...",
+          ragBuilding: "Building RAG index...",
+          ragSuccess: "RAG updated.",
+          ragFail: "RAG update failed:",
+          ragNoDb: "Select a RAG DB first.",
+          ragNoDoc: "Select a document first.",
+          ragConfirmDeleteDb: "Delete database",
+          ragConfirmDeleteDoc: "Delete document",
+          modalCancel: "Cancel",
+          modalConfirm: "Confirm",
+          modalCreateDb: "Create RAG database",
+          modalRenameDb: "Rename RAG database",
+          modalCloneDb: "Clone RAG database",
+          modalDeleteDb: "Delete database",
+          modalDeleteDoc: "Delete document",
+          ragServiceLabel: "Local RAG (docs)",
+          edit: "Edit",
+          deleteMessage: "Delete",
+          continue: "Continue",
+          copy: "Copy",
+          copied: "Copied",
+          copyFailed: "Copy failed",
+          regenerate: "Regenerate",
+          editPrompt: "Edit message:",
+          continuePrompt: "Continue.",
+          inProgress: "(running)",
+          generating: "Generating...",
+          graphTitle: "Tool Relationship Flow",
+          graphSubtitle: "Live intensity view of tool usage in this session.",
+          thinkLabel: "Thinking",
+          settingsTitle: "Settings",
+          settingsSubtitle: "Edit settings.yaml and restart the service.",
+          sectionGeneral: "General",
+          sectionModels: "Models",
+          sectionRag: "RAG",
+          sectionCache: "Cache",
+          sectionMcp: "MCP",
+          sectionAgent: "Agent",
+          sectionLogging: "Logging",
+          sectionOcr: "OCR",
+          mcpTitle: "MCP Services",
+          mcpPlaceholder: "Paste MCP URL...",
+          add: "Add",
+          remove: "Remove",
+          reload: "Reload Settings",
+          saveRestart: "Save & Restart",
+          close: "Close",
+          sessionLabel: "Session id:",
+          imageOnly: "(image)",
+          imagePrompt: "Please analyze the attached image(s).",
+          imageLabel: "Image",
+          errorPrefix: "Error:",
+          loadingSettings: "Loading settings...",
+          settingsLoadFail: "Failed to load settings.",
+          settingsLoadFailDetail: "Failed to load settings:",
+          settingsSave: "Saving settings...",
+          settingsSaveFail: "Save failed:",
+          settingsSaved: "Saved. Service will restart.",
+          noToolCalls: "No tool calls yet.",
+          noToolCallsGraph: "No tool calls yet",
+          callLabel: "call",
+          inputLabel: "Input:",
+          outputLabel: "Output:",
+          pendingInput: "(no input payload)",
+          pendingOutput: "(waiting for tool output...)",
+          emptyOutput: "(empty output)",
+        },
+        zh: {
+          title: "Nanite 智能体",
+          subtitle: "带静态前端与 API 的 RAG + MCP 智能体",
+          conversations: "历史对话",
+          newSession: "新对话",
+          newChat: "新对话",
+          deleteChat: "删除对话",
+          toolBanner: "工具调用已禁用：当前模型不支持工具。",
+          labelModel: "模型覆盖（可选）",
+          labelTemp: "温度",
+          labelStream: "流式响应",
+          streamEnabled: "启用",
+          streamDisabled: "禁用",
+          messagePlaceholder: "问点关于文档或工具的任何问题...",
+          attach: "上传",
+          send: "发送",
+          reset: "重置",
+          addDocs: "添加文档",
+          buildRag: "生成 RAG",
+          useRag: "使用 RAG",
+          ragDb: "RAG 数据库",
+          ragManage: "管理 RAG 数据库",
+          ragUseTitle: "使用 RAG 数据库",
+          ragUseSubtitle: "选择一个或多个数据库用于 RAG。",
+          ragUseMeta: "当前主库：{primary} · 已选：{count}",
+          ragUseMetaNone: "当前主库：无 · 已选：0",
+          ragPrepared: "当前使用 RAG 库：{dbs}",
+          ragPreparedNone: "当前使用 RAG 库：无",
+          ragUseApplyBtn: "应用",
+          ragManagerTitle: "RAG 数据库管理",
+          ragDbListTitle: "RAG 数据库列表",
+          ragDocTitle: "选中数据库文档",
+          ragDbCreateBtn: "创建",
+          ragDbRenameBtn: "重命名",
+          ragDbCloneBtn: "克隆",
+          ragDocAddBtn: "添加文档",
+          ragDocDeleteBtn: "删除文档",
+          ragDbDeleteBtn: "删除",
+          ragDocRefreshBtn: "刷新",
+          ragStatsDocs: "文档数",
+          ragStatsChunks: "Chunk 数",
+          ragStatsSize: "大小",
+          ragStatsUpdated: "更新时间",
+          ragStatsUnknown: "未知",
+          ragUploading: "正在上传文档...",
+          ragBuilding: "正在生成 RAG 索引...",
+          ragSuccess: "RAG 已更新。",
+          ragFail: "RAG 更新失败：",
+          ragNoDb: "请先选择 RAG 数据库。",
+          ragNoDoc: "请先选择文档。",
+          ragConfirmDeleteDb: "删除数据库",
+          ragConfirmDeleteDoc: "删除文档",
+          modalCancel: "取消",
+          modalConfirm: "确认",
+          modalCreateDb: "创建 RAG 数据库",
+          modalRenameDb: "重命名 RAG 数据库",
+          modalCloneDb: "克隆 RAG 数据库",
+          modalDeleteDb: "删除数据库",
+          modalDeleteDoc: "删除文档",
+          ragServiceLabel: "本地 RAG（文档）",
+          edit: "修改",
+          deleteMessage: "删除",
+          continue: "继续生成",
+          copy: "复制",
+          copied: "已复制",
+          copyFailed: "复制失败",
+          regenerate: "重新生成",
+          editPrompt: "修改消息：",
+          continuePrompt: "继续",
+          inProgress: "（进行中）",
+          generating: "生成中...",
+          graphTitle: "工具关系流",
+          graphSubtitle: "当前会话的工具调用强度视图。",
+          thinkLabel: "思考",
+          settingsTitle: "设置",
+          settingsSubtitle: "编辑 settings.yaml 并重启服务。",
+          sectionGeneral: "通用",
+          sectionModels: "模型",
+          sectionRag: "RAG",
+          sectionCache: "缓存",
+          sectionMcp: "MCP",
+          sectionAgent: "智能体",
+          sectionLogging: "日志",
+          sectionOcr: "OCR",
+          mcpTitle: "MCP 服务",
+          mcpPlaceholder: "粘贴 MCP 链接...",
+          add: "添加",
+          remove: "移除",
+          reload: "重新加载设置",
+          saveRestart: "保存并重启",
+          close: "关闭",
+          sessionLabel: "会话 ID:",
+          imageOnly: "(图片)",
+          imagePrompt: "请分析附加的图片。",
+          imageLabel: "图片",
+          errorPrefix: "错误:",
+          loadingSettings: "正在加载设置...",
+          settingsLoadFail: "加载设置失败。",
+          settingsLoadFailDetail: "加载设置失败:",
+          settingsSave: "正在保存设置...",
+          settingsSaveFail: "保存失败:",
+          settingsSaved: "已保存，服务将重启。",
+          noToolCalls: "暂无工具调用。",
+          noToolCallsGraph: "暂无工具调用",
+          callLabel: "调用",
+          inputLabel: "输入:",
+          outputLabel: "输出:",
+          pendingInput: "（无输入参数）",
+          pendingOutput: "（等待工具返回中...）",
+          emptyOutput: "（空输出）",
+        },
+      };
+
+      const t = (key) => {
+        const table = translations[currentLang] || translations.en;
+        return table[key] || translations.en[key] || key;
+      };
+
+      const applyTranslations = () => {
+        document.title = t("title");
+        appTitle.textContent = t("title");
+        appSubtitle.textContent = t("subtitle");
+        document.querySelector(".sidebar-header").textContent = t("conversations");
+        newSessionButton.textContent = t("newSession");
+        toolBanner.textContent = t("toolBanner");
+        labelModel.textContent = t("labelModel");
+        labelTemp.textContent = t("labelTemp");
+        labelStream.textContent = t("labelStream");
+        streamEnabled.textContent = t("streamEnabled");
+        streamDisabled.textContent = t("streamDisabled");
+        messageInput.placeholder = t("messagePlaceholder");
+        attachButton.title = t("attach");
+        attachButton.setAttribute("aria-label", t("attach"));
+        if (ragQuickSelect) {
+          ragQuickSelect.title = t("useRag");
+          ragQuickSelect.setAttribute("aria-label", t("useRag"));
+        }
+        sendButton.title = t("send");
+        sendButton.setAttribute("aria-label", t("send"));
+        resetButton.title = t("reset");
+        resetButton.setAttribute("aria-label", t("reset"));
+        if (ragManagerHeaderToggle) ragManagerHeaderToggle.title = t("ragManage");
+        if (ragDbSelect) {
+          ragDbSelect.title = t("ragDb");
+          ragDbSelect.setAttribute("aria-label", t("ragDb"));
+        }
+        if (ragManagerTitle) ragManagerTitle.textContent = t("ragManagerTitle");
+        if (ragUseTitle) ragUseTitle.textContent = t("ragUseTitle");
+        if (ragUseSubtitle) ragUseSubtitle.textContent = t("ragUseSubtitle");
+        if (ragUseApplyBtn) ragUseApplyBtn.textContent = t("ragUseApplyBtn");
+        updateRagUseMeta();
+        if (ragDbListTitle) ragDbListTitle.textContent = t("ragDbListTitle");
+        if (ragDocTitle) ragDocTitle.textContent = t("ragDocTitle");
+        if (ragDbCreateBtn) ragDbCreateBtn.textContent = t("ragDbCreateBtn");
+        if (ragDbRenameBtn) ragDbRenameBtn.textContent = t("ragDbRenameBtn");
+        if (ragDbCloneBtn) ragDbCloneBtn.textContent = t("ragDbCloneBtn");
+        if (ragDocAddBtn) ragDocAddBtn.textContent = t("ragDocAddBtn");
+        if (ragDocDeleteBtn) ragDocDeleteBtn.textContent = t("ragDocDeleteBtn");
+        if (ragDbDeleteBtn) ragDbDeleteBtn.textContent = t("ragDbDeleteBtn");
+        if (ragDocRefreshBtn) ragDocRefreshBtn.textContent = t("ragDocRefreshBtn");
+        graphTitle.textContent = t("graphTitle");
+        graphSubtitle.textContent = t("graphSubtitle");
+        settingsTitle.textContent = t("settingsTitle");
+        settingsSubtitle.textContent = t("settingsSubtitle");
+        mcpTitle.textContent = t("mcpTitle");
+        mcpLinkInput.placeholder = t("mcpPlaceholder");
+        addMcpButton.textContent = t("add");
+        reloadSettingsButton.textContent = t("reload");
+        saveRestartButton.textContent = t("saveRestart");
+        sessionLabel.textContent = t("sessionLabel");
+        if (requestCancelBtn) requestCancelBtn.textContent = t("modalCancel");
+        if (requestConfirmBtn) requestConfirmBtn.textContent = t("modalConfirm");
+        renderAttachments();
+        renderMcpLinks();
+        const current = getActiveSession();
+        if (current) {
+          renderChatFromSession();
+        }
+      };
+
+      const createNode = (role, text, extra = {}) => {
+        return {
+          id: crypto.randomUUID(),
+          role,
+          text: text || "",
+          toolCalls: extra.toolCalls || [],
+          toolPolling: Boolean(extra.toolPolling),
+          parentId: extra.parentId || null,
+          children: [],
+          activeChildId: null,
+        };
+      };
+
+      const ensureSessionTree = (session) => {
+        if (session.tree && session.tree.nodes) {
+          return;
+        }
+        const root = createNode("root", "");
+        const nodes = { [root.id]: root };
+        let currentId = root.id;
+
+        (session.messages || []).forEach((message) => {
+          if (message.role === "agent" && Array.isArray(message.responses) && message.responses.length) {
+            const parent = nodes[currentId];
+            const responseIds = [];
+            message.responses.forEach((response) => {
+              const node = createNode("agent", response.text || "", {
+                toolCalls: response.toolCalls || [],
+                parentId: parent.id,
+              });
+              nodes[node.id] = node;
+              parent.children.push(node.id);
+              responseIds.push(node.id);
+            });
+            const index = Math.min(
+              Math.max(message.variantIndex || 0, 0),
+              responseIds.length - 1
+            );
+            parent.activeChildId = responseIds[index];
+            currentId = responseIds[index];
+          } else {
+            const node = createNode(message.role, message.text || "", {
+              toolCalls: message.toolCalls || [],
+              parentId: currentId,
+            });
+            nodes[node.id] = node;
+            nodes[currentId].children.push(node.id);
+            nodes[currentId].activeChildId = node.id;
+            currentId = node.id;
+          }
+        });
+
+        session.tree = {
+          rootId: root.id,
+          nodes,
+        };
+      };
+
+      const getNode = (session, id) => {
+        return session.tree.nodes[id] || null;
+      };
+
+      const getActivePath = (session) => {
+        ensureSessionTree(session);
+        const path = [];
+        let currentId = session.tree.rootId;
+        while (currentId) {
+          const node = getNode(session, currentId);
+          if (!node) break;
+          if (node.role !== "root") {
+            path.push(node.id);
+          }
+          currentId = node.activeChildId;
+        }
+        return path;
+      };
+
+      const getActiveLeaf = (session) => {
+        const path = getActivePath(session);
+        if (!path.length) {
+          return session.tree.rootId;
+        }
+        return path[path.length - 1];
+      };
+
+      const addChildNode = (session, parentId, node) => {
+        const parent = getNode(session, parentId);
+        if (!parent) return;
+        node.parentId = parentId;
+        session.tree.nodes[node.id] = node;
+        parent.children.push(node.id);
+        parent.activeChildId = node.id;
+      };
+
+      const deleteSubtree = (session, nodeId) => {
+        const node = getNode(session, nodeId);
+        if (!node) return;
+        (node.children || []).forEach((childId) => deleteSubtree(session, childId));
+        delete session.tree.nodes[nodeId];
+      };
+
+      const createChatItem = (role, showActions = true) => {
+        const wrapper = document.createElement("div");
+        wrapper.className = `chat-item ${role}`;
+
         const bubble = document.createElement("div");
         bubble.className = `bubble ${role}`;
-        bubble.textContent = text;
-        chat.appendChild(bubble);
+        let textBlock = null;
+        if (role === "agent") {
+          textBlock = document.createElement("div");
+          textBlock.className = "agent-text";
+          bubble.appendChild(textBlock);
+        }
+        wrapper.appendChild(bubble);
+
+        let actions = null;
+        if (showActions) {
+          actions = document.createElement("div");
+          actions.className = "bubble-actions";
+          wrapper.appendChild(actions);
+        }
+
+        chat.appendChild(wrapper);
         chat.scrollTop = chat.scrollHeight;
-        return bubble;
+        return { wrapper, bubble, textBlock, actions };
+      };
+
+      const appendUserBubble = (text) => {
+        const item = createChatItem("user", false);
+        item.bubble.textContent = text;
+        return item;
+      };
+
+      const createAgentBubble = (showActions = false) => {
+        return createChatItem("agent", showActions);
+      };
+
+      const splitThink = (text) => {
+          const thinkRegex = /<think>([\s\S]*?)<\/think>/gi;
+          let match;
+          let thinkParts = [];
+          let lastIndex = 0;
+          let answerParts = [];
+          let incomplete = false;
+
+          // 查找所有完整的 <think> 块
+          while ((match = thinkRegex.exec(text)) !== null) {
+              // 添加标签前的普通文本
+              answerParts.push(text.slice(lastIndex, match.index));
+              thinkParts.push(match[1]);  // 思考内容
+              lastIndex = thinkRegex.lastIndex;
+          }
+
+          // 检查末尾是否有未闭合的 <think>
+          const remaining = text.slice(lastIndex);
+          const incompleteThinkMatch = remaining.match(/<think>([\s\S]*)$/i);
+          if (incompleteThinkMatch) {
+              thinkParts.push(incompleteThinkMatch[1]);
+              incomplete = true;
+              // 不添加剩余部分到 answer，因为它属于不完整标签内部
+          } else {
+              answerParts.push(remaining);
+          }
+
+          const think = thinkParts.join('\n\n');  // 多个思考块用空行分隔
+          const answer = answerParts.join('');
+          return { answer, think, incomplete };
+      };
+
+      const escapeHtml = (value) =>
+        value
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+
+      const renderMarkdown = (value) => {
+        const text = (value || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n");
+        if (window.marked && typeof window.marked.parse === "function") {
+          return window.marked.parse(text, { breaks: true, gfm: true });
+        }
+        return escapeHtml(text).replaceAll("\n", "<br />");
+      };
+
+      const extractTagText = (source, tagName) => {
+        const regex = new RegExp(`<${tagName}>([\\s\\S]*?)</${tagName}>`, "i");
+        const match = String(source || "").match(regex);
+        return match ? match[1] : "";
+      };
+
+      const htmlDecode = (str) => {
+          if (!str) return str;
+          const txt = document.createElement('textarea');
+          txt.innerHTML = str;
+          return txt.value;
+      };
+
+      const formatToolPayloadText = (value) => {
+        if (value && typeof value === "object") {
+          if (!Array.isArray(value) && Object.keys(value).length === 0) {
+            return "";
+          }
+          return JSON.stringify(value, null, 2);
+        }
+
+        const text = String(value || "").trim();
+        if (!text) return "";
+
+        const tryPrettyJson = (raw) => {
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === "object") {
+              if (!Array.isArray(parsed) && Object.keys(parsed).length === 0) {
+                return "";
+              }
+              return JSON.stringify(parsed, null, 2);
+            }
+            if (typeof parsed === "string") {
+              const nested = parsed.trim();
+              if (!nested) return "";
+              if (nested === "{}") return "";
+              const nestedPretty = tryPrettyJson(nested);
+              if (nestedPretty !== null) {
+                return nestedPretty;
+              }
+            }
+          } catch {}
+          return null;
+        };
+
+        const asJson = tryPrettyJson(text);
+        if (asJson) return asJson;
+
+        const contentMatch = text.match(/content=(['"])([\s\S]*?)\1(?:\s|$)/);
+        if (contentMatch) {
+          const literal = contentMatch[2]
+            .replace(/\\n/g, "\n")
+            .replace(/\\r/g, "\r")
+            .replace(/\\t/g, "\t")
+            .replace(/\\"/g, '"')
+            .replace(/\\'/g, "'")
+            .replace(/\\\\/g, "\\");
+          const embeddedJson = tryPrettyJson(literal);
+          if (embeddedJson !== null) return embeddedJson;
+          return literal;
+        }
+
+        if (text === "{}") return "";
+
+        return text;
+      };
+
+      const parseToolMarkup = (rawText) => {
+          const text = String(rawText || "");
+          const calls = [];
+          let cleaned = "";
+          let cursor = 0;
+          while (true) {
+              const open = text.indexOf("<tool>", cursor);
+              if (open === -1) {
+                  cleaned += text.slice(cursor);
+                  break;
+              }
+              cleaned += text.slice(cursor, open);
+              const close = text.indexOf("</tool>", open);
+              const isIncomplete = close === -1;
+              const chunk = isIncomplete ? text.slice(open + 6) : text.slice(open + 6, close);
+              const call = {
+                  call_id: htmlDecode(extractTagText(chunk, "id") || `stream-${open}`),
+                  tool_name: htmlDecode(extractTagText(chunk, "type") || "tool"),
+                  tool_input: htmlDecode(extractTagText(chunk, "query") || ""),
+                  tool_output: htmlDecode(extractTagText(chunk, "result") || ""),
+                  ended_at: null,
+              };
+              if (!isIncomplete && call.tool_output) {
+                  call.ended_at = Date.now() / 1000;
+              }
+              calls.push(call);
+              if (isIncomplete) {
+                  break;
+              }
+              cursor = close + 7;
+          }
+          return { cleanText: cleaned, calls };
+      };
+
+      const mergeToolCalls = (baseCalls, streamCalls) => {
+        const merged = new Map();
+        (Array.isArray(baseCalls) ? baseCalls : []).forEach((call, index) => {
+          const key = call.call_id || `base-${index}`;
+          merged.set(key, call);
+        });
+        (Array.isArray(streamCalls) ? streamCalls : []).forEach((call, index) => {
+          const key = call.call_id || `stream-${index}`;
+          const prev = merged.get(key) || {};
+          merged.set(key, {
+            ...prev,
+            ...call,
+            ended_at: call.ended_at || prev.ended_at || null,
+          });
+        });
+        return Array.from(merged.values());
+      };
+
+      const sanitizeDbName = (value) =>
+        (value || "")
+          .replace(/[^A-Za-z0-9\-_.\s]/g, "")
+          .trim()
+          .replace(/\s+/g, "-")
+          .slice(0, 40);
+
+      const formatBytes = (value) => {
+        const size = Number(value) || 0;
+        if (size <= 0) return "0 B";
+        const units = ["B", "KB", "MB", "GB"];
+        let index = 0;
+        let num = size;
+        while (num >= 1024 && index < units.length - 1) {
+          num /= 1024;
+          index += 1;
+        }
+        return `${num.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+      };
+
+      const formatTime = (value) => {
+        if (!value) return t("ragStatsUnknown");
+        const date = new Date(Number(value) * 1000);
+        if (Number.isNaN(date.getTime())) return t("ragStatsUnknown");
+        return date.toLocaleString(currentLang === "zh" ? "zh-CN" : "en-US");
+      };
+
+      const updateRagCurrentInfo = () => {
+        if (!ragCurrentInfo) return;
+        const names = (selectedRagUseDbs || []).filter(Boolean);
+        if (!names.length) {
+          ragCurrentInfo.textContent = t("ragPreparedNone");
+          return;
+        }
+        ragCurrentInfo.textContent = t("ragPrepared").replace("{dbs}", names.join(", "));
+      };
+
+      const normalizeRagDbNames = (value) => {
+        if (!Array.isArray(value)) return [];
+        const deduped = [];
+        value.forEach((item) => {
+          const name = String(item || "").trim();
+          if (name && !deduped.includes(name)) {
+            deduped.push(name);
+          }
+        });
+        return deduped;
+      };
+
+      const getSessionRagDbNames = (session) => {
+        if (!session) return [];
+        return normalizeRagDbNames(session.ragDbNames);
+      };
+
+      const getCurrentRequestRagDbNames = () => {
+        const current = getActiveSession();
+        const names = [];
+        const seen = new Set();
+        const append = (value) => {
+          const name = String(value || "").trim();
+          if (!name || seen.has(name)) return;
+          seen.add(name);
+          names.push(name);
+        };
+
+        append(ragDbSelect && ragDbSelect.value ? ragDbSelect.value : "");
+        (selectedRagUseDbs || []).forEach(append);
+        getSessionRagDbNames(current).forEach(append);
+        return names;
+      };
+
+      const persistSessionRagDbNames = (session, names) => {
+        if (!session) return;
+        session.ragDbNames = normalizeRagDbNames(names);
+        session.updatedAt = Date.now();
+        saveSessions();
+      };
+
+      const renderRagDbStats = (stats) => {
+        if (!ragDbStats) return;
+        ragDbStats.innerHTML = "";
+        if (!stats || typeof stats !== "object") return;
+        const fields = [
+          [t("ragStatsDocs"), String(stats.documents_count ?? 0)],
+          [t("ragStatsChunks"), String(stats.chunks_count ?? 0)],
+          [t("ragStatsSize"), formatBytes(stats.size_bytes)],
+          [t("ragStatsUpdated"), formatTime(stats.updated_at)],
+        ];
+        fields.forEach(([label, value]) => {
+          const item = document.createElement("div");
+          item.className = "rag-db-stat-item";
+          const labelNode = document.createElement("div");
+          labelNode.className = "rag-db-stat-label";
+          labelNode.textContent = label;
+          const valueNode = document.createElement("div");
+          valueNode.className = "rag-db-stat-value";
+          valueNode.textContent = value;
+          item.appendChild(labelNode);
+          item.appendChild(valueNode);
+          ragDbStats.appendChild(item);
+        });
+      };
+
+      const loadRagDbStats = async (dbName) => {
+        if (!ragDbStats) return;
+        const requestId = ++ragDbStatsReqId;
+        if (!dbName) {
+          ragDbStats.innerHTML = "";
+          return;
+        }
+        try {
+          const response = await fetch(`/api/rag/dbs/${encodeURIComponent(dbName)}/stats`);
+          if (requestId !== ragDbStatsReqId) return;
+          if (!response.ok) {
+            ragDbStats.innerHTML = "";
+            return;
+          }
+          const data = await response.json();
+          if (requestId !== ragDbStatsReqId) return;
+          renderRagDbStats(data);
+        } catch {
+          if (requestId !== ragDbStatsReqId) return;
+          ragDbStats.innerHTML = "";
+        }
+      };
+
+      const suggestDbName = (files) => {
+        const names = Array.from(files || [])
+          .map((file) => (file.name || "").replace(/\.[^.]+$/, ""))
+          .filter(Boolean);
+        if (!names.length) return "rag-db";
+        if (names.length === 1) {
+          return sanitizeDbName(names[0]) || "rag-db";
+        }
+        const base = sanitizeDbName(names[0]) || "rag-db";
+        return `${base}-${names.length}`;
+      };
+
+      const updateAgentBubble = (bubble, message) => {
+        const openStates = {};
+        bubble.querySelectorAll("details.call-entry").forEach((entry) => {
+          const callId = entry.dataset.callId;
+          if (callId) openStates[callId] = entry.open;
+        });
+        const thinkStates = [];
+        bubble.querySelectorAll("details.think-box").forEach((entry) => {
+          thinkStates.push(entry.open);
+        });
+        bubble.innerHTML = "";
+        const rawText = message.text || "";
+        const fragments = [];
+        let i = 0;
+        const len = rawText.length;
+        let currentText = "";
+
+        const flushText = () => {
+          if (currentText.trim()) {
+            fragments.push({ type: "text", content: currentText });
+            currentText = "";
+          }
+        };
+
+        while (i < len) {
+          if (rawText[i] === '<' && (rawText.substr(i, 6) === '<think' || rawText.substr(i, 5) === '<tool')) {
+            flushText();
+            const isThink = rawText.substr(i, 6) === '<think';
+            const tagName = isThink ? 'think' : 'tool';
+            const startTag = `<${tagName}`;
+            const endTag = `</${tagName}>`;
+
+            const tagEnd = rawText.indexOf('>', i);
+            if (tagEnd === -1) {
+              currentText += rawText.slice(i);
+              break;
+            }
+
+            i = tagEnd + 1;
+            const closePos = rawText.indexOf(endTag, i);
+
+            if (closePos === -1) {
+              // 未闭合标签
+              const innerContent = rawText.slice(i);
+              if (isThink) {
+                // 未闭合的 think：剩余全部作为内容，然后结束循环
+                fragments.push({ type: "think", content: innerContent, incomplete: true });
+                break; // 重要：跳出循环，剩余内容已全部处理
+              } else {
+                // 未闭合的 tool：尝试提取已存在的子标签
+                let nextIdx = 0;
+                const extractTag = (tag, content, start) => {
+                  const open = `<${tag}>`;
+                  const close = `</${tag}>`;
+                  const openIdx = content.indexOf(open, start);
+                  if (openIdx === -1) return null;
+                  const closeIdx = content.indexOf(close, openIdx + open.length);
+                  if (closeIdx === -1) return null;
+                  const value = content.slice(openIdx + open.length, closeIdx);
+                  return { value, endIdx: closeIdx + close.length };
+                };
+
+                const idResult = extractTag('id', innerContent, nextIdx);
+                if (!idResult) {
+                  currentText += rawText.slice(i - (tagEnd - i + 1));
+                  break;
+                }
+                nextIdx = idResult.endIdx;
+
+                const typeResult = extractTag('type', innerContent, nextIdx);
+                if (!typeResult) {
+                  currentText += rawText.slice(i - (tagEnd - i + 1));
+                  break;
+                }
+                nextIdx = typeResult.endIdx;
+
+                let query = '';
+                const queryResult = extractTag('query', innerContent, nextIdx);
+                if (queryResult) {
+                  query = queryResult.value;
+                  nextIdx = queryResult.endIdx;
+                } else {
+                  const openQuery = '<query>';
+                  const openIdx = innerContent.indexOf(openQuery, nextIdx);
+                  if (openIdx !== -1) {
+                    query = innerContent.slice(openIdx + openQuery.length);
+                    nextIdx = innerContent.length;
+                  } else {
+                    currentText += rawText.slice(i - (tagEnd - i + 1));
+                    break;
+                  }
+                }
+
+                const call = {
+                  call_id: idResult.value,
+                  tool_name: typeResult.value,
+                  tool_input: query,
+                  tool_output: "",
+                  ended_at: null,
+                };
+                fragments.push({ type: "tool", call, incomplete: true });
+
+                i = i + nextIdx;
+                continue; // 继续处理剩余内容
+              }
+            }
+
+            // 正常闭合的标签
+            const innerContent = rawText.slice(i, closePos);
+            if (isThink) {
+              fragments.push({ type: "think", content: innerContent });
+            } else {
+              const call = {
+                call_id: extractTagText(innerContent, "id") || `tool-${Date.now()}`,
+                tool_name: extractTagText(innerContent, "type") || "tool",
+                tool_input: extractTagText(innerContent, "query") || "",
+                tool_output: extractTagText(innerContent, "result") || "",
+                ended_at: null,
+              };
+              if (call.tool_output) call.ended_at = Date.now() / 1000;
+              fragments.push({ type: "tool", call });
+            }
+
+            i = closePos + endTag.length;
+          } else {
+            currentText += rawText[i];
+            i++;
+          }
+        }
+
+        flushText();
+        let thinkIndex = 0;
+        let answerText = "";
+        fragments.forEach((frag) => {
+          if (frag.type === "think") {
+            if (answerText.trim()) {
+              const textBlock = document.createElement("div");
+              textBlock.className = "agent-text";
+              textBlock.innerHTML = renderMarkdown(answerText);
+              bubble.appendChild(textBlock);
+              answerText = "";
+            }
+            const thinkBox = document.createElement("details");
+            thinkBox.className = "think-box";
+            thinkBox.open = true;
+            const summary = document.createElement("summary");
+            summary.textContent = t("thinkLabel");
+            thinkBox.appendChild(summary);
+            const thinkContent = document.createElement("div");
+            thinkContent.className = "think-content";
+            thinkContent.innerHTML = renderMarkdown(frag.content.trim());
+            thinkBox.appendChild(thinkContent);
+            if (frag.incomplete) thinkBox.classList.add("incomplete");
+            bubble.appendChild(thinkBox);
+            thinkBox.open = thinkIndex < thinkStates.length ? thinkStates[thinkIndex] : true;
+            thinkIndex++;
+          } else if (frag.type === "tool") {
+            if (answerText.trim()) {
+              const textBlock = document.createElement("div");
+              textBlock.className = "agent-text";
+              textBlock.innerHTML = renderMarkdown(answerText);
+              bubble.appendChild(textBlock);
+              answerText = "";
+            }
+            const call = frag.call;
+            const isRunning = !call.ended_at;
+            const callDetails = document.createElement("details");
+            callDetails.className = "call-entry";
+            callDetails.dataset.callId = call.call_id || "";
+            if (call.call_id && Object.prototype.hasOwnProperty.call(openStates, call.call_id)) {
+              callDetails.open = openStates[call.call_id];
+            } else if (isRunning) {
+              callDetails.open = true;
+            }
+            const callSummary = document.createElement("summary");
+            const suffix = isRunning ? ` ${t("inProgress")}` : "";
+            callSummary.textContent = `${t("callLabel")} ${call.tool_name || "tool"}${suffix}`;
+            callDetails.appendChild(callSummary);
+
+            const inputText = formatToolPayloadText(call.tool_input || "") || t("pendingInput");
+            const outputText = formatToolPayloadText(call.tool_output || "")
+              || (isRunning ? t("pendingOutput") : t("emptyOutput"));
+
+            const input = document.createElement("div");
+            input.className = "call-detail";
+            input.textContent = `${t("inputLabel")}\n${inputText}`;
+
+            const output = document.createElement("div");
+            output.className = "call-detail";
+            output.textContent = `${t("outputLabel")}\n${outputText}`;
+
+            callDetails.appendChild(input);
+            callDetails.appendChild(output);
+            bubble.appendChild(callDetails);
+          } else if (frag.type === "text") {
+            answerText += frag.content;
+          }
+        });
+
+        if (answerText.trim() || !fragments.length) {
+          const textBlock = document.createElement("div");
+          textBlock.className = "agent-text";
+          textBlock.innerHTML = renderMarkdown(answerText);
+          bubble.appendChild(textBlock);
+        }
+
+        if (bubble.closest(".chat-item")?.classList.contains("streaming")) {
+          const indicator = document.createElement("div");
+          indicator.className = "stream-indicator";
+          indicator.textContent = t("generating");
+          bubble.appendChild(indicator);
+        }
+      };
+
+      const refreshNodeBubble = (session, nodeId) => {
+        const wrapper = chat.querySelector(`[data-message-id="${nodeId}"]`);
+        if (!wrapper) return;
+        const isStreaming =
+          activeStream.nodeId === nodeId && activeStream.sessionId === session.id;
+        wrapper.classList.toggle("streaming", isStreaming);
+        const bubble = wrapper.querySelector(".bubble.agent");
+        if (!bubble) return;
+        const message = getNode(session, nodeId);
+        if (!message) return;
+        updateAgentBubble(bubble, message);
+      };
+
+      const getMessageById = (id) => {
+        const current = getActiveSession();
+        if (!current) return null;
+        const node = getNode(current, id);
+        if (!node) return null;
+        return { session: current, message: node };
+      };
+
+      const buildActionButton = (label, icon, onClick) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = icon;
+        button.title = label;
+        button.setAttribute("aria-label", label);
+        button.addEventListener("click", onClick);
+        return button;
+      };
+
+      const collectMessageToolCalls = (message) => {
+        const parsedTools = parseToolMarkup(message?.text || "");
+        return mergeToolCalls(message?.toolCalls || [], parsedTools.calls || []);
+      };
+
+      const buildCopyTextForMessage = (message) => {
+        const parsedTools = parseToolMarkup(message?.text || "");
+        const content = (parsedTools.cleanText || "").trim();
+        const calls = collectMessageToolCalls(message);
+        const parts = [content];
+
+        if (Array.isArray(calls) && calls.length) {
+          const toolLines = ["", "Tool Calls:"];
+          calls.forEach((call, index) => {
+            const toolName = String(call?.tool_name || "tool");
+            const inputText = String(call?.tool_input || "").trim();
+            const outputText = String(call?.tool_output || "").trim();
+            toolLines.push(`- ${index + 1}. ${toolName}`);
+            toolLines.push("  Input:");
+            toolLines.push("```text");
+            toolLines.push(inputText || "(empty)");
+            toolLines.push("```");
+            toolLines.push("  Output:");
+            toolLines.push("```text");
+            toolLines.push(outputText || "(empty)");
+            toolLines.push("```");
+          });
+          parts.push(toolLines.join("\n"));
+        }
+
+        return parts.filter((item) => item !== "").join("\n");
+      };
+
+      const copyTextToClipboard = async (text) => {
+        const payload = String(text || "");
+        if (!payload.trim()) return false;
+        try {
+          if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+            await navigator.clipboard.writeText(payload);
+            return true;
+          }
+        } catch {}
+
+        const textarea = document.createElement("textarea");
+        textarea.value = payload;
+        textarea.setAttribute("readonly", "readonly");
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        textarea.setSelectionRange(0, textarea.value.length);
+        let ok = false;
+        try {
+          ok = document.execCommand("copy");
+        } catch {
+          ok = false;
+        }
+        document.body.removeChild(textarea);
+        return ok;
+      };
+
+      const buildCopyButton = (message) => {
+        const button = buildActionButton(t("copy"), "⧉", async () => {
+          const ok = await copyTextToClipboard(buildCopyTextForMessage(message));
+          button.title = ok ? t("copied") : t("copyFailed");
+          button.setAttribute("aria-label", ok ? t("copied") : t("copyFailed"));
+          const originalLabel = t("copy");
+          setTimeout(() => {
+            button.title = originalLabel;
+            button.setAttribute("aria-label", originalLabel);
+          }, 1200);
+        });
+        return button;
+      };
+
+      const renderVariantSwitcher = (session, message) => {
+        if (!message.parentId) {
+          return null;
+        }
+        const parent = getNode(session, message.parentId);
+        if (!parent || !Array.isArray(parent.children)) {
+          return null;
+        }
+        const wrapper = document.createElement("div");
+        wrapper.className = "variant-switch";
+        const prev = document.createElement("button");
+        prev.type = "button";
+        prev.className = "variant-nav";
+        prev.textContent = "<";
+
+        const count = document.createElement("span");
+        count.className = "variant-count";
+        const total = parent.children.length;
+        if (total <= 1) {
+          return null;
+        }
+        const index = Math.min(Math.max(parent.children.indexOf(message.id), 0), total - 1);
+        count.textContent = `${index + 1}/${total}`;
+
+        const next = document.createElement("button");
+        next.type = "button";
+        next.className = "variant-nav";
+        next.textContent = ">";
+
+        prev.disabled = index <= 0;
+        next.disabled = index >= total - 1;
+
+        prev.addEventListener("click", () => {
+          parent.activeChildId = parent.children[index - 1];
+          saveSessions();
+          renderChatFromSession();
+        });
+
+        next.addEventListener("click", () => {
+          parent.activeChildId = parent.children[index + 1];
+          saveSessions();
+          renderChatFromSession();
+        });
+
+        wrapper.appendChild(prev);
+        wrapper.appendChild(count);
+        wrapper.appendChild(next);
+        return wrapper;
+      };
+
+      let activeEditor = null;
+
+      const finishInlineEdit = (editor, shouldSave) => {
+        if (!editor || editor.finished) return;
+        editor.finished = true;
+        const { session, message, bubble, textBlock, originalText } = editor;
+        const target = message.role === "agent" ? textBlock : bubble;
+        const updatedText = (target.innerText || "").trim();
+        let newNodeId = null;
+
+        if (shouldSave && updatedText && updatedText !== originalText && message.parentId) {
+          const newNode = createNode(message.role, updatedText, {
+            toolCalls: message.role === "agent" ? [] : [],
+            parentId: message.parentId,
+          });
+          addChildNode(session, message.parentId, newNode);
+          session.updatedAt = Date.now();
+          saveSessions();
+          if (message.role === "user") {
+            newNodeId = newNode.id;
+          }
+        }
+
+        target.contentEditable = "false";
+        bubble.classList.remove("editing");
+        target.removeEventListener("blur", editor.onBlur);
+        target.removeEventListener("keydown", editor.onKeydown);
+        renderSessions();
+        renderChatFromSession();
+        if (newNodeId) {
+          setTimeout(() => {
+            continueFromMessage(newNodeId);
+          }, 0);
+        }
+        activeEditor = null;
+      };
+
+      const editMessage = (id) => {
+        const data = getMessageById(id);
+        if (!data) return;
+        const { session, message } = data;
+        const wrapper = chat.querySelector(`[data-message-id="${message.id}"]`);
+        if (!wrapper) return;
+        const bubble = wrapper.querySelector(`.bubble.${message.role}`);
+        if (!bubble) return;
+        const textBlock = message.role === "agent" ? bubble.querySelector(".agent-text") : null;
+        const target = message.role === "agent" && textBlock ? textBlock : bubble;
+
+        if (activeEditor && activeEditor.message.id !== message.id) {
+          finishInlineEdit(activeEditor, true);
+        }
+
+        const originalText = message.text || "";
+
+        bubble.classList.add("editing");
+        target.contentEditable = "true";
+        target.focus();
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        range.collapse(false);
+        const selection = window.getSelection();
+        if (selection) {
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+
+        const onBlur = () => finishInlineEdit(activeEditor, true);
+        const onKeydown = (event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            finishInlineEdit(activeEditor, true);
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            finishInlineEdit(activeEditor, false);
+          }
+        };
+
+        target.addEventListener("blur", onBlur);
+        target.addEventListener("keydown", onKeydown);
+
+        activeEditor = {
+          session,
+          message,
+          bubble,
+          textBlock,
+          originalText,
+          onBlur,
+          onKeydown,
+          finished: false,
+        };
+      };
+
+      const deleteMessage = (id) => {
+        const data = getMessageById(id);
+        if (!data) return;
+        const { session, message } = data;
+        if (!message.parentId) return;
+        const parent = getNode(session, message.parentId);
+        if (!parent) return;
+
+        // Find index of the child to remove
+        const idx = parent.children.indexOf(message.id);
+
+        // Remove the child from parent's children list
+        parent.children = parent.children.filter((childId) => childId !== message.id);
+
+        // If the removed child was the active branch, move activeChildId to a nearby sibling
+        if (parent.activeChildId === message.id) {
+          if (parent.children.length > 0) {
+            // Prefer previous sibling if exists, otherwise use the next available (which now sits at idx)
+            const newIndex = Math.min(Math.max(idx - 1, 0), parent.children.length - 1);
+            parent.activeChildId = parent.children[newIndex];
+          } else {
+            parent.activeChildId = null;
+          }
+        }
+
+        // Delete the subtree rooted at the removed node
+        deleteSubtree(session, message.id);
+        session.updatedAt = Date.now();
+        saveSessions();
+        renderSessions();
+        renderChatFromSession();
+      };
+
+      const requestAgentAnswer = async (prompt, images, stream, onUpdate, options = {}) => {
+        const current = getActiveSession();
+        const ragDbNames = getCurrentRequestRagDbNames();
+
+        // 构建当前分支的所有消息
+        const path = getActivePath(current);
+        const messages = [];
+        for (const nodeId of path) {
+            const node = getNode(current, nodeId);
+            if (!node) continue;
+            if (node.role === "user") {
+                messages.push({
+                    role: "user",
+                    content: node.text || "",
+                });
+            } else if (node.role === "agent") {
+                messages.push({
+                    role: "assistant",
+                    content: node.text || "",
+                });
+            }
+        }
+
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: prompt,
+            session_id: sessionId,
+            stream,
+            language: currentLang,
+            model: modelInput.value.trim() || null,
+            temperature: (() => {
+              const parsed = parseFloat(temperatureInput.value || "0");
+              return Number.isNaN(parsed) ? null : parsed;
+            })(),
+            images: images || [],
+            rag_db_name: ragDbNames[0] || null,
+            rag_db_names: ragDbNames,
+            force_agent: Boolean(options.forceAgent),
+            messages: messages,
+          }),
+        });
+
+        if (!response.ok) {
+          const error = await response.text();
+          throw new Error(error);
+        }
+
+        if (stream) {
+          return await readStream(response, onUpdate);
+        }
+
+        const data = await response.json();
+        const answer = data.answer || "(empty response)";
+        if (onUpdate) {
+          onUpdate(answer);
+        }
+        return answer;
+      };
+
+      const resetServerSessionState = async (targetSessionId) => {
+        if (!targetSessionId) return;
+        try {
+          await fetch("/api/reset", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: targetSessionId }),
+          });
+        } catch (err) {
+          console.error(err);
+        }
+      };
+
+      const sendMessageWithPrompt = async (prompt, displayMessage, images) => {
+        if (!prompt) return;
+        let currentSession = getActiveSession();
+        if (!currentSession) {
+          const id = sessionId || crypto.randomUUID();
+          currentSession = {
+            id,
+            title: t("newChat"),
+            messages: [],
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          };
+          sessionId = id;
+          sessions = [currentSession, ...sessions];
+          saveSessions();
+        }
+        ensureSessionTree(currentSession);
+        const leafId = getActiveLeaf(currentSession);
+        const userNode = createNode("user", displayMessage);
+        addChildNode(currentSession, leafId, userNode);
+        updateSessionTitle(currentSession, displayMessage);
+        currentSession.updatedAt = Date.now();
+        saveSessions();
+        renderSessions();
+        renderChatFromSession();
+
+        setBusy(true);
+        const agentNode = createNode("agent", "", { toolCalls: [] });
+        addChildNode(currentSession, userNode.id, agentNode);
+        currentSession.updatedAt = Date.now();
+        activeStream = { sessionId: currentSession.id, nodeId: agentNode.id };
+        saveSessions();
+        renderChatFromSession();
+        try {
+          const stream = streamSelect.value === "true";
+          const answerText = await requestAgentAnswer(
+            prompt,
+            images || [],
+            stream,
+            (text) => {
+              agentNode.text = text;
+              refreshNodeBubble(currentSession, agentNode.id);
+            }
+          );
+
+          const parsedTools = parseToolMarkup(answerText || "");
+          const toolCalls = mergeToolCalls([], parsedTools.calls || []);
+          agentNode.text = answerText;
+          agentNode.toolCalls = toolCalls;
+          currentSession.updatedAt = Date.now();
+          saveSessions();
+          renderSessions();
+          renderChatFromSession();
+        } catch (err) {
+          agentNode.text = `${t("errorPrefix")} ${err}`;
+          refreshNodeBubble(currentSession, agentNode.id);
+        } finally {
+          if (activeStream.nodeId === agentNode.id) {
+            activeStream = { sessionId: null, nodeId: null };
+            refreshNodeBubble(currentSession, agentNode.id);
+          }
+          setBusy(false);
+        }
+      };
+
+      const buildTranscript = (session, endNodeId) => {
+        ensureSessionTree(session);
+        const path = getActivePath(session);
+        const lines = [];
+        for (const nodeId of path) {
+          const node = getNode(session, nodeId);
+          if (!node) continue;
+          if (node.role === "agent") {
+            const text = (node.text || "").trim();
+            if (text) {
+              lines.push(`Assistant: ${text}`);
+            }
+          } else if (node.role === "user") {
+            const text = (node.text || "").trim();
+            if (text) {
+              lines.push(`User: ${text}`);
+            }
+          }
+          if (nodeId === endNodeId) {
+            break;
+          }
+        }
+        lines.push("Assistant:");
+        return lines.join("\n");
+      };
+
+      const continueFromMessage = async (id) => {
+        const data = getMessageById(id);
+        if (!data) return;
+        const { session, message } = data;
+        const prompt = buildTranscript(session, message.id);
+
+        const responseNode = createNode("agent", "", { toolCalls: [] });
+        addChildNode(session, message.id, responseNode);
+        session.updatedAt = Date.now();
+        activeStream = { sessionId: session.id, nodeId: responseNode.id };
+        saveSessions();
+        renderChatFromSession();
+
+        setBusy(true);
+        await resetServerSessionState(session.id);
+        try {
+          const stream = streamSelect.value === "true";
+          const answerText = await requestAgentAnswer(
+            prompt,
+            [],
+            stream,
+            (text) => {
+              responseNode.text = text;
+              refreshNodeBubble(session, responseNode.id);
+            },
+            { forceAgent: true }
+          );
+          const parsedTools = parseToolMarkup(answerText || "");
+          const toolCalls = mergeToolCalls([], parsedTools.calls || []);
+          responseNode.text = answerText;
+          responseNode.toolCalls = toolCalls;
+          session.updatedAt = Date.now();
+          saveSessions();
+          renderSessions();
+          renderChatFromSession();
+        } catch (err) {
+          responseNode.text = `${t("errorPrefix")} ${err}`;
+          refreshNodeBubble(session, responseNode.id);
+        } finally {
+          if (activeStream.nodeId === responseNode.id) {
+            activeStream = { sessionId: null, nodeId: null };
+            refreshNodeBubble(session, responseNode.id);
+          }
+          setBusy(false);
+        }
+      };
+
+      const regenerateMessage = async (id) => {
+        const data = getMessageById(id);
+        if (!data) return;
+        const { session, message } = data;
+        if (message.role !== "agent" || !message.parentId) return;
+
+        const parent = getNode(session, message.parentId);
+        if (!parent) return;
+
+        const prompt = buildTranscript(session, parent.id);
+
+        const responseNode = createNode("agent", "", { toolCalls: [] });
+        addChildNode(session, parent.id, responseNode);
+        session.updatedAt = Date.now();
+        activeStream = { sessionId: session.id, nodeId: responseNode.id };
+        saveSessions();
+        renderChatFromSession();
+
+        await resetServerSessionState(session.id);
+        setBusy(true);
+        try {
+          const stream = streamSelect.value === "true";
+          const answerText = await requestAgentAnswer(
+            prompt,
+            [],
+            stream,
+            (text) => {
+              responseNode.text = text;
+              refreshNodeBubble(session, responseNode.id);
+            },
+            { forceAgent: true }
+          );
+          responseNode.text = answerText;
+          const parsedTools = parseToolMarkup(answerText || "");
+          responseNode.toolCalls = mergeToolCalls([], parsedTools.calls || []);
+          session.updatedAt = Date.now();
+          saveSessions();
+          renderSessions();
+          renderChatFromSession();
+        } catch (err) {
+          responseNode.text = `${t("errorPrefix")} ${err}`;
+          refreshNodeBubble(session, responseNode.id);
+        } finally {
+          if (activeStream.nodeId === responseNode.id) {
+            activeStream = { sessionId: null, nodeId: null };
+            refreshNodeBubble(session, responseNode.id);
+          }
+          setBusy(false);
+        }
+      };
+
+      const renderMessageActions = (session, actions, message) => {
+        if (!actions) return;
+        actions.innerHTML = "";
+        actions.appendChild(buildCopyButton(message));
+        actions.appendChild(buildActionButton(t("edit"), "✎", () => editMessage(message.id)));
+        actions.appendChild(buildActionButton(t("deleteMessage"), "🗑", () => deleteMessage(message.id)));
+        actions.appendChild(buildActionButton(t("continue"), "↩", () => continueFromMessage(message.id)));
+        if (message.role === "agent") {
+          actions.appendChild(buildActionButton(t("regenerate"), "⟳", () => regenerateMessage(message.id)));
+        }
+        const switcher = renderVariantSwitcher(session, message);
+        if (switcher) {
+          actions.appendChild(switcher);
+        }
+      };
+
+      const renderSessions = () => {
+        sessionList.innerHTML = "";
+        sessions.forEach((session) => {
+          const row = document.createElement("div");
+          row.className = "session-row";
+
+          const item = document.createElement("button");
+          item.className = "session-item" + (session.id === sessionId ? " active" : "");
+          item.textContent = session.title || t("newChat");
+          const meta = document.createElement("span");
+          meta.className = "session-meta";
+          meta.textContent = new Date(session.updatedAt || session.createdAt).toLocaleString();
+          item.appendChild(meta);
+          item.addEventListener("click", () => switchSession(session.id));
+
+          const delButton = document.createElement("button");
+          delButton.className = "session-delete";
+          delButton.textContent = "🗑";
+          delButton.title = t("deleteChat");
+          delButton.addEventListener("click", (event) => {
+            event.stopPropagation();
+            deleteSession(session.id);
+          });
+
+          row.appendChild(item);
+          row.appendChild(delButton);
+          sessionList.appendChild(row);
+        });
+      };
+
+      const saveSessions = () => {
+        localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessions));
+        if (sessionId) {
+          localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
+        }
+      };
+
+      const loadSessions = () => {
+        const stored = localStorage.getItem(SESSION_STORAGE_KEY);
+        if (stored) {
+          try {
+            sessions = JSON.parse(stored) || [];
+          } catch (err) {
+            sessions = [];
+          }
+        }
+        if (!sessions.length) {
+          const legacyId = localStorage.getItem("nanite_session_id");
+          const id = legacyId || crypto.randomUUID();
+          sessions = [
+            {
+              id,
+              title: t("newChat"),
+              messages: [],
+              ragDbNames: [],
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            },
+          ];
+        }
+        sessions = sessions.map((session) => ({
+          ...session,
+          ragDbNames: getSessionRagDbNames(session),
+        }));
+        sessionId = localStorage.getItem(ACTIVE_SESSION_KEY) || sessions[0].id;
+      };
+
+      const getActiveSession = () => {
+        let current = sessions.find((session) => session.id === sessionId);
+        if (!current && sessions.length) {
+          sessionId = sessions[0].id;
+          current = sessions[0];
+          saveSessions();
+        }
+        if (current) {
+          ensureSessionTree(current);
+        }
+        return current || null;
+      };
+
+      const renderChatFromSession = () => {
+        chat.innerHTML = "";
+        const current = getActiveSession();
+        if (!current) return;
+        ensureSessionTree(current);
+        const path = getActivePath(current);
+        path.forEach((nodeId) => {
+          const message = getNode(current, nodeId);
+          if (!message) return;
+          if (message.role === "agent") {
+            const rendered = createChatItem("agent", true);
+            if (activeStream.nodeId === message.id && activeStream.sessionId === current.id) {
+              rendered.wrapper.classList.add("streaming");
+            }
+            rendered.wrapper.dataset.messageId = message.id;
+            updateAgentBubble(rendered.bubble, message);
+            renderMessageActions(current, rendered.actions, message);
+          } else {
+            const rendered = createChatItem("user", true);
+            rendered.wrapper.dataset.messageId = message.id;
+            rendered.bubble.innerHTML = renderMarkdown(message.text);
+            renderMessageActions(current, rendered.actions, message);
+          }
+        });
+        updateGraphFromSession(current);
+        sessionIdLabel.textContent = current.id;
+      };
+
+      const updateSessionTitle = (session, message) => {
+        if (!session.title || session.title === t("newChat")) {
+          const trimmed = message.trim();
+          session.title = trimmed ? trimmed.slice(0, 40) : t("newChat");
+        }
       };
 
       const setBusy = (busy) => {
         sendButton.disabled = busy;
         resetButton.disabled = busy;
         newSessionButton.disabled = busy;
+        attachButton.disabled = busy;
+        saveRestartButton.disabled = busy;
+        reloadSettingsButton.disabled = busy;
+        chat.classList.toggle("busy", Boolean(busy));
       };
 
-      const readStream = async (response, bubble) => {
+      const openSettings = () => {
+        settingsModal.classList.add("visible");
+        settingsModal.setAttribute("aria-hidden", "false");
+      };
+
+      const openRagManagerModal = () => {
+        selectedRagManagerDb = "";
+        if (ragDetailPane) {
+          ragDetailPane.classList.add("collapsed");
+        }
+        if (ragDbList) {
+          const dbs = Array.from(ragDbSelect?.options || []).map((opt) => opt.value);
+          renderRagDbList(dbs);
+        }
+        ragManagerModal.classList.add("visible");
+        ragManagerModal.setAttribute("aria-hidden", "false");
+      };
+
+      const closeSettingsModal = () => {
+        settingsModal.classList.remove("visible");
+        settingsModal.setAttribute("aria-hidden", "true");
+      };
+
+      const closeRagManagerModal = () => {
+        ragManagerModal.classList.remove("visible");
+        ragManagerModal.setAttribute("aria-hidden", "true");
+      };
+
+      const openRagUseModal = async () => {
+        await loadRagDbOptions(ragDbSelect && ragDbSelect.value ? ragDbSelect.value : "");
+        ragUseModal.classList.add("visible");
+        ragUseModal.setAttribute("aria-hidden", "false");
+        renderRagUseDbList(Array.from(ragDbSelect?.options || []).map((opt) => opt.value));
+      };
+
+      const closeRagUseModal = () => {
+        ragUseModal.classList.remove("visible");
+        ragUseModal.setAttribute("aria-hidden", "true");
+      };
+
+      const closeRequestModal = (result = null) => {
+        requestModal.classList.remove("visible");
+        requestModal.setAttribute("aria-hidden", "true");
+        const resolver = requestResolver;
+        requestResolver = null;
+        if (resolver) resolver(result);
+      };
+
+      const requestAction = ({ title, message, mode = "confirm", initialValue = "" }) => {
+        requestTitle.textContent = title || t("modalConfirm");
+        requestMessage.textContent = message || "";
+        if (mode === "input") {
+          requestInput.style.display = "block";
+          requestInput.value = initialValue || "";
+          setTimeout(() => requestInput.focus(), 0);
+        } else {
+          requestInput.style.display = "none";
+          requestInput.value = "";
+        }
+        requestModal.classList.add("visible");
+        requestModal.setAttribute("aria-hidden", "false");
+        return new Promise((resolve) => {
+          requestResolver = resolve;
+        });
+      };
+
+      const getSelectedRagDb = () => {
+        return selectedRagManagerDb || "";
+      };
+
+      const setSelectedRagDb = async (name) => {
+        selectedRagManagerDb = name || "";
+        if (ragDetailPane) {
+          ragDetailPane.classList.toggle("collapsed", !selectedRagManagerDb);
+        }
+      };
+
+      const renderRagDbList = (dbs) => {
+        if (!ragDbList) return;
+        ragDbList.innerHTML = "";
+        dbs.forEach((name) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = `rag-db-item${name === selectedRagManagerDb ? " active" : ""}`;
+          button.textContent = name;
+          button.addEventListener("click", async () => {
+            await setSelectedRagDb(name);
+            await loadRagDbDocs(name);
+            renderRagDbList(dbs);
+          });
+          ragDbList.appendChild(button);
+        });
+      };
+
+      const renderRagUseDbList = (dbs) => {
+        if (!ragUseDbList) return;
+        ragUseDbList.innerHTML = "";
+        const primary = (ragDbSelect && ragDbSelect.value) || selectedRagUseDbs[0] || "";
+        dbs.forEach((name) => {
+          const row = document.createElement("label");
+          row.className = `db-check-item${name === primary ? " active" : ""}`;
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = selectedRagUseDbs.includes(name);
+          checkbox.addEventListener("change", () => {
+            if (checkbox.checked) {
+              if (!selectedRagUseDbs.includes(name)) selectedRagUseDbs.push(name);
+            } else {
+              selectedRagUseDbs = selectedRagUseDbs.filter((item) => item !== name);
+            }
+            updateRagUseMeta();
+          });
+          const text = document.createElement("span");
+          text.textContent = name;
+          row.appendChild(checkbox);
+          row.appendChild(text);
+          ragUseDbList.appendChild(row);
+
+          if (name === primary) {
+            setTimeout(() => {
+              row.scrollIntoView({ block: "nearest" });
+            }, 0);
+          }
+        });
+        updateRagUseMeta();
+      };
+
+      const updateRagUseMeta = () => {
+        if (!ragUseMeta) return;
+        const primary = (ragDbSelect && ragDbSelect.value) || selectedRagUseDbs[0] || "";
+        const count = selectedRagUseDbs.length;
+        if (!primary && count === 0) {
+          ragUseMeta.textContent = t("ragUseMetaNone");
+          return;
+        }
+        ragUseMeta.textContent = t("ragUseMeta")
+          .replace("{primary}", primary || "none")
+          .replace("{count}", String(count));
+        updateRagCurrentInfo();
+      };
+
+      const applyRagUseSelection = async () => {
+        const picked = selectedRagUseDbs.filter(Boolean);
+        if (!picked.length) {
+          await updateRagSelection([], false);
+          persistSessionRagDbNames(getActiveSession(), []);
+          closeRagUseModal();
+          return;
+        }
+        const primary = picked[0];
+        if (ragDbSelect) {
+          ragDbSelect.value = primary;
+        }
+        await updateRagSelection(picked, true);
+        persistSessionRagDbNames(getActiveSession(), picked);
+        ragStatus.textContent = `${t("ragSuccess")} (${picked.length})`;
+        closeRagUseModal();
+      };
+
+      const renderAttachments = () => {
+        attachments.innerHTML = "";
+        attachmentsState.forEach((item, index) => {
+          const chip = document.createElement("div");
+          chip.className = "attachment";
+          const img = document.createElement("img");
+          img.src = item.dataUrl;
+          const label = document.createElement("span");
+          label.textContent = item.name || `${t("imageLabel")} ${index + 1}`;
+          const remove = document.createElement("button");
+          remove.textContent = t("remove");
+          remove.addEventListener("click", () => {
+            attachmentsState = attachmentsState.filter((_, idx) => idx !== index);
+            renderAttachments();
+          });
+          chip.appendChild(img);
+          chip.appendChild(label);
+          chip.appendChild(remove);
+          attachments.appendChild(chip);
+        });
+      };
+
+      const addImageFile = (file) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          attachmentsState.push({ name: file.name, dataUrl: reader.result });
+          renderAttachments();
+        };
+        reader.readAsDataURL(file);
+      };
+
+      const handleFiles = (files) => {
+        Array.from(files || []).forEach((file) => {
+          if (file.type.startsWith("image/")) {
+            addImageFile(file);
+          }
+        });
+      };
+
+      const updateRagSelection = async (dbNames, enabled) => {
+        ragStatus.textContent = t("ragBuilding");
+        try {
+          const response = await fetch("/api/rag/selection", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ db_names: dbNames || [], enable_rag: enabled }),
+          });
+          if (!response.ok) {
+            const error = await response.text();
+            ragStatus.textContent = `${t("ragFail")} ${error}`;
+            return;
+          }
+          ragStatus.textContent = t("ragSuccess");
+        } catch (err) {
+          ragStatus.textContent = `${t("ragFail")} ${err}`;
+        }
+      };
+
+      const readStream = async (response, onUpdate) => {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        const scrollThreshold = 100; // 距离底部多少像素视为“在底部”
+
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
-          bubble.textContent = buffer;
-          chat.scrollTop = chat.scrollHeight;
+          if (onUpdate) {
+            onUpdate(buffer);
+          }
+          // 自动滚动逻辑：仅当用户已在底部时才滚动
+          const { scrollTop, clientHeight, scrollHeight } = chat;
+          const atBottom = scrollHeight - (scrollTop + clientHeight) < scrollThreshold;
+          if (atBottom) {
+            chat.scrollTop = chat.scrollHeight;
+          }
         }
+        return buffer;
+      };
+
+      const autoResizeMessageInput = () => {
+        if (!messageInput) return;
+        messageInput.style.height = "auto";
+        messageInput.style.height = `${messageInput.scrollHeight}px`;
       };
 
       const sendMessage = async () => {
-        const message = messageInput.value.trim();
-        if (!message) return;
+        const rawMessage = messageInput.value.trim();
+        if (!rawMessage && attachmentsState.length === 0) return;
 
-        appendBubble(message, "user");
+        const displayMessage = rawMessage || t("imageOnly");
+        const promptMessage = rawMessage || t("imagePrompt");
+        const images = attachmentsState.map((item) => item.dataUrl);
         messageInput.value = "";
+        autoResizeMessageInput();
+        attachmentsState = [];
+        renderAttachments();
 
-        const model = modelInput.value.trim();
-        const temperature = parseFloat(temperatureInput.value || "0");
-        const stream = streamSelect.value === "true";
-
-        setBusy(true);
-        const agentBubble = appendBubble("", "agent");
-
-        try {
-          const response = await fetch("/api/chat", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              message,
-              session_id: sessionId,
-              stream,
-              model: model || null,
-              temperature: Number.isNaN(temperature) ? null : temperature,
-            }),
-          });
-
-          if (!response.ok) {
-            const error = await response.text();
-            agentBubble.textContent = `Error: ${error}`;
-            return;
-          }
-
-          if (stream) {
-            await readStream(response, agentBubble);
-          } else {
-            const data = await response.json();
-            agentBubble.textContent = data.answer || "(empty response)";
-          }
-        } catch (err) {
-          agentBubble.textContent = `Error: ${err}`;
-        } finally {
-          setBusy(false);
-        }
+        await sendMessageWithPrompt(promptMessage, displayMessage, images);
       };
 
       const resetSession = async () => {
@@ -335,19 +3132,165 @@
           console.error(err);
         }
         chat.innerHTML = "";
+        const current = getActiveSession();
+        if (current) {
+          current.messages = [];
+          current.tree = null;
+          current.updatedAt = Date.now();
+          saveSessions();
+          renderSessions();
+        }
+        graphState = { counts: {}, calls: [] };
+        startGraph();
         setBusy(false);
       };
 
       const newSession = () => {
-        sessionId = crypto.randomUUID();
-        localStorage.setItem("nanite_session_id", sessionId);
-        sessionIdLabel.textContent = sessionId;
+        const id = crypto.randomUUID();
+        const session = {
+          id,
+          title: t("newChat"),
+          messages: [],
+          ragDbNames: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        sessions = [session, ...sessions];
+        sessionId = id;
+        saveSessions();
+        renderSessions();
+        renderChatFromSession();
         resetSession();
+      };
+
+      const switchSession = (id) => {
+        sessionId = id;
+        const current = sessions.find((session) => session.id === id) || null;
+        selectedRagUseDbs = getSessionRagDbNames(current);
+        if (ragDbSelect) {
+          ragDbSelect.value = selectedRagUseDbs[0] || "";
+        }
+        updateRagUseMeta();
+        saveSessions();
+        renderSessions();
+        renderChatFromSession();
+        const active = getActiveSession();
+        if (active) {
+          updateGraphFromSession(active);
+        }
+        fetch("/api/reset", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: id }),
+        }).catch((err) => console.error(err));
+      };
+
+      const deleteSession = (id) => {
+        const idx = sessions.findIndex((session) => session.id === id);
+        if (idx === -1) return;
+
+        sessions = sessions.filter((session) => session.id !== id);
+
+        if (!sessions.length) {
+          const newId = crypto.randomUUID();
+          sessions = [
+            {
+              id: newId,
+              title: t("newChat"),
+              messages: [],
+              ragDbNames: [],
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            },
+          ];
+          sessionId = newId;
+        } else if (sessionId === id) {
+          const fallback = sessions[Math.min(idx, sessions.length - 1)];
+          sessionId = fallback.id;
+        }
+
+        saveSessions();
+        renderSessions();
+        renderChatFromSession();
+        const current = getActiveSession();
+        if (current) {
+          updateGraphFromSession(current);
+        }
+
+        fetch("/api/reset", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: id }),
+        }).catch((err) => console.error(err));
       };
 
       sendButton.addEventListener("click", sendMessage);
       resetButton.addEventListener("click", resetSession);
       newSessionButton.addEventListener("click", newSession);
+
+      attachButton.addEventListener("click", () => imageInput.click());
+      if (ragDbSelect) {
+        ragDbSelect.addEventListener("change", (event) => {
+          const value = event.target.value;
+          selectedRagUseDbs = value ? [value] : [];
+          persistSessionRagDbNames(getActiveSession(), selectedRagUseDbs);
+          loadRagDbDocs(value);
+        });
+      }
+      if (ragManagerHeaderToggle) {
+        ragManagerHeaderToggle.addEventListener("click", async () => {
+          await loadRagDbOptions(ragDbSelect && ragDbSelect.value ? ragDbSelect.value : "");
+          openRagManagerModal();
+        });
+      }
+      if (ragQuickSelect) {
+        ragQuickSelect.addEventListener("click", openRagUseModal);
+      }
+      if (ragDbCreateBtn) {
+        ragDbCreateBtn.addEventListener("click", createRagDb);
+      }
+      if (ragDbRenameBtn) {
+        ragDbRenameBtn.addEventListener("click", renameRagDb);
+      }
+      if (ragDbCloneBtn) {
+        ragDbCloneBtn.addEventListener("click", cloneRagDb);
+      }
+      if (ragDbDeleteBtn) {
+        ragDbDeleteBtn.addEventListener("click", deleteRagDb);
+      }
+      if (ragDocDeleteBtn) {
+        ragDocDeleteBtn.addEventListener("click", deleteRagDoc);
+      }
+      if (ragDocRefreshBtn) {
+        ragDocRefreshBtn.addEventListener("click", () => {
+          const dbName = ragDbSelect && ragDbSelect.value ? ragDbSelect.value : "";
+          loadRagDbDocs(dbName);
+        });
+      }
+      if (ragDocAddBtn && ragDbDocInput) {
+        ragDocAddBtn.addEventListener("click", () => ragDbDocInput.click());
+      }
+      imageInput.addEventListener("change", (event) => {
+        handleFiles(event.target.files);
+        imageInput.value = "";
+      });
+      if (ragDbDocInput) {
+        ragDbDocInput.addEventListener("change", (event) => {
+          uploadDocsToSelectedDb(event.target.files);
+          ragDbDocInput.value = "";
+        });
+      }
+
+      messageInput.addEventListener("paste", (event) => {
+        const items = event.clipboardData && event.clipboardData.items;
+        if (!items) return;
+        for (const item of items) {
+          if (item.type.startsWith("image/")) {
+            const file = item.getAsFile();
+            if (file) addImageFile(file);
+          }
+        }
+      });
 
       messageInput.addEventListener("keydown", (event) => {
         if (event.key === "Enter" && !event.shiftKey) {
@@ -355,6 +3298,992 @@
           sendMessage();
         }
       });
+
+      messageInput.addEventListener("input", autoResizeMessageInput);
+      autoResizeMessageInput();
+
+      const renderMcpLinks = () => {
+        mcpList.innerHTML = "";
+        const localItem = document.createElement("div");
+        localItem.className = "mcp-item";
+        const localText = document.createElement("span");
+        localText.textContent = t("ragServiceLabel");
+        localItem.appendChild(localText);
+        mcpList.appendChild(localItem);
+        mcpLinks.forEach((link, index) => {
+          const item = document.createElement("div");
+          item.className = "mcp-item";
+          const text = document.createElement("span");
+          text.textContent = link;
+          const remove = document.createElement("button");
+          remove.textContent = t("remove");
+          remove.addEventListener("click", () => {
+            mcpLinks = mcpLinks.filter((_, idx) => idx !== index);
+            renderMcpLinks();
+          });
+          item.appendChild(text);
+          item.appendChild(remove);
+          mcpList.appendChild(item);
+        });
+      };
+
+      const loadRagDbOptions = async (currentName) => {
+        if (!ragDbSelect) return;
+        const requestId = ++ragDbOptionsReqId;
+        ragDbSelect.innerHTML = "";
+        try {
+          const response = await fetch("/api/rag/dbs");
+          if (requestId !== ragDbOptionsReqId) return;
+          if (!response.ok) {
+            const error = await response.text();
+            ragStatus.textContent = `${t("ragFail")} ${error}`;
+            return;
+          }
+          const data = await response.json();
+          if (requestId !== ragDbOptionsReqId) return;
+          const databases = Array.isArray(data.databases) ? data.databases : [];
+          const options = new Set(databases);
+          Array.from(options).forEach((name) => {
+            const opt = document.createElement("option");
+            opt.value = name;
+            opt.textContent = name;
+            ragDbSelect.appendChild(opt);
+          });
+          if (currentName && options.has(currentName)) {
+            ragDbSelect.value = currentName;
+          } else if (ragDbSelect.options.length) {
+            ragDbSelect.value = ragDbSelect.options[0].value;
+          } else {
+            ragDbSelect.value = "";
+          }
+          if (selectedRagManagerDb && !options.has(selectedRagManagerDb)) {
+            selectedRagManagerDb = "";
+          }
+          selectedRagUseDbs = selectedRagUseDbs.filter((name) => options.has(name));
+          persistSessionRagDbNames(getActiveSession(), selectedRagUseDbs);
+          renderRagDbList(databases);
+          updateRagUseMeta();
+          if (ragUseModal?.classList.contains("visible")) {
+            renderRagUseDbList(Array.from(options));
+          }
+          if (ragDetailPane) {
+            ragDetailPane.classList.toggle("collapsed", !selectedRagManagerDb);
+          }
+          if (requestId === ragDbOptionsReqId) {
+            await loadRagDbDocs(ragDbSelect.value || "");
+          }
+        } catch (err) {
+          if (requestId !== ragDbOptionsReqId) return;
+          ragStatus.textContent = `${t("ragFail")} ${err}`;
+        }
+      };
+
+      async function loadRagDbDocs(dbName) {
+        if (!ragDocSelect) return;
+        const requestId = ++ragDbDocsReqId;
+        ragDocSelect.innerHTML = "";
+        if (!dbName) {
+          if (requestId !== ragDbDocsReqId) return;
+          renderRagDbStats(null);
+          return;
+        }
+        try {
+          await loadRagDbStats(dbName);
+          if (requestId !== ragDbDocsReqId) return;
+          const response = await fetch(`/api/rag/dbs/${encodeURIComponent(dbName)}/docs`);
+          if (requestId !== ragDbDocsReqId) return;
+          if (!response.ok) {
+            const error = await response.text();
+            ragStatus.textContent = `${t("ragFail")} ${error}`;
+            return;
+          }
+          const data = await response.json();
+          if (requestId !== ragDbDocsReqId) return;
+          const docs = Array.isArray(data.documents) ? data.documents : [];
+          docs.forEach((docName) => {
+            const opt = document.createElement("option");
+            opt.value = docName;
+            opt.textContent = docName;
+            ragDocSelect.appendChild(opt);
+          });
+        } catch (err) {
+          if (requestId !== ragDbDocsReqId) return;
+          ragStatus.textContent = `${t("ragFail")} ${err}`;
+        }
+      }
+
+      async function createRagDb() {
+        const raw = await requestAction({
+          title: t("modalCreateDb"),
+          message: t("ragDb"),
+          mode: "input",
+          initialValue: "rag-db",
+        });
+        const name = sanitizeDbName(raw);
+        if (!name) return;
+        try {
+          const response = await fetch("/api/rag/dbs/create", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name }),
+          });
+          if (!response.ok) {
+            const error = await response.text();
+            ragStatus.textContent = `${t("ragFail")} ${error}`;
+            return;
+          }
+          await setSelectedRagDb(name);
+          await loadRagDbOptions(name);
+          ragStatus.textContent = t("ragSuccess");
+        } catch (err) {
+          ragStatus.textContent = `${t("ragFail")} ${err}`;
+        }
+      }
+
+      async function renameRagDb() {
+        const oldName = getSelectedRagDb();
+        if (!oldName) {
+          ragStatus.textContent = t("ragNoDb");
+          return;
+        }
+        const newName = sanitizeDbName(
+          (await requestAction({
+            title: t("modalRenameDb"),
+            message: t("ragDb"),
+            mode: "input",
+            initialValue: oldName,
+          })) || ""
+        );
+        if (!newName) return;
+        try {
+          const response = await fetch("/api/rag/dbs/rename", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ old_name: oldName, new_name: newName }),
+          });
+          if (!response.ok) {
+            const error = await response.text();
+            ragStatus.textContent = `${t("ragFail")} ${error}`;
+            return;
+          }
+          await setSelectedRagDb(newName);
+          await loadRagDbOptions(newName);
+          ragStatus.textContent = t("ragSuccess");
+        } catch (err) {
+          ragStatus.textContent = `${t("ragFail")} ${err}`;
+        }
+      }
+
+      async function cloneRagDb() {
+        const sourceName = getSelectedRagDb();
+        if (!sourceName) {
+          ragStatus.textContent = t("ragNoDb");
+          return;
+        }
+        const targetName = sanitizeDbName(
+          (await requestAction({
+            title: t("modalCloneDb"),
+            message: t("ragDb"),
+            mode: "input",
+            initialValue: `${sourceName}-clone`,
+          })) || ""
+        );
+        if (!targetName) return;
+        try {
+          const response = await fetch("/api/rag/dbs/clone", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ source_name: sourceName, target_name: targetName }),
+          });
+          if (!response.ok) {
+            const error = await response.text();
+            ragStatus.textContent = `${t("ragFail")} ${error}`;
+            return;
+          }
+          await setSelectedRagDb(targetName);
+          await loadRagDbOptions(targetName);
+          ragStatus.textContent = t("ragSuccess");
+        } catch (err) {
+          ragStatus.textContent = `${t("ragFail")} ${err}`;
+        }
+      }
+
+      async function deleteRagDb() {
+        const name = getSelectedRagDb();
+        if (!name) {
+          ragStatus.textContent = t("ragNoDb");
+          return;
+        }
+        const ok = await requestAction({
+          title: t("modalDeleteDb"),
+          message: `${t("ragConfirmDeleteDb")}: ${name}?`,
+          mode: "confirm",
+        });
+        if (!ok) return;
+        try {
+          const response = await fetch(`/api/rag/dbs/${encodeURIComponent(name)}`, {
+            method: "DELETE",
+          });
+          if (!response.ok) {
+            const error = await response.text();
+            ragStatus.textContent = `${t("ragFail")} ${error}`;
+            return;
+          }
+          selectedRagManagerDb = "";
+          await loadRagDbOptions("");
+          ragStatus.textContent = t("ragSuccess");
+        } catch (err) {
+          ragStatus.textContent = `${t("ragFail")} ${err}`;
+        }
+      }
+
+      async function deleteRagDoc() {
+        const dbName = getSelectedRagDb();
+        const docName = ragDocSelect && ragDocSelect.value ? ragDocSelect.value : "";
+        if (!dbName) {
+          ragStatus.textContent = t("ragNoDb");
+          return;
+        }
+        if (!docName) {
+          ragStatus.textContent = t("ragNoDoc");
+          return;
+        }
+        const ok = await requestAction({
+          title: t("modalDeleteDoc"),
+          message: `${t("ragConfirmDeleteDoc")}: ${docName}?`,
+          mode: "confirm",
+        });
+        if (!ok) return;
+        try {
+          ragStatus.textContent = t("ragBuilding");
+          const response = await fetch(
+            `/api/rag/dbs/${encodeURIComponent(dbName)}/docs/${encodeURIComponent(docName)}`,
+            { method: "DELETE" }
+          );
+          if (!response.ok) {
+            const error = await response.text();
+            ragStatus.textContent = `${t("ragFail")} ${error}`;
+            return;
+          }
+          await loadRagDbDocs(dbName);
+          ragStatus.textContent = t("ragSuccess");
+        } catch (err) {
+          ragStatus.textContent = `${t("ragFail")} ${err}`;
+        }
+      }
+
+      async function uploadDocsToSelectedDb(files) {
+        const dbName = getSelectedRagDb();
+        if (!dbName) {
+          ragStatus.textContent = t("ragNoDb");
+          return;
+        }
+        if (!files || !files.length) return;
+        ragStatus.textContent = t("ragUploading");
+        const form = new FormData();
+        Array.from(files).forEach((item) => form.append("files", item));
+        try {
+          const response = await fetch(`/api/rag/dbs/${encodeURIComponent(dbName)}/docs/upload`, {
+            method: "POST",
+            body: form,
+          });
+          if (!response.ok) {
+            const error = await response.text();
+            ragStatus.textContent = `${t("ragFail")} ${error}`;
+            return;
+          }
+          ragStatus.textContent = t("ragBuilding");
+          const data = await response.json();
+          ragStatus.textContent = `${t("ragSuccess")} (${data.added || 0})`;
+          await loadRagDbDocs(dbName);
+        } catch (err) {
+          ragStatus.textContent = `${t("ragFail")} ${err}`;
+        }
+      }
+
+      const meta = {
+        TEMPERATURE: { type: "range", min: 0, max: 2, step: 0.1 },
+        CHUNK_SIZE: { type: "range", min: 100, max: 2048, step: 10 },
+        CHUNK_OVERLAP: { type: "range", min: 0, max: 200, step: 5 },
+        SIMILARITY_TOP_K: { type: "range", min: 1, max: 20, step: 1 },
+        RERANK_TOP_N: { type: "range", min: 1, max: 10, step: 1 },
+        RAG_CONFIDENCE_THRESHOLD: { type: "range", min: 0, max: 1, step: 0.05 },
+        MIN_RAG_SOURCES: { type: "range", min: 1, max: 10, step: 1 },
+        SAMPLE_FOR_TRAINING: { type: "range", min: 1, max: 5000, step: 50 },
+        MAX_ITERATIONS: { type: "range", min: 1, max: 20, step: 1 },
+        MAX_TOTAL_TOKENS: { type: "range", min: 1000, max: 16000, step: 100 },
+        MAX_HISTORY_ROUNDS: { type: "range", min: 1, max: 50, step: 1 },
+        CACHE_TTL: { type: "range", min: 60, max: 7200, step: 60 },
+        MEMORY_CACHE_MAXSIZE: { type: "range", min: 10, max: 5000, step: 10 },
+        LOG_MAX_BYTES: { type: "range", min: 1024 * 1024, max: 50 * 1024 * 1024, step: 1024 * 1024 },
+        LOG_BACKUP_COUNT: { type: "range", min: 1, max: 20, step: 1 },
+        BATCH_CONCURRENCY: { type: "range", min: 1, max: 20, step: 1 },
+        OCR_TIMEOUT: { type: "range", min: 10, max: 300, step: 5 },
+        VECTOR_STORE_TYPE: { type: "select", options: ["chroma", "faiss"] },
+        FAISS_INDEX_TYPE: { type: "select", options: ["Flat", "IVF"] },
+        CACHE_TYPE: { type: "select", options: ["memory", "redis"] },
+        ENV: { type: "select", options: ["dev", "test", "prod"] },
+      };
+
+      const sections = [
+        {
+          title: t("sectionGeneral"),
+          keys: ["ENV", "DATA_DIR", "PERSIST_DIR", "OFFLINE_ONLY"],
+        },
+        {
+          title: t("sectionModels"),
+          keys: [
+            "OPENAI_API_KEY",
+            "OPENAI_API_URL",
+            "LLM_MODEL",
+            "TEMPERATURE",
+            "EMBED_MODEL",
+            "EMBED_DIM",
+          ],
+        },
+        {
+          title: t("sectionRag"),
+          keys: [
+            "ENABLE_RAG",
+            "CHUNK_SIZE",
+            "CHUNK_OVERLAP",
+            "SIMILARITY_TOP_K",
+            "ENABLE_RERANK",
+            "RERANK_MODEL",
+            "RERANK_TOP_N",
+            "RAG_CONFIDENCE_THRESHOLD",
+            "MIN_RAG_SOURCES",
+            "VECTOR_STORE_TYPE",
+            "FAISS_INDEX_TYPE",
+            "SAMPLE_FOR_TRAINING",
+            "VECTOR_STORE_FALLBACK_WARNING",
+          ],
+        },
+        {
+          title: t("sectionCache"),
+          keys: ["CACHE_TYPE", "REDIS_URL", "CACHE_TTL", "MEMORY_CACHE_MAXSIZE"],
+        },
+        {
+          title: t("sectionMcp"),
+          keys: [
+            "MCP_FETCH_SERVER_COMMAND",
+            "MCP_TIMEOUT",
+            "MCP_INIT_TIMEOUT",
+            "MCP_MAX_RESTART",
+            "MCP_RETRY_TIMES",
+            "MCP_RETRY_DELAY",
+          ],
+        },
+        {
+          title: t("sectionAgent"),
+          keys: [
+            "AGENT_VERBOSE",
+            "MAX_ITERATIONS",
+            "MAX_TOTAL_TOKENS",
+            "MAX_HISTORY_ROUNDS",
+            "SYSTEM_PROMPT",
+            "BATCH_CONCURRENCY",
+          ],
+        },
+        {
+          title: t("sectionLogging"),
+          keys: ["LOG_LEVEL", "LOG_FILE", "LOG_MAX_BYTES", "LOG_BACKUP_COUNT"],
+        },
+        {
+          title: t("sectionOcr"),
+          keys: ["OCR_API_KEY", "OCR_API_URL", "OCR_MODEL", "OCR_PROMPT", "OCR_TIMEOUT"],
+        },
+      ];
+
+      const renderSettings = (settings) => {
+        settingsForm.innerHTML = "";
+        const buildField = (key, value) => {
+          if (key === "MCP_SERVER_URLS") {
+            return null;
+          }
+          const wrapper = document.createElement("div");
+          wrapper.className = "field";
+          const label = document.createElement("label");
+          label.textContent = key;
+          wrapper.appendChild(label);
+
+          const config = meta[key] || {};
+          let input;
+          let valueType = typeof value;
+
+          if (config.type === "select") {
+            input = document.createElement("select");
+            config.options.forEach((option) => {
+              const opt = document.createElement("option");
+              opt.value = option;
+              opt.textContent = option;
+              if (String(value) === option) {
+                opt.selected = true;
+              }
+              input.appendChild(opt);
+            });
+          } else if (config.type === "range" && typeof value === "number") {
+            const row = document.createElement("div");
+            row.className = "range-row";
+
+            const range = document.createElement("input");
+            range.type = "range";
+            range.min = config.min;
+            range.max = config.max;
+            range.step = config.step;
+            range.value = value;
+            range.dataset.key = key;
+            range.dataset.type = "number";
+            range.dataset.role = "range";
+
+            const number = document.createElement("input");
+            number.type = "number";
+            number.min = config.min;
+            number.max = config.max;
+            number.step = config.step;
+            number.value = value;
+            number.dataset.key = key;
+            number.dataset.type = "number";
+            number.dataset.role = "number";
+
+            range.addEventListener("input", () => {
+              number.value = range.value;
+            });
+            number.addEventListener("input", () => {
+              range.value = number.value;
+            });
+
+            row.appendChild(range);
+            row.appendChild(number);
+            wrapper.appendChild(row);
+            return wrapper;
+          } else if (typeof value === "boolean") {
+            input = document.createElement("input");
+            input.type = "checkbox";
+            input.checked = value;
+          } else if (typeof value === "number") {
+            input = document.createElement("input");
+            input.type = "number";
+            input.step = Number.isInteger(value) ? "1" : "0.1";
+            input.value = value;
+          } else if (Array.isArray(value)) {
+            input = document.createElement("textarea");
+            input.value = value.join("\n");
+            valueType = "array";
+          } else if (typeof value === "string" && (value.includes("\n") || key.endsWith("PROMPT"))) {
+            input = document.createElement("textarea");
+            input.value = value;
+          } else {
+            input = document.createElement("input");
+            input.type = "text";
+            input.value = value ?? "";
+          }
+
+          input.dataset.key = key;
+          input.dataset.type = valueType;
+          wrapper.appendChild(input);
+          return wrapper;
+        };
+
+        sections.forEach((section) => {
+          const sectionWrapper = document.createElement("div");
+          sectionWrapper.className = "settings-section";
+
+          const title = document.createElement("div");
+          title.className = "section-title";
+          title.textContent = section.title;
+          sectionWrapper.appendChild(title);
+
+          const grid = document.createElement("div");
+          grid.className = "settings-grid";
+
+          section.keys.forEach((key) => {
+            if (!(key in settings)) {
+              return;
+            }
+            const field = buildField(key, settings[key]);
+            if (field) {
+              grid.appendChild(field);
+            }
+          });
+
+          sectionWrapper.appendChild(grid);
+          settingsForm.appendChild(sectionWrapper);
+        });
+      };
+
+      const loadSettings = async () => {
+        settingsStatus.textContent = t("loadingSettings");
+        try {
+          const response = await fetch("/api/settings");
+          if (!response.ok) {
+            settingsStatus.textContent = t("settingsLoadFail");
+            return;
+          }
+          const data = await response.json();
+          mcpLinks = Array.isArray(data.settings.MCP_SERVER_URLS)
+            ? data.settings.MCP_SERVER_URLS
+            : [];
+          renderMcpLinks();
+          renderSettings(data.settings || {});
+          if (data.settings) {
+            const current = getActiveSession();
+            const sessionRagDbs = getSessionRagDbNames(current);
+            if (sessionRagDbs.length) {
+              selectedRagUseDbs = sessionRagDbs;
+            } else if (Array.isArray(data.settings.RAG_DB_NAMES) && data.settings.RAG_DB_NAMES.length) {
+              selectedRagUseDbs = normalizeRagDbNames(data.settings.RAG_DB_NAMES);
+              persistSessionRagDbNames(current, selectedRagUseDbs);
+            } else {
+              selectedRagUseDbs = data.settings.RAG_DB_NAME ? [data.settings.RAG_DB_NAME] : [];
+              persistSessionRagDbNames(current, selectedRagUseDbs);
+            }
+            loadRagDbOptions(selectedRagUseDbs[0] || data.settings.RAG_DB_NAME || "");
+            updateRagUseMeta();
+            if (data.settings.LLM_MODEL) {
+              modelInput.placeholder = String(data.settings.LLM_MODEL);
+            }
+          }
+          settingsStatus.textContent = "";
+        } catch (err) {
+          settingsStatus.textContent = `${t("settingsLoadFailDetail")} ${err}`;
+        }
+      };
+
+      const collectSettings = () => {
+        const inputs = settingsForm.querySelectorAll("input, textarea, select");
+        const settings = {};
+        inputs.forEach((input) => {
+          const key = input.dataset.key;
+          const type = input.dataset.type;
+          if (!key) return;
+          if (input.dataset.role === "range") {
+            return;
+          }
+          if (input.type === "checkbox") {
+            settings[key] = input.checked;
+          } else if (type === "array") {
+            settings[key] = input.value
+              .split("\n")
+              .map((line) => line.trim())
+              .filter(Boolean);
+          } else if (input.tagName.toLowerCase() === "select") {
+            settings[key] = input.value;
+          } else if (type === "number") {
+            const parsed = Number(input.value);
+            settings[key] = Number.isNaN(parsed) ? 0 : parsed;
+          } else {
+            settings[key] = input.value;
+          }
+        });
+        settings.MCP_SERVER_URLS = mcpLinks;
+        return settings;
+      };
+
+      const saveAndRestart = async () => {
+        settingsStatus.textContent = t("settingsSave");
+        const settings = collectSettings();
+        try {
+          const response = await fetch("/api/settings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ settings, restart: true }),
+          });
+          if (!response.ok) {
+            const error = await response.text();
+            settingsStatus.textContent = `${t("settingsSaveFail")} ${error}`;
+            return;
+          }
+          settingsStatus.textContent = t("settingsSaved");
+        } catch (err) {
+          settingsStatus.textContent = `${t("settingsSaveFail")} ${err}`;
+        }
+      };
+
+      reloadSettingsButton.addEventListener("click", loadSettings);
+      saveRestartButton.addEventListener("click", saveAndRestart);
+      settingsToggle.addEventListener("click", () => {
+        openSettings();
+        loadSettings();
+      });
+      if (settingsCloseX) {
+        settingsCloseX.addEventListener("click", closeSettingsModal);
+      }
+      if (ragManagerCloseX) {
+        ragManagerCloseX.addEventListener("click", closeRagManagerModal);
+      }
+      if (ragUseCloseX) {
+        ragUseCloseX.addEventListener("click", closeRagUseModal);
+      }
+      if (ragUseApplyBtn) {
+        ragUseApplyBtn.addEventListener("click", applyRagUseSelection);
+      }
+      if (requestCloseX) {
+        requestCloseX.addEventListener("click", () => closeRequestModal(null));
+      }
+      if (requestCancelBtn) {
+        requestCancelBtn.addEventListener("click", () => closeRequestModal(null));
+      }
+      if (requestConfirmBtn) {
+        requestConfirmBtn.addEventListener("click", () => {
+          if (requestInput.style.display === "none") {
+            closeRequestModal(true);
+          } else {
+            closeRequestModal(requestInput.value || "");
+          }
+        });
+      }
+      settingsModal.addEventListener("click", (event) => {
+        if (event.target === settingsModal) {
+          closeSettingsModal();
+        }
+      });
+      if (ragManagerModal) {
+        ragManagerModal.addEventListener("click", (event) => {
+          if (event.target === ragManagerModal) {
+            closeRagManagerModal();
+          }
+        });
+      }
+      if (ragUseModal) {
+        ragUseModal.addEventListener("click", (event) => {
+          if (event.target === ragUseModal) {
+            closeRagUseModal();
+          }
+        });
+      }
+      if (requestModal) {
+        requestModal.addEventListener("click", (event) => {
+          if (event.target === requestModal) {
+            closeRequestModal(null);
+          }
+        });
+      }
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          closeSettingsModal();
+          closeRagManagerModal();
+          closeRagUseModal();
+          closeRequestModal(null);
+        }
+      });
+
+      if (requestInput) {
+        requestInput.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            closeRequestModal(requestInput.value || "");
+          }
+        });
+      }
+
+      const drawGraph = (timestamp) => {
+        if (!toolGraph) return;
+        const ctx = toolGraph.getContext("2d");
+        if (!ctx) return;
+        const rect = toolGraph.getBoundingClientRect();
+        const width = rect.width;
+        const height = rect.height;
+        if (toolGraph.width !== width || toolGraph.height !== height) {
+          toolGraph.width = width;
+          toolGraph.height = height;
+        }
+        ctx.clearRect(0, 0, width, height);
+        const center = { x: width / 2, y: height / 2 };
+        const toolNames = Object.keys(graphState.counts || {});
+        if (!toolNames.length) {
+          ctx.fillStyle = "rgba(154, 163, 178, 0.7)";
+          ctx.font = "14px 'IBM Plex Mono', monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(t("noToolCallsGraph"), center.x, center.y);
+          graphAnimationId = requestAnimationFrame(drawGraph);
+          return;
+        }
+        const radius = Math.min(width, height) * 0.32;
+        const angleStep = (Math.PI * 2) / toolNames.length;
+        const timeOffset = (timestamp || 0) / 40;
+        const rotation = (timestamp || 0) / 2400;
+
+        toolNames.forEach((toolName, index) => {
+          const angle = angleStep * index - Math.PI / 2 + rotation;
+          const x = center.x + radius * Math.cos(angle);
+          const y = center.y + radius * Math.sin(angle);
+          const count = graphState.counts[toolName] || 0;
+
+          ctx.strokeStyle = "rgba(107, 209, 245, 0.6)";
+          ctx.lineWidth = 1 + Math.min(count, 6);
+          ctx.setLineDash([8, 8]);
+          ctx.lineDashOffset = -timeOffset;
+          ctx.beginPath();
+          ctx.moveTo(center.x, center.y);
+          ctx.lineTo(x, y);
+          ctx.stroke();
+
+          ctx.setLineDash([]);
+          ctx.fillStyle = "rgba(245, 194, 107, 0.85)";
+          ctx.beginPath();
+          ctx.arc(x, y, 10, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = "#0a0b0f";
+          ctx.font = "11px 'IBM Plex Mono', monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(String(count), x, y + 4);
+
+          ctx.fillStyle = "rgba(246, 247, 251, 0.85)";
+          ctx.font = "12px 'Space Grotesk', sans-serif";
+          ctx.fillText(toolName, x, y + 24);
+        });
+
+        const pulse = 1.5 + Math.sin((timestamp || 0) / 260) * 1.2;
+        ctx.strokeStyle = "rgba(245, 194, 107, 0.35)";
+        ctx.lineWidth = pulse;
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, 22, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = "rgba(245, 194, 107, 0.95)";
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, 16, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#0a0b0f";
+        ctx.font = "12px 'IBM Plex Mono', monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("LLM", center.x, center.y + 4);
+
+        graphAnimationId = requestAnimationFrame(drawGraph);
+      };
+
+      const startGraph = () => {
+        if (graphAnimationId) cancelAnimationFrame(graphAnimationId);
+        graphAnimationId = requestAnimationFrame(drawGraph);
+      };
+
+      const updateGraphFromSession = (session) => {
+        ensureSessionTree(session);
+        const path = getActivePath(session);
+        const counts = {};
+        const calls = [];
+        path.forEach((nodeId) => {
+          const node = getNode(session, nodeId);
+          if (!node || !Array.isArray(node.toolCalls)) return;
+          node.toolCalls.forEach((call) => {
+            const name = call.tool_name || "tool";
+            counts[name] = (counts[name] || 0) + 1;
+            calls.push(call);
+          });
+        });
+        graphState = { counts, calls };
+        startGraph();
+      };
+
+      const loadCapabilities = async () => {
+        try {
+          const response = await fetch("/api/capabilities");
+          if (!response.ok) return;
+          const data = await response.json();
+          capabilities = {
+            tool_calling_supported:
+              typeof data.tool_calling_supported === "boolean"
+                ? data.tool_calling_supported
+                : null,
+            multimodal_supported:
+              typeof data.multimodal_supported === "boolean"
+                ? data.multimodal_supported
+                : null,
+          };
+          if (capabilities.tool_calling_supported === false) {
+            toolBanner.classList.add("visible");
+          } else {
+            toolBanner.classList.remove("visible");
+          }
+        } catch (err) {
+          console.error(err);
+        }
+      };
+
+      langToggle.addEventListener("click", () => {
+        currentLang = currentLang === "en" ? "zh" : "en";
+        localStorage.setItem(LANG_STORAGE_KEY, currentLang);
+        applyTranslations();
+        renderSessions();
+        renderChatFromSession();
+        startGraph();
+      });
+
+      const createDebugApi = () => {
+        const buildChatPayload = (message, options = {}) => {
+          const ragDbNames = getCurrentRequestRagDbNames();
+          return {
+            message: String(message || ""),
+            session_id: sessionId,
+            stream: Boolean(options.stream),
+            language: currentLang,
+            model: modelInput.value.trim() || null,
+            temperature: (() => {
+              const parsed = parseFloat(temperatureInput.value || "0");
+              return Number.isNaN(parsed) ? null : parsed;
+            })(),
+            images: Array.isArray(options.images) ? options.images : [],
+            rag_db_name: ragDbNames[0] || null,
+            rag_db_names: ragDbNames,
+            force_agent: Boolean(options.forceAgent),
+            messages: Array.isArray(options.messages) ? options.messages : null,
+          };
+        };
+
+        const postJson = async (url, body) => {
+          const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body || {}),
+          });
+          if (!response.ok) {
+            const error = await response.text();
+            throw new Error(error || `HTTP ${response.status}`);
+          }
+          return response;
+        };
+
+        const debug = {
+          help() {
+            const commands = [
+              "naniteDebug.exec('chat 你好')",
+              "naniteDebug.exec('stream 请调用工具并解释过程')",
+              "naniteDebug.exec('tools')",
+              "naniteDebug.exec('tool rag_vector_search {\"query\":\"LLM\",\"limit\":3}')",
+              "naniteDebug.exec('usage')",
+              "naniteDebug.exec('reset-usage')",
+              "naniteDebug.exec('reset-session')",
+              "naniteDebug.chat('测试工具调用', { forceAgent: true })",
+              "naniteDebug.stream('测试流式工具调用')",
+              "naniteDebug.tools()",
+              "naniteDebug.tool('rag_vector_search', { query: 'LLM', limit: 3 })",
+            ];
+            console.log("Nanite debug commands:\n" + commands.join("\n"));
+            return commands;
+          },
+          session() {
+            return {
+              sessionId: sessionId,
+              ragDbNames: getCurrentRequestRagDbNames(),
+              lang: currentLang,
+            };
+          },
+          async chat(message, options = {}) {
+            const payload = buildChatPayload(message, { ...options, stream: false });
+            const response = await postJson("/api/chat", payload);
+            const data = await response.json();
+            console.log("[naniteDebug.chat] payload=", payload);
+            console.log("[naniteDebug.chat] response=", data);
+            return data;
+          },
+          async stream(message, options = {}) {
+            const payload = buildChatPayload(message, { ...options, stream: true });
+            const response = await postJson("/api/chat", payload);
+            const text = await readStream(response, null);
+            console.log("[naniteDebug.stream] payload=", payload);
+            console.log("[naniteDebug.stream] text=", text);
+            return { text };
+          },
+          async tools() {
+            const response = await fetch("/api/debug/tools");
+            if (!response.ok) {
+              const error = await response.text();
+              throw new Error(error || `HTTP ${response.status}`);
+            }
+            const data = await response.json();
+            console.log("[naniteDebug.tools]", data);
+            return data;
+          },
+          async tool(toolName, toolArgs = {}, options = {}) {
+            const ragDbNames = getCurrentRequestRagDbNames();
+            const normalizedArgs =
+              toolArgs && typeof toolArgs === "object" && !Array.isArray(toolArgs)
+                ? toolArgs
+                : {};
+            const payload = {
+              session_id: sessionId,
+              tool_name: String(toolName || "").trim(),
+              tool_args: normalizedArgs,
+              rag_db_name: ragDbNames[0] || null,
+              rag_db_names: ragDbNames,
+              ...options,
+            };
+            const response = await postJson("/api/debug/tool-invoke", payload);
+            const data = await response.json();
+            console.log("[naniteDebug.tool] payload=", payload);
+            console.log("[naniteDebug.tool] response=", data);
+            return data;
+          },
+          async usage(targetSessionId = sessionId) {
+            const response = await fetch(`/api/tool-usage?session_id=${encodeURIComponent(targetSessionId || "")}`);
+            if (!response.ok) {
+              const error = await response.text();
+              throw new Error(error || `HTTP ${response.status}`);
+            }
+            const data = await response.json();
+            console.log("[naniteDebug.usage]", data);
+            return data;
+          },
+          async resetUsage(targetSessionId = sessionId) {
+            await postJson("/api/tool-usage/reset", { session_id: targetSessionId });
+            console.log("[naniteDebug.resetUsage] ok", targetSessionId);
+            return { ok: true, session_id: targetSessionId };
+          },
+          async resetSession(targetSessionId = sessionId) {
+            await postJson("/api/reset", { session_id: targetSessionId });
+            console.log("[naniteDebug.resetSession] ok", targetSessionId);
+            return { ok: true, session_id: targetSessionId };
+          },
+          async exec(commandLine) {
+            const raw = String(commandLine || "").trim();
+            if (!raw) return this.help();
+            const firstSpace = raw.indexOf(" ");
+            const command = (firstSpace === -1 ? raw : raw.slice(0, firstSpace)).toLowerCase();
+            const arg = firstSpace === -1 ? "" : raw.slice(firstSpace + 1).trim();
+            if (command === "chat") return this.chat(arg);
+            if (command === "stream") return this.stream(arg);
+            if (command === "tools") return this.tools();
+            if (command === "tool") {
+              if (!arg) return this.help();
+              const sep = arg.indexOf(" ");
+              const toolName = sep === -1 ? arg : arg.slice(0, sep).trim();
+              const argsText = sep === -1 ? "" : arg.slice(sep + 1).trim();
+              let parsedArgs = {};
+              if (argsText) {
+                try {
+                  parsedArgs = JSON.parse(argsText);
+                } catch {
+                  throw new Error("tool 命令参数必须是 JSON，例如: tool rag_vector_search {\"query\":\"LLM\"}");
+                }
+              }
+              return this.tool(toolName, parsedArgs);
+            }
+            if (command === "usage") return this.usage();
+            if (command === "reset-usage") return this.resetUsage();
+            if (command === "reset-session") return this.resetSession();
+            return this.help();
+          },
+        };
+        return debug;
+      };
+
+      window.naniteDebug = createDebugApi();
+
+      applyTranslations();
+      if (streamSelect) {
+        streamSelect.value = "true";
+      }
+      loadSessions();
+      renderSessions();
+      renderChatFromSession();
+      loadCapabilities();
+      loadSettings();
+      const currentSession = getActiveSession();
+      if (currentSession) {
+        updateGraphFromSession(currentSession);
+      }
     </script>
   </body>
 </html>

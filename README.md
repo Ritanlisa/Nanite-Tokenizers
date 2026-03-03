@@ -19,7 +19,7 @@ Project layout
 
 Quickstart
 ----------
-- Install editable: `python -m pip install -e .`
+- Install dependencies: `uv sync`
 - Demo: `python -m nanite_tokenizers demo`
 - Train: `python -m nanite_tokenizers train --model-index 0`
 - Download tokenizer: `python -m nanite_tokenizers download`
@@ -39,6 +39,19 @@ New components live at the repo root:
 - `mcp/`: MCP fetch client
 - `agent/`: tools, memory, agent executor
 - `tests/`: pytest examples
+
+Agent Skills
+------------
+Built-in skill tools are enabled by default and exposed to the agent via tool-calling:
+- `skill_shell`: execute shell commands in workspace (with timeout/safety filter)
+- `skill_file_io`: read/write/list/mkdir inside workspace root only
+- `skill_bing_search`: Bing web search via HTML crawling parser
+- Copilot-compatible aliases are also registered (e.g. `createDirectory`, `createFile`,
+  `readFile`, `listDirectory`, `runInTerminal`, `runCommand`, `fileSearch`, `textSearch`,
+  `fetch`, `changes`, etc.). Some advanced notebook/terminal/session APIs are placeholders
+  in local runtime and will return a clear "not implemented" message.
+
+Related switches are in `settings.yaml` (`ENABLE_AGENT_SKILLS`, `ENABLE_*_SKILL`).
 
 Run the agent
 -------------

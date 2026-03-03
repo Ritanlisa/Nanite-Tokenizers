@@ -1,24 +1,85 @@
-# Python-generated files
+# =========================
+# Operating system / editor
+# =========================
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# =========================
+# Python bytecode / cache
+# =========================
 __pycache__/
-*.py[oc]
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+
+# =========================
+# Build / packaging outputs
+# =========================
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
 
+# =========================
 # Virtual environments
+# =========================
 .venv/
+venv/
+env/
 
-# Local secrets and logs
-.env
-logs/
-storage/
-data/
-
-# Weights and models
-models/
-*.gguf
-
-# uv files
-uv.lock
+# =========================
+# Python toolchain metadata
+# =========================
 .python-version
+uv.lock
+
+# =========================
+# Logs / runtime artifacts
+# =========================
+logs/*
+!logs/.gitkeep
+*.log
+
+# =========================
+# Secrets / local config
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Large model / dataset files
+# =========================
+models/
+dataset/
+*.gguf
+*.pt
+*.bin
+*.safetensors
+
+# =========================
+# Vector DB / local storage
+# =========================
+data/*
+!data/.gitkeep
+database/*
+!database/.gitkeep
+storage/*
+!storage/.gitkeep
+tmp/*
+!tmp/.gitkeep
+
+# =========================
+# Notebook checkpoints
+# =========================
+.ipynb_checkpoints/

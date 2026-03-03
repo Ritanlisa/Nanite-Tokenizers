@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Optional, Literal
+import os
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import (
@@ -24,10 +25,10 @@ class Settings(BaseSettings):
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         return (
-            YamlConfigSettingsSource(settings_cls),
-            env_settings,
-            init_settings,
-            file_secret_settings,
+            init_settings,                     # 最高优先级：通过 __init__ 传入的值
+            env_settings,                       # 次高：环境变量
+            YamlConfigSettingsSource(settings_cls),  # 基础：YAML 文件
+            file_secret_settings,                # 最低：密钥文件
         )
 
     ENV: Literal["dev", "test", "prod"] = Field("dev", validation_alias="ENV")
@@ -43,14 +44,25 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = Field(50, ge=0, le=200)
     SIMILARITY_TOP_K: int = Field(5, ge=1, le=20)
     ENABLE_RERANK: bool = True
+    ENABLE_RAG: bool = True
+    RAG_TOOL_TIMEOUT: int = Field(90, ge=5, le=600)
+    RAG_REGEX_RETRIEVE_TIMEOUT: int = Field(90, ge=5, le=600)
+    RAG_VECTOR_RETRIEVE_TIMEOUT: int = Field(90, ge=5, le=600)
+    RAG_SYNTHESIZE_ANSWER: bool = False
+    RAG_SYNTHESIS_TIMEOUT: int = Field(45, ge=5, le=300)
+    OFFLINE_ONLY: bool = False
     RERANK_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    RERANK_DEVICE: Literal["auto", "cpu", "cuda"] = "auto"
+    RERANK_LOCAL_DIR: str = "./models/rerank"
     RERANK_TOP_N: int = Field(3, ge=1)
     RAG_CONFIDENCE_THRESHOLD: float = Field(0.8, ge=0.0, le=1.0)
     MIN_RAG_SOURCES: int = Field(1, ge=1)
     VECTOR_STORE_TYPE: Literal["chroma", "faiss"] = "chroma"
     FAISS_INDEX_TYPE: str = "Flat"
     SAMPLE_FOR_TRAINING: int = Field(1000, ge=1)
-    PERSIST_DIR: str = "./storage"
+    PERSIST_DIR: str = "./database"
+    RAG_DB_NAME: Optional[str] = None
+    RAG_DB_NAMES: list[str] = Field(default_factory=list)
     DATA_DIR: str = "./data"
     VECTOR_STORE_FALLBACK_WARNING: bool = True
 
@@ -59,7 +71,9 @@ class Settings(BaseSettings):
     CACHE_TTL: int = Field(3600, ge=60)
     MEMORY_CACHE_MAXSIZE: int = Field(1000, ge=10)
 
-    MCP_FETCH_SERVER_COMMAND: str = "npx -y @modelcontextprotocol/server-fetch"
+    MCP_FETCH_SERVER_COMMAND: str = "python -m mcp_server_fetch"
+    MCP_SERVER_URLS: list[str] = Field(default_factory=list)
+    MCP_INIT_TIMEOUT: int = Field(60, ge=5)
     MCP_TIMEOUT: int = Field(30, ge=5)
     MCP_MAX_RESTART: int = Field(3, ge=0, le=10)
 
@@ -68,8 +82,24 @@ class Settings(BaseSettings):
 
     AGENT_VERBOSE: bool = Field(False, validation_alias="AGENT_VERBOSE")
     MAX_ITERATIONS: int = Field(5, ge=1, le=20)
+    RECURSION_LIMIT: int = Field(50, ge=5, le=1000)
     MAX_TOTAL_TOKENS: int = Field(4000, ge=1000)
     MAX_HISTORY_ROUNDS: int = Field(10, ge=1, le=50)
+    SYSTEM_PROMPT: Optional[str] = None
+
+    ENABLE_AGENT_SKILLS: bool = True
+    ENABLE_SHELL_SKILL: bool = True
+    ENABLE_FILE_IO_SKILL: bool = True
+    ENABLE_BING_SEARCH_SKILL: bool = True
+    SHELL_SKILL_TIMEOUT: int = Field(20, ge=1, le=120)
+    SKILL_MAX_FILE_BYTES: int = Field(200_000, ge=1_024, le=5_000_000)
+    SKILL_OUTPUT_MAX_CHARS: int = Field(12_000, ge=500, le=100_000)
+    BING_SEARCH_TOP_K: int = Field(5, ge=1, le=10)
+    BING_SEARCH_TIMEOUT: int = Field(12, ge=3, le=60)
+    BING_SEARCH_USER_AGENT: str = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
 
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "logs/app.log"
@@ -104,10 +134,24 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_rerank_config(self):
+        os.environ["OFFLINE_ONLY"] = "1" if self.OFFLINE_ONLY else "0"
+        if self.OFFLINE_ONLY:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+            os.environ.setdefault("GIT_TERMINAL_PROMPT", "0")
         if not self.OPENAI_API_URL and len(self.OPENAI_API_KEY) < 20:
             raise ValueError("OPENAI_API_KEY must be at least 20 characters unless OPENAI_API_URL is set")
         if self.RERANK_TOP_N > self.SIMILARITY_TOP_K:
             raise ValueError("RERANK_TOP_N must be <= SIMILARITY_TOP_K")
+        self.RAG_DB_NAMES = [item.strip() for item in self.RAG_DB_NAMES if item and item.strip()]
+        deduped_db_names: list[str] = []
+        for item in self.RAG_DB_NAMES:
+            if item not in deduped_db_names:
+                deduped_db_names.append(item)
+        self.RAG_DB_NAMES = deduped_db_names
+        if self.RAG_DB_NAMES and not self.RAG_DB_NAME:
+            self.RAG_DB_NAME = self.RAG_DB_NAMES[0]
+        self.MCP_SERVER_URLS = [item.strip() for item in self.MCP_SERVER_URLS if item and item.strip()]
         return self
 
     def update(self, **kwargs) -> "Settings":
@@ -117,3 +161,11 @@ class Settings(BaseSettings):
 
 
 settings = Settings()  # pyright: ignore[reportCallIssue]
+
+
+def get_rag_persist_dir() -> str:
+    base_dir = settings.PERSIST_DIR
+    name = (settings.RAG_DB_NAME or "").strip()
+    if name:
+        return os.path.join(base_dir, name)
+    return base_dir

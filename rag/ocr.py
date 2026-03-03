@@ -74,6 +74,28 @@ def _ocr_image(image_bytes: bytes) -> str:
     return _extract_message_text(content).strip()
 
 
+def ocr_image_data_url(data_url: str) -> str:
+    if not ocr_enabled():
+        return ""
+    if not data_url.startswith("data:image/"):
+        logger.warning("Unsupported image data URL")
+        return ""
+    try:
+        header, encoded = data_url.split(",", 1)
+    except ValueError:
+        logger.warning("Malformed image data URL")
+        return ""
+    if "base64" not in header:
+        logger.warning("Image data URL is not base64-encoded")
+        return ""
+    try:
+        image_bytes = base64.b64decode(encoded)
+    except Exception as exc:
+        logger.warning("Failed to decode image data URL: %s", exc)
+        return ""
+    return _ocr_image(image_bytes)
+
+
 class OCRPDFReader(BaseReader):
     def __init__(self, dpi: int = 200) -> None:
         self.dpi = dpi

@@ -5,7 +5,7 @@ import logging
 from typing import Optional
 
 from langchain_core.chat_history import InMemoryChatMessageHistory
-from langchain_core.messages import messages_from_dict, messages_to_dict
+from langchain_core.messages import HumanMessage, messages_from_dict, messages_to_dict
 import redis
 
 import config
@@ -52,8 +52,11 @@ class PersistentChatMemory:
         if len(self.history.messages) > max_messages:
             self.history.messages = self.history.messages[-max_messages:]
 
-    def add_user_message(self, content: str) -> None:
-        self.history.add_user_message(content)
+    def add_user_message(self, content) -> None:
+        if isinstance(content, list):
+            self.history.add_message(HumanMessage(content=content))
+        else:
+            self.history.add_user_message(str(content))
         self._trim_history()
         self._save()
 

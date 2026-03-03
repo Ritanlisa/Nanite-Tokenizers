@@ -78,7 +78,7 @@ def main() -> None:
     start_metrics_server(args.metrics_port)
 
     try:
-        asyncio.run(health_check())
+        asyncio.run(health_check(include_mcp=False))
     except Exception as exc:
         logging.getLogger(__name__).error("Health check failed: %s", exc)
         raise SystemExit(1) from exc

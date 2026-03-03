@@ -1,0 +1,10 @@
+{
+  "tasks": [
+    {
+      "id": 1,
+      "title": "Assistant demo task",
+      "status": "not-started",
+      "subtasks": []
+    }
+  ]
+}
