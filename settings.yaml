@@ -1,0 +1,15 @@
+ENV: dev
+OPENAI_API_KEY: ollama_api_key
+OPENAI_API_URL: http://localhost:11434/ollama/v1
+LLM_MODEL: llava:34b
+TEMPERATURE: 0.7
+CACHE_TYPE: memory
+VECTOR_STORE_TYPE: chroma
+DATA_DIR: ./data
+PERSIST_DIR: ./storage
+OCR_API_KEY: ollama_api_key
+OCR_API_URL: http://localhost:11434/v1
+OCR_MODEL: deepseek-ocr-2
+OCR_PROMPT: |-
+  <image>
+  <|grounding|>Convert the document to markdown.

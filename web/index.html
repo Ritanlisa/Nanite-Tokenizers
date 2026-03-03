@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nanite Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --bg: #0f1115;
+        --panel: #171a21;
+        --panel-2: #202533;
+        --text: #f6f7fb;
+        --muted: #9aa3b2;
+        --accent: #f5c26b;
+        --accent-2: #6bd1f5;
+        --ring: rgba(245, 194, 107, 0.4);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Space Grotesk", system-ui, -apple-system, sans-serif;
+        color: var(--text);
+        background: radial-gradient(circle at top, #222a3b, var(--bg) 45%);
+        min-height: 100vh;
+      }
+
+      .app {
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 32px 20px 48px;
+      }
+
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 24px;
+      }
+
+      .title {
+        font-size: 28px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+
+      .subtitle {
+        color: var(--muted);
+        margin-top: 6px;
+      }
+
+      .panel {
+        background: linear-gradient(135deg, var(--panel), var(--panel-2));
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 18px;
+        padding: 18px;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
+      }
+
+      .toolbar {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      input,
+      select,
+      button {
+        font-family: inherit;
+        font-size: 14px;
+        color: var(--text);
+        background: rgba(15, 17, 21, 0.7);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 10px 12px;
+        outline: none;
+      }
+
+      input:focus,
+      select:focus {
+        box-shadow: 0 0 0 3px var(--ring);
+        border-color: var(--accent);
+      }
+
+      button {
+        cursor: pointer;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        color: #0a0b0f;
+        font-weight: 600;
+        transition: transform 0.15s ease, box-shadow 0.2s ease;
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 12px 24px rgba(107, 209, 245, 0.2);
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 18px;
+      }
+
+      .chat {
+        height: 520px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        padding: 10px;
+      }
+
+      .bubble {
+        max-width: 75%;
+        padding: 12px 14px;
+        border-radius: 14px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .bubble.user {
+        align-self: flex-end;
+        background: rgba(245, 194, 107, 0.2);
+        border: 1px solid rgba(245, 194, 107, 0.35);
+      }
+
+      .bubble.agent {
+        align-self: flex-start;
+        background: rgba(107, 209, 245, 0.15);
+        border: 1px solid rgba(107, 209, 245, 0.35);
+      }
+
+      .composer {
+        display: grid;
+        grid-template-columns: 1fr auto auto;
+        gap: 12px;
+      }
+
+      textarea {
+        min-height: 52px;
+        max-height: 120px;
+        resize: vertical;
+        font-family: inherit;
+        font-size: 14px;
+        color: var(--text);
+        background: rgba(15, 17, 21, 0.7);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 12px;
+        padding: 12px;
+      }
+
+      .footer {
+        margin-top: 10px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      @media (max-width: 720px) {
+        .composer {
+          grid-template-columns: 1fr;
+        }
+
+        .bubble {
+          max-width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <div>
+          <div class="title">Nanite Agent</div>
+          <div class="subtitle">RAG + MCP agent with a static front-end and API server</div>
+        </div>
+        <button id="newSession">New Session</button>
+      </header>
+
+      <div class="panel layout">
+        <div class="toolbar">
+          <div class="field">
+            <label for="model">Model override (optional)</label>
+            <input id="model" type="text" placeholder="gpt-4o-mini" />
+          </div>
+          <div class="field">
+            <label for="temperature">Temperature</label>
+            <input id="temperature" type="number" min="0" max="2" step="0.1" value="0" />
+          </div>
+          <div class="field">
+            <label for="stream">Stream response</label>
+            <select id="stream">
+              <option value="true" selected>Enabled</option>
+              <option value="false">Disabled</option>
+            </select>
+          </div>
+        </div>
+
+        <div id="chat" class="chat"></div>
+
+        <div class="composer">
+          <textarea id="message" placeholder="Ask anything about your docs or tools..."></textarea>
+          <button id="send">Send</button>
+          <button id="reset">Reset</button>
+        </div>
+      </div>
+
+      <div class="footer">Session id: <span id="sessionId"></span></div>
+    </div>
+
+    <script>
+      const chat = document.getElementById("chat");
+      const messageInput = document.getElementById("message");
+      const sendButton = document.getElementById("send");
+      const resetButton = document.getElementById("reset");
+      const newSessionButton = document.getElementById("newSession");
+      const sessionIdLabel = document.getElementById("sessionId");
+      const modelInput = document.getElementById("model");
+      const temperatureInput = document.getElementById("temperature");
+      const streamSelect = document.getElementById("stream");
+
+      let sessionId = localStorage.getItem("nanite_session_id");
+      if (!sessionId) {
+        sessionId = crypto.randomUUID();
+        localStorage.setItem("nanite_session_id", sessionId);
+      }
+      sessionIdLabel.textContent = sessionId;
+
+      const appendBubble = (text, role) => {
+        const bubble = document.createElement("div");
+        bubble.className = `bubble ${role}`;
+        bubble.textContent = text;
+        chat.appendChild(bubble);
+        chat.scrollTop = chat.scrollHeight;
+        return bubble;
+      };
+
+      const setBusy = (busy) => {
+        sendButton.disabled = busy;
+        resetButton.disabled = busy;
+        newSessionButton.disabled = busy;
+      };
+
+      const readStream = async (response, bubble) => {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          bubble.textContent = buffer;
+          chat.scrollTop = chat.scrollHeight;
+        }
+      };
+
+      const sendMessage = async () => {
+        const message = messageInput.value.trim();
+        if (!message) return;
+
+        appendBubble(message, "user");
+        messageInput.value = "";
+
+        const model = modelInput.value.trim();
+        const temperature = parseFloat(temperatureInput.value || "0");
+        const stream = streamSelect.value === "true";
+
+        setBusy(true);
+        const agentBubble = appendBubble("", "agent");
+
+        try {
+          const response = await fetch("/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              message,
+              session_id: sessionId,
+              stream,
+              model: model || null,
+              temperature: Number.isNaN(temperature) ? null : temperature,
+            }),
+          });
+
+          if (!response.ok) {
+            const error = await response.text();
+            agentBubble.textContent = `Error: ${error}`;
+            return;
+          }
+
+          if (stream) {
+            await readStream(response, agentBubble);
+          } else {
+            const data = await response.json();
+            agentBubble.textContent = data.answer || "(empty response)";
+          }
+        } catch (err) {
+          agentBubble.textContent = `Error: ${err}`;
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const resetSession = async () => {
+        setBusy(true);
+        try {
+          await fetch("/api/reset", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId }),
+          });
+        } catch (err) {
+          console.error(err);
+        }
+        chat.innerHTML = "";
+        setBusy(false);
+      };
+
+      const newSession = () => {
+        sessionId = crypto.randomUUID();
+        localStorage.setItem("nanite_session_id", sessionId);
+        sessionIdLabel.textContent = sessionId;
+        resetSession();
+      };
+
+      sendButton.addEventListener("click", sendMessage);
+      resetButton.addEventListener("click", resetSession);
+      newSessionButton.addEventListener("click", newSession);
+
+      messageInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          sendMessage();
+        }
+      });
+    </script>
+  </body>
+</html>

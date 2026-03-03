@@ -1,0 +1,65 @@
+[project]
+name = "nanite-tokenizers"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "accelerate>=1.9.0",
+  "huggingface-hub>=0.36.2",
+  "torch>=2.9.1",
+  "torchvision>=0.24.1",
+  "vllm>=0.15.1",
+  "pydantic>=2.5.0",
+  "pydantic-settings>=2.0.0",
+  "langchain>=0.1.0",
+  "langchain-openai>=0.0.2",
+  "llama-index>=0.10.0",
+  "chromadb>=0.4.0",
+  "faiss-cpu>=1.7.4",
+  "sentence-transformers>=2.2.0",
+  "redis>=5.0.0",
+  "mcp>=0.1.0",
+  "tenacity>=8.2.0",
+  "nest-asyncio>=1.5.0",
+  "cachetools>=5.3.0",
+  "prometheus-client>=0.19.0",
+  "PyMuPDF>=1.24.0",
+  "gradio>=6.5.1",
+  "fitz>=0.0.1.dev2",
+]
+
+[project.scripts]
+nanite-tokenizers = "nanite_tokenizers.cli:main"
+nanite-demo = "nanite_tokenizers.inference.seq2seq_demo:run_demo"
+nanite-train-simplier = "nanite_tokenizers.training.simplier:train_simplier"
+nanite-download-tokenizer = "nanite_tokenizers.tools.download_tokenizer:download_tokenizer"
+nanite-web = "nanite_tokenizers.legacy_web_server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+vllm = { url = "https://github.com/vllm-project/vllm/releases/download/v0.15.1/vllm-0.15.1+cu130-cp38-abi3-manylinux_2_35_x86_64.whl" }
+accelerate = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/9f/1c/a17fb513aeb684fb83bef5f395910f53103ab30308bbdd77fd66d6698c46/accelerate-1.9.0-py3-none-any.whl" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.uv]
+allow-insecure-host = ["github.com"]
