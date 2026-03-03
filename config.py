@@ -91,6 +91,7 @@ class Settings(BaseSettings):
     ENABLE_SHELL_SKILL: bool = True
     ENABLE_FILE_IO_SKILL: bool = True
     ENABLE_BING_SEARCH_SKILL: bool = True
+    ENABLE_SEARCH_SKILL: bool = True
     SHELL_SKILL_TIMEOUT: int = Field(20, ge=1, le=120)
     SKILL_MAX_FILE_BYTES: int = Field(200_000, ge=1_024, le=5_000_000)
     SKILL_OUTPUT_MAX_CHARS: int = Field(12_000, ge=500, le=100_000)
@@ -100,6 +101,22 @@ class Settings(BaseSettings):
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
+    SEARCH_TOP_K: int = Field(5, ge=1, le=10)
+    SEARCH_TIMEOUT: int = Field(15, ge=3, le=90)
+    SEARCH_USER_AGENT: str = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+    SEARCH_WEBDRIVER_KIND: Literal["edge", "chrome", "firefox"] = "edge"
+    SEARCH_WEBDRIVER_PATH: str = "./edgedriver_linux64/msedgedriver"
+    SEARCH_URL: str = "https://www.bing.com/"
+    SEARCH_BOX_XPATH: str = "//input[@name='q']"
+    SEARCH_BOTTOM_XPATH: str = "(//ol[@id='b_results']//li[contains(@class,'b_algo')])[last()]"
+    SEARCH_RESULT_REGEX: str = (
+        r'<li[^>]*class="[^\"]*b_algo[^\"]*"[^>]*>.*?<h2[^>]*>.*?<a[^>]+href="(?P<link>[^\"]+)"[^>]*>(?P<title>.*?)</a>.*?</h2>(?:.*?<p[^>]*>(?P<snippet>.*?)</p>)?'
+    )
+    SEARCH_NEXT_PAGE_XPATH: str = "//a[@title='Next page' or @aria-label='Next page' or @aria-label='下一页' or @title='下一页']"
+    SEARCH_PREV_PAGE_XPATH: str = "//a[@title='Previous page' or @aria-label='Previous page' or @aria-label='上一页' or @title='上一页']"
 
     LOG_LEVEL: str = "INFO"
     LOG_FILE: str = "logs/app.log"

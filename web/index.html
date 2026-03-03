@@ -508,6 +508,13 @@
         animation: pulse 1.2s ease-in-out infinite;
       }
 
+      .timing-indicator {
+        margin-top: 8px;
+        font-size: 12px;
+        color: var(--muted);
+        font-family: "IBM Plex Mono", monospace;
+      }
+
       @keyframes pulse {
         0%,
         100% {
@@ -1277,6 +1284,44 @@
       let ragDocNames = [];
       let ragUploadingDocs = [];
 
+      const normalizeCollapseBucket = (value) => {
+        if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+        const result = {};
+        Object.entries(value).forEach(([key, flag]) => {
+          if (key) {
+            result[key] = Boolean(flag);
+          }
+        });
+        return result;
+      };
+
+      const normalizeCollapseState = (value) => {
+        const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+        return {
+          think: normalizeCollapseBucket(source.think),
+          tool: normalizeCollapseBucket(source.tool),
+        };
+      };
+
+      const ensureMessageCollapseState = (message) => {
+        if (!message) return normalizeCollapseState();
+        message.collapseState = normalizeCollapseState(message.collapseState);
+        return message.collapseState;
+      };
+
+      const persistMessageCollapseState = (session, message, category, key, isOpen) => {
+        if (!session || !message || !category || !key) return;
+        const state = ensureMessageCollapseState(message);
+        if (!state[category]) {
+          state[category] = {};
+        }
+        const normalized = Boolean(isOpen);
+        if (state[category][key] === normalized) return;
+        state[category][key] = normalized;
+        session.updatedAt = Date.now();
+        saveSessions();
+      };
+
       const translations = {
         en: {
           title: "Nanite Agent",
@@ -1349,6 +1394,8 @@
           continuePrompt: "Continue.",
           inProgress: "(running)",
           generating: "Generating...",
+          durationLabel: "Duration",
+          durationRunning: "running",
           graphTitle: "Tool Relationship Flow",
           graphSubtitle: "Live intensity view of tool usage in this session.",
           thinkLabel: "Thinking",
@@ -1460,6 +1507,8 @@
           continuePrompt: "继续",
           inProgress: "（进行中）",
           generating: "生成中...",
+          durationLabel: "用时",
+          durationRunning: "进行中",
           graphTitle: "工具关系流",
           graphSubtitle: "当前会话的工具调用强度视图。",
           thinkLabel: "思考",
@@ -1576,6 +1625,11 @@
           text: text || "",
           toolCalls: extra.toolCalls || [],
           toolPolling: Boolean(extra.toolPolling),
+          collapseState: normalizeCollapseState(extra.collapseState),
+          generationStartedAt: Number(extra.generationStartedAt) || null,
+          generationMs: Number.isFinite(Number(extra.generationMs))
+            ? Math.max(0, Number(extra.generationMs))
+            : null,
           parentId: extra.parentId || null,
           children: [],
           activeChildId: null,
@@ -1597,6 +1651,9 @@
             message.responses.forEach((response) => {
               const node = createNode("agent", response.text || "", {
                 toolCalls: response.toolCalls || [],
+                collapseState: response.collapseState,
+                generationStartedAt: response.generationStartedAt,
+                generationMs: response.generationMs,
                 parentId: parent.id,
               });
               nodes[node.id] = node;
@@ -1612,6 +1669,9 @@
           } else {
             const node = createNode(message.role, message.text || "", {
               toolCalls: message.toolCalls || [],
+              collapseState: message.collapseState,
+              generationStartedAt: message.generationStartedAt,
+              generationMs: message.generationMs,
               parentId: currentId,
             });
             nodes[node.id] = node;
@@ -1903,6 +1963,14 @@
         return date.toLocaleString(currentLang === "zh" ? "zh-CN" : "en-US");
       };
 
+      const formatDurationMs = (value) => {
+        const ms = Math.max(0, Number(value) || 0);
+        if (ms < 1000) {
+          return `${Math.round(ms)}ms`;
+        }
+        return `${(ms / 1000).toFixed(2)}s`;
+      };
+
       const updateRagCurrentInfo = () => {
         if (!ragCurrentInfo) return;
         const names = (selectedRagUseDbs || []).filter(Boolean);
@@ -2014,16 +2082,18 @@
         return `${base}-${names.length}`;
       };
 
-      const updateAgentBubble = (bubble, message) => {
-        const openStates = {};
+      const updateAgentBubble = (bubble, message, session = null) => {
+        const runtimeToolStates = {};
         bubble.querySelectorAll("details.call-entry").forEach((entry) => {
-          const callId = entry.dataset.callId;
-          if (callId) openStates[callId] = entry.open;
+          const key = entry.dataset.stateKey;
+          if (key) runtimeToolStates[key] = entry.open;
         });
-        const thinkStates = [];
+        const runtimeThinkStates = {};
         bubble.querySelectorAll("details.think-box").forEach((entry) => {
-          thinkStates.push(entry.open);
+          const key = entry.dataset.stateKey;
+          if (key) runtimeThinkStates[key] = entry.open;
         });
+        const persistedStates = ensureMessageCollapseState(message);
         bubble.innerHTML = "";
         const rawText = message.text || "";
         const fragments = [];
@@ -2146,6 +2216,7 @@
 
         flushText();
         let thinkIndex = 0;
+        let toolIndex = 0;
         let answerText = "";
         fragments.forEach((frag) => {
           if (frag.type === "think") {
@@ -2158,7 +2229,8 @@
             }
             const thinkBox = document.createElement("details");
             thinkBox.className = "think-box";
-            thinkBox.open = true;
+            const thinkStateKey = `think-${thinkIndex}`;
+            thinkBox.dataset.stateKey = thinkStateKey;
             const summary = document.createElement("summary");
             summary.textContent = t("thinkLabel");
             thinkBox.appendChild(summary);
@@ -2168,7 +2240,16 @@
             thinkBox.appendChild(thinkContent);
             if (frag.incomplete) thinkBox.classList.add("incomplete");
             bubble.appendChild(thinkBox);
-            thinkBox.open = thinkIndex < thinkStates.length ? thinkStates[thinkIndex] : true;
+            const persistedOpen = Object.prototype.hasOwnProperty.call(persistedStates.think, thinkStateKey)
+              ? persistedStates.think[thinkStateKey]
+              : null;
+            const runtimeOpen = Object.prototype.hasOwnProperty.call(runtimeThinkStates, thinkStateKey)
+              ? runtimeThinkStates[thinkStateKey]
+              : null;
+            thinkBox.open = persistedOpen ?? runtimeOpen ?? true;
+            thinkBox.addEventListener("toggle", () => {
+              persistMessageCollapseState(session, message, "think", thinkStateKey, thinkBox.open);
+            });
             thinkIndex++;
           } else if (frag.type === "tool") {
             if (answerText.trim()) {
@@ -2183,11 +2264,15 @@
             const callDetails = document.createElement("details");
             callDetails.className = "call-entry";
             callDetails.dataset.callId = call.call_id || "";
-            if (call.call_id && Object.prototype.hasOwnProperty.call(openStates, call.call_id)) {
-              callDetails.open = openStates[call.call_id];
-            } else if (isRunning) {
-              callDetails.open = true;
-            }
+            const toolStateKey = call.call_id ? `tool-${call.call_id}` : `tool-${toolIndex}`;
+            callDetails.dataset.stateKey = toolStateKey;
+            const persistedOpen = Object.prototype.hasOwnProperty.call(persistedStates.tool, toolStateKey)
+              ? persistedStates.tool[toolStateKey]
+              : null;
+            const runtimeOpen = Object.prototype.hasOwnProperty.call(runtimeToolStates, toolStateKey)
+              ? runtimeToolStates[toolStateKey]
+              : null;
+            callDetails.open = persistedOpen ?? runtimeOpen ?? Boolean(isRunning);
             const callSummary = document.createElement("summary");
             const suffix = isRunning ? ` ${t("inProgress")}` : "";
             callSummary.textContent = `${t("callLabel")} ${call.tool_name || "tool"}${suffix}`;
@@ -2208,6 +2293,10 @@
             callDetails.appendChild(input);
             callDetails.appendChild(output);
             bubble.appendChild(callDetails);
+            callDetails.addEventListener("toggle", () => {
+              persistMessageCollapseState(session, message, "tool", toolStateKey, callDetails.open);
+            });
+            toolIndex++;
           } else if (frag.type === "text") {
             answerText += frag.content;
           }
@@ -2226,6 +2315,20 @@
           indicator.textContent = t("generating");
           bubble.appendChild(indicator);
         }
+
+        const hasDuration = Number.isFinite(Number(message?.generationMs));
+        const hasStart = Number.isFinite(Number(message?.generationStartedAt));
+        if (hasDuration || hasStart) {
+          const timing = document.createElement("div");
+          timing.className = "timing-indicator";
+          if (hasDuration) {
+            timing.textContent = `${t("durationLabel")}: ${formatDurationMs(Number(message.generationMs))}`;
+          } else {
+            const elapsed = Date.now() - Number(message.generationStartedAt || Date.now());
+            timing.textContent = `${t("durationLabel")}: ${formatDurationMs(elapsed)} (${t("durationRunning")})`;
+          }
+          bubble.appendChild(timing);
+        }
       };
 
       const refreshNodeBubble = (session, nodeId) => {
@@ -2238,7 +2341,7 @@
         if (!bubble) return;
         const message = getNode(session, nodeId);
         if (!message) return;
-        updateAgentBubble(bubble, message);
+        updateAgentBubble(bubble, message, session);
       };
 
       const getMessageById = (id) => {
@@ -2610,7 +2713,11 @@
         renderChatFromSession();
 
         setBusy(true);
-        const agentNode = createNode("agent", "", { toolCalls: [] });
+        const agentNode = createNode("agent", "", {
+          toolCalls: [],
+          generationStartedAt: Date.now(),
+          generationMs: null,
+        });
         addChildNode(currentSession, userNode.id, agentNode);
         currentSession.updatedAt = Date.now();
         activeStream = { sessionId: currentSession.id, nodeId: agentNode.id };
@@ -2632,12 +2739,20 @@
           const toolCalls = mergeToolCalls([], parsedTools.calls || []);
           agentNode.text = answerText;
           agentNode.toolCalls = toolCalls;
+          agentNode.generationMs = Math.max(
+            0,
+            Date.now() - Number(agentNode.generationStartedAt || Date.now())
+          );
           currentSession.updatedAt = Date.now();
           saveSessions();
           renderSessions();
           renderChatFromSession();
         } catch (err) {
           agentNode.text = `${t("errorPrefix")} ${err}`;
+          agentNode.generationMs = Math.max(
+            0,
+            Date.now() - Number(agentNode.generationStartedAt || Date.now())
+          );
           refreshNodeBubble(currentSession, agentNode.id);
         } finally {
           if (activeStream.nodeId === agentNode.id) {
@@ -2680,7 +2795,11 @@
         const { session, message } = data;
         const prompt = buildTranscript(session, message.id);
 
-        const responseNode = createNode("agent", "", { toolCalls: [] });
+        const responseNode = createNode("agent", "", {
+          toolCalls: [],
+          generationStartedAt: Date.now(),
+          generationMs: null,
+        });
         addChildNode(session, message.id, responseNode);
         session.updatedAt = Date.now();
         activeStream = { sessionId: session.id, nodeId: responseNode.id };
@@ -2705,12 +2824,20 @@
           const toolCalls = mergeToolCalls([], parsedTools.calls || []);
           responseNode.text = answerText;
           responseNode.toolCalls = toolCalls;
+          responseNode.generationMs = Math.max(
+            0,
+            Date.now() - Number(responseNode.generationStartedAt || Date.now())
+          );
           session.updatedAt = Date.now();
           saveSessions();
           renderSessions();
           renderChatFromSession();
         } catch (err) {
           responseNode.text = `${t("errorPrefix")} ${err}`;
+          responseNode.generationMs = Math.max(
+            0,
+            Date.now() - Number(responseNode.generationStartedAt || Date.now())
+          );
           refreshNodeBubble(session, responseNode.id);
         } finally {
           if (activeStream.nodeId === responseNode.id) {
@@ -2732,7 +2859,11 @@
 
         const prompt = buildTranscript(session, parent.id);
 
-        const responseNode = createNode("agent", "", { toolCalls: [] });
+        const responseNode = createNode("agent", "", {
+          toolCalls: [],
+          generationStartedAt: Date.now(),
+          generationMs: null,
+        });
         addChildNode(session, parent.id, responseNode);
         session.updatedAt = Date.now();
         activeStream = { sessionId: session.id, nodeId: responseNode.id };
@@ -2756,12 +2887,20 @@
           responseNode.text = answerText;
           const parsedTools = parseToolMarkup(answerText || "");
           responseNode.toolCalls = mergeToolCalls([], parsedTools.calls || []);
+          responseNode.generationMs = Math.max(
+            0,
+            Date.now() - Number(responseNode.generationStartedAt || Date.now())
+          );
           session.updatedAt = Date.now();
           saveSessions();
           renderSessions();
           renderChatFromSession();
         } catch (err) {
           responseNode.text = `${t("errorPrefix")} ${err}`;
+          responseNode.generationMs = Math.max(
+            0,
+            Date.now() - Number(responseNode.generationStartedAt || Date.now())
+          );
           refreshNodeBubble(session, responseNode.id);
         } finally {
           if (activeStream.nodeId === responseNode.id) {
@@ -2890,7 +3029,7 @@
               rendered.wrapper.classList.add("streaming");
             }
             rendered.wrapper.dataset.messageId = message.id;
-            updateAgentBubble(rendered.bubble, message);
+            updateAgentBubble(rendered.bubble, message, current);
             renderMessageActions(current, rendered.actions, message);
           } else {
             const rendered = createChatItem("user", true);

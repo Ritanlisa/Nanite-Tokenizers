@@ -466,7 +466,9 @@ class RAGDocListTool(BaseTool):
 
 class RAGDocCatalogTool(BaseTool):
     name: str = "rag_doc_catalog"
-    description: str = _bi("返回指定RAG文档的目录结构（章节路径及页码）。", "Return catalog structure of a specified RAG document (section path and page number).")
+    description: str = _bi(
+        "返回指定RAG文档的目录结构（章节路径及页码）。⚠️ 页面范围可能不准确，目录及页码均为程序自动提取，可能存在缺失或错误，请谨慎使用并勿过度依赖页码准确性。", 
+        "Return catalog structure of a specified RAG document (section path and page number).⚠️ Page ranges may be inaccurate; both catalog and page numbers are automatically extracted and may contain omissions or errors. Use with caution and do not overly rely on page number accuracy.")
     args_schema: Any = RAGDocCatalogInput
 
     async def _arun(self, doc_name: str) -> str:
@@ -609,7 +611,9 @@ class RAGRegexSearchTool(BaseTool):
 
 class RAGVectorSearchTool(BaseTool):
     name: str = "rag_vector_search"
-    description: str = _bi("根据查询文本的向量相似度检索文档片段（结果不准确），支持指定文档和页面范围，建议谨慎使用。", "Retrieve document chunks by vector similarity to query text (results may be imperfect), with optional document and page range filters.")
+    description: str = _bi(
+        "根据查询文本的向量相似度检索文档片段（结果不准确），支持指定文档和页面范围，建议谨慎使用。", 
+        "Retrieve document chunks by vector similarity to query text (results may be imperfect), with optional document and page range filters.")
     args_schema: Any = RAGVectorSearchInput
 
     async def _arun(self, query: str, doc_name: str = "", page_start: int | None = None,
@@ -1396,5 +1400,10 @@ tools = [
     FetchWebpageTool(),
     ShellTool(),
     FileIOTool(),
+
+    # 网络工具
     BingSearchTool(),
+
+    # IPMI协议工具
+    # TODO: IPMI协议工具待实现
 ] + _build_skill_tools()
