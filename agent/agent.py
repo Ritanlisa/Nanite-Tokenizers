@@ -103,7 +103,7 @@ class SmartAgent:
                 "You are a helpful assistant with access to retrieval and execution tools.\n"
                 "Strategy:\n"
                 "1) Use rag_search first for internal knowledge.\n"
-                "2) If rag_search is not useful, use fetch_webpage or skill_bing_search.\n"
+                "2) If rag_search is not useful, use fetch_webpage, skill_web_visit, or skill_search.\n"
                 "3) Use skill_file_io for workspace-local file read/write tasks.\n"
                 "4) Use skill_shell for safe command execution when needed.\n"
                 "5) Ground answers on retrieved content and tool output.\n"

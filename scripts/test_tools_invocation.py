@@ -293,7 +293,7 @@ async def main() -> None:
         ("skill_file_io", {"action": "append", "path": "tmp/tools-test/sample.txt", "content": " world"}),
         ("skill_file_io", {"action": "read", "path": "tmp/tools-test/sample.txt"}),
         ("skill_file_io", {"action": "list", "path": "tmp/tools-test"}),
-        ("skill_bing_search", {"query": "Nanite Tokenizers", "top_k": 2}),
+        ("skill_search", {"query": "Nanite Tokenizers", "top_k": 2}),
     ]
 
     tools_by_name: dict[str, list[Any]] = {}

@@ -60,14 +60,22 @@ SYSTEM_PROMPT: "\u4F60\u662F\u4E00\u4E2AAI\u52A9\u624B\uFF0C\u534F\u52A9\u7528\u
 ENABLE_AGENT_SKILLS: true
 ENABLE_SHELL_SKILL: true
 ENABLE_FILE_IO_SKILL: true
-ENABLE_BING_SEARCH_SKILL: true
+ENABLE_SEARCH_SKILL: true
 SHELL_SKILL_TIMEOUT: 20
 SKILL_MAX_FILE_BYTES: 200000
 SKILL_OUTPUT_MAX_CHARS: 12000
-BING_SEARCH_TOP_K: 5
-BING_SEARCH_TIMEOUT: 12
-BING_SEARCH_USER_AGENT: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML,
-  like Gecko) Chrome/120.0.0.0 Safari/537.36
+SEARCH_TOP_K: 5
+SEARCH_TIMEOUT: 15
+SEARCH_USER_AGENT: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko)
+  Chrome/120.0.0.0 Safari/537.36
+SEARCH_WEBDRIVER_KIND: edge
+SEARCH_WEBDRIVER_PATH: ./edgedriver_linux64/msedgedriver
+SEARCH_URL: https://cn.bing.com/
+SEARCH_BOX_XPATH: /html/body/div[1]/div/div[3]/div[2]/form
+SEARCH_BUTTON_XPATH: /html/body/div[1]/div/div[3]/div[2]/form/label
+SEARCH_RESULT_REGEX: <li[^>]*class="[^\"]*b_algo[^\"]*"[^>]*>.*?<h2[^>]*>.*?<a[^>]+href="(?P<link>[^\"]+)"[^>]*>(?P<title>.*?)</a>.*?</h2>(?:.*?<p[^>]*>(?P<snippet>.*?)</p>)?
+SEARCH_PAGE_PARAM: first
+SEARCH_PAGE_SIZE: 10
 LOG_LEVEL: INFO
 LOG_FILE: logs/app.log
 LOG_MAX_BYTES: 10485760

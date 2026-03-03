@@ -45,7 +45,8 @@ Agent Skills
 Built-in skill tools are enabled by default and exposed to the agent via tool-calling:
 - `skill_shell`: execute shell commands in workspace (with timeout/safety filter)
 - `skill_file_io`: read/write/list/mkdir inside workspace root only
-- `skill_bing_search`: Bing web search via HTML crawling parser
+- `skill_search`: Selenium-driven search tool with configurable URL/XPath/regex parsing
+- `skill_web_visit`: Selenium webpage visiting and text extraction for JS-rendered pages
 - Copilot-compatible aliases are also registered (e.g. `createDirectory`, `createFile`,
   `readFile`, `listDirectory`, `runInTerminal`, `runCommand`, `fileSearch`, `textSearch`,
   `fetch`, `changes`, etc.). Some advanced notebook/terminal/session APIs are placeholders

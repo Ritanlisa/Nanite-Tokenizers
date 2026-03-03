@@ -35,7 +35,8 @@
 - 默认内置技能：
   - `skill_shell`：安全 shell 命令
   - `skill_file_io`：读写/列目录/建目录（限工作区）
-  - `skill_bing_search`：Bing 网页搜索
+  - `skill_search`：基于 Selenium 的可配置网页搜索（URL/XPath/Regex）
+  - `skill_web_visit`：基于 Selenium 的网页访问与正文提取（适合 JS 渲染页面）
   - Copilot 兼容别名（如 `createDirectory`、`createFile`、`readFile`、`listDirectory`、`runInTerminal`、`runCommand`、`fileSearch`、`textSearch`、`fetch`、`changes` 等）。部分 notebook/终端相关为占位符，返回“未实现”。
 - 相关开关见 `settings.yaml`（如 `ENABLE_AGENT_SKILLS`、`ENABLE_*_SKILL`）。
 
