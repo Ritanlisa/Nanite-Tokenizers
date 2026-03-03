@@ -1455,8 +1455,8 @@ class RAGEngine:
         return sorted(
             catalog.values(),
             key=lambda item: (
-                -int(item.get("page") or 0),
-                -int(item.get("end_page") or item.get("page") or 0),
+                int(item.get("page") or 0),
+                int(item.get("end_page") or item.get("page") or 0),
                 str(item.get("title") or ""),
             ),
         )
