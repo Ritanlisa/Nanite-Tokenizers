@@ -322,22 +322,21 @@ class RAG_DB_Document(ABC):
 
     def _resolve_doc_name(self, metadata: Dict[str, Any]) -> str:
         current = str(metadata.get("doc_name") or "").strip()
-        if current:
-            return self._normalize_doc_path(current)
-
         file_name = str(metadata.get("file_name") or "").strip()
-        if not file_name:
-            return self.base_doc_id
+        if file_name:
+            return self._normalize_doc_path(os.path.abspath(file_name))
 
-        data_dir = str(config.settings.DATA_DIR or "").strip()
-        if data_dir:
-            abs_file = os.path.abspath(file_name)
-            abs_data_dir = os.path.abspath(data_dir)
-            if abs_file.startswith(abs_data_dir):
-                rel = os.path.relpath(abs_file, abs_data_dir)
-                return self._normalize_doc_path(rel)
+        if current:
+            data_dir = str(config.settings.DATA_DIR or "").strip()
+            if os.path.isabs(current):
+                return self._normalize_doc_path(os.path.abspath(current))
+            if data_dir:
+                return self._normalize_doc_path(os.path.abspath(os.path.join(data_dir, current)))
+            return self._normalize_doc_path(os.path.abspath(current))
 
-        return self._normalize_doc_path(os.path.basename(file_name) or file_name)
+        if self.base_doc_id:
+            return self._normalize_doc_path(os.path.abspath(str(self.base_doc_id)))
+        return self._normalize_doc_path(str(self.base_doc_id))
 
     @staticmethod
     def _is_form_feed_line(raw_line: str) -> bool:
@@ -1994,6 +1993,7 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
     from llama_index.readers.file import DocxReader, PandasExcelReader
     from llama_index.core import SimpleDirectoryReader
 
+    file_path = os.path.abspath(file_path)
     ext = os.path.splitext(file_path)[1].lower()
     try:
         if ext not in supported_extensions:
@@ -2059,7 +2059,7 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
             return None
         first = docs[0]
         metadata = dict(first.metadata or {})
-        metadata.setdefault("file_name", file_path)
+        metadata["file_name"] = file_path
         metadata.setdefault("source_extension", ext)
         if ext == ".docx":
             docx_catalogs = _extract_docx_catalog_metadata(file_path)
