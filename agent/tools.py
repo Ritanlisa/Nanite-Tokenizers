@@ -56,7 +56,9 @@ _LAST_SEARCH_STATE: dict[str, Any] | None = None
 _HIDDEN_LINK_STORE: dict[str, list[str]] = {}
 _SUGAR_URL_MARKS: dict[str, int] = {}
 _TOOL_REF_PATTERN = re.compile(r"^tool\[(-?\d+)\]")
-_ACCESSOR_PATTERN = re.compile(r"\[(?:(-?\d+)|\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)')\]")
+_ACCESSOR_PATTERN = re.compile(
+    r"\[(?:(-?\d+)|\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)'|([A-Za-z_][A-Za-z0-9_]*))\]"
+)
 
 
 def _lang() -> str:
@@ -218,18 +220,24 @@ def _apply_accessor_chain(base_value: Any, chain_text: str) -> Any:
         int_part = match.group(1)
         dq_key = match.group(2)
         sq_key = match.group(3)
+        ident_key = match.group(4)
 
         if int_part is not None:
             key: Any = int(int_part)
         else:
-            key_text = dq_key if dq_key is not None else (sq_key or "")
-            key = bytes(key_text, "utf-8").decode("unicode_escape")
+            if ident_key is not None:
+                key = ident_key
+            else:
+                key_text = dq_key if dq_key is not None else (sq_key or "")
+                key = bytes(key_text, "utf-8").decode("unicode_escape")
 
         if isinstance(value, (list, tuple)):
             if not isinstance(key, int):
                 raise ValueError(_t("列表索引必须是整数。", "List index must be an integer."))
             if key < 0:
                 key = len(value) + key
+            elif key > 0 and key >= len(value) and (key - 1) < len(value):
+                key = key - 1
             if key < 0 or key >= len(value):
                 raise ValueError(_t("列表索引越界。", "List index out of range."))
             value = value[key]
@@ -239,11 +247,15 @@ def _apply_accessor_chain(base_value: Any, chain_text: str) -> Any:
             dict_key: Any = key
             if dict_key not in value and isinstance(dict_key, int):
                 dict_key = str(dict_key)
+            if dict_key == "link" and "_url" in value:
+                value = value["_url"]
+                continue
             if dict_key not in value:
                 raise ValueError(_t("字典键不存在。", "Dictionary key does not exist."))
             value = value[dict_key]
             continue
-
+        
+        logger.error("Unsupported accessor on value: %s (type: %s)", value, type(value).__name__)
         raise ValueError(_t("当前值不支持继续索引。", "Current value is not indexable."))
 
     if cursor != len(chain_text or ""):
@@ -326,14 +338,40 @@ def _extract_domain(url: str) -> str:
     return netloc
 
 
-def _mask_result_url(item: dict[str, str]) -> dict[str, str]:
+def _mask_result_url(
+    item: dict[str, str],
+    call_index: int | None = None,
+    result_index: int | None = None,
+) -> dict[str, str]:
     full_url = str(item.get("link") or "").strip()
     domain = _extract_domain(full_url)
+    domain_text = domain or _t("未知域名", "unknown-domain")
+    sugar_expr = ""
+    if call_index is not None and result_index is not None:
+        sugar_expr = f"tool[{call_index}][{result_index}][link]"
+    if sugar_expr:
+        masked_link = _t(
+            f"来自于 {domain_text} ，使用{sugar_expr}在工具调用中使用此URL",
+            f"From {domain_text}, use {sugar_expr} to use this URL in tool calls",
+        )
+    else:
+        masked_link = _t(
+            f"来自于 {domain_text} ，使用tool[调用序号][结果序号][link]在工具调用中使用此URL",
+            f"From {domain_text}, use tool[call_index][result_index][link] to use this URL in tool calls",
+        )
     return {
         "title": item.get("title") or domain or full_url,
-        "link": domain or _t("未知域名", "unknown-domain"),
+        "link": masked_link,
         "snippet": item.get("snippet") or "",
     }
+
+
+def _predict_next_tool_call_index() -> int:
+    usage = get_tool_usage(get_current_session_id())
+    calls_obj = usage.get("calls") if isinstance(usage, dict) else []
+    calls: list[Any] = calls_obj if isinstance(calls_obj, list) else []
+    completed_count = sum(1 for item in calls if isinstance(item, dict) and item.get("ended_at") is not None)
+    return max(1, completed_count + 1)
 
 
 def _configure_driver_options(kind: str) -> tuple[str, Any]:
@@ -1418,11 +1456,17 @@ class RAGGetPagesTool(InputSugarTool):
     
 
 class FetchWebpageInput(BaseModel):
-    url: str = Field(description=_bi("要抓取的网页 URL", "Webpage URL to fetch"))
+    url: str = Field(description=_bi(
+        "要抓取的网页 URL，建议使用引用语法，如 tool[-1][1][link]，而非直接复制长URL。", 
+        "Webpage URL to fetch, it's recommended to use reference syntax like tool[-1][1][link] instead of directly copying long URLs."
+        ))
 
 
 class SeleniumWebVisitInput(BaseModel):
-    url: str = Field(description=_bi("要访问的网页 URL", "Webpage URL to visit"))
+    url: str = Field(description=_bi(
+        "要抓取的网页 URL，建议使用引用语法，如 tool[-1][1][link]，而非直接复制长URL。", 
+        "Webpage URL to fetch, it's recommended to use reference syntax like tool[-1][1][link] instead of directly copying long URLs."
+        ))
     wait_xpath: str = Field(
         default="",
         description=_bi("可选：等待页面元素可见的 XPath", "Optional: XPath to wait until visible"),
@@ -1763,7 +1807,10 @@ class SearchInput(BaseModel):
 
 
 class URLRegSearchInput(BaseModel):
-    url: str = Field(description=_bi("要访问并解析的 URL", "URL to visit and parse"))
+    url: str = Field(description=_bi(
+        "要访问并解析的 URL，建议使用引用语法，如 tool[-1][1][link]，而非直接复制长URL。", 
+        "URL to access and parse, it's recommended to use reference syntax like tool[-1][1][link] instead of directly copying long URLs."
+        ))
     regex: str = Field(
         description=_bi(
             "用于提取结果的正则（必须使用命名组 link，建议提供 title/snippet）",
@@ -1865,7 +1912,11 @@ class SearchTool(InputSugarTool):
                 output_text = _t("未解析到搜索结果。", "No search results were parsed.")
                 return output_text
             _HIDDEN_LINK_STORE[call_id] = [str(item.get("link") or "") for item in items]
-            masked_items = [_mask_result_url(item) for item in items]
+            call_index = _predict_next_tool_call_index()
+            masked_items = [
+                _mask_result_url(item, call_index=call_index, result_index=idx)
+                for idx, item in enumerate(items, start=1)
+            ]
             output_text = json.dumps(masked_items, ensure_ascii=False)
             return output_text
         except Exception as exc:
@@ -1948,7 +1999,11 @@ class URLRegSearchTool(InputSugarTool):
                 output_text = _t("未匹配到任何结果。", "No results matched.")
                 return output_text
             _HIDDEN_LINK_STORE[call_id] = [str(item.get("link") or "") for item in items]
-            masked_items = [_mask_result_url(item) for item in items]
+            call_index = _predict_next_tool_call_index()
+            masked_items = [
+                _mask_result_url(item, call_index=call_index, result_index=idx)
+                for idx, item in enumerate(items, start=1)
+            ]
             if warning:
                 payload = {
                     "warning": warning,

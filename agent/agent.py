@@ -118,16 +118,16 @@ class SmartAgent:
                 "MCP Tool Input Protocol Extension (tool reference sugar):"
                 ),
             _bi(
-                "- 在任意工具输入字符串中，可以使用 tool[index] 引用历史工具输出。",
-                "- In any tool input string, you may reference historical tool outputs with tool[index].",
+                "- 在任意工具输入字符串中，可以使用 tool[index] 引用历史工具输出。所有索引均从1开始，负数索引表示从最近的工具调用开始倒数，正数索引表示从最早的工具调用开始正数。",
+                "- In any tool input string, you may reference historical tool outputs with tool[index]. All indices start from 1, negative indices count from the most recent tool call, and positive indices count from the earliest tool call.",
             ),
             _bi(
                 "- 索引规则：tool[-1] 为最近一次已完成工具调用输出；tool[1] 为第一次已完成调用输出；tool[0] 无效。",
                 "- Indexing rules: tool[-1] is the latest completed tool call output; tool[1] is the first completed call output; tool[0] is invalid.",
             ),
             _bi(
-                "- 支持访问器链，例如 tool[-1][3][\"link\"] 或 tool[-1][\"results\"][0]。",
-                "- Accessor chain is supported, e.g. tool[-1][3][\"link\"] or tool[-1][\"results\"][0].",
+                "- 支持访问器链，例如 tool[-1][3][link] 或 tool[-1][results][0]。",
+                "- Accessor chain is supported, e.g. tool[-1][3][link] or tool[-1][results][0].",
             ),
             _bi(
                 "- 支持可选管道变换：| regex <pattern> [replacement]。",
@@ -138,8 +138,8 @@ class SmartAgent:
                 "- If replacement is omitted, defaults to full match ($0).",
             ),
             _bi(
-                "- replacement 支持 $0/$1/$2... 捕获组，例如 tool[-1][3][\"link\"] | regex https?://(.*?)/ $1。",
-                "- Replacement supports $0/$1/$2... for regex groups, e.g. tool[-1][3][\"link\"] | regex https?://(.*?)/ $1.",
+                "- replacement 支持 $0/$1/$2... 捕获组，例如 tool[-1][3][link] | regex https?://(.*?)/ $1。",
+                "- Replacement supports $0/$1/$2... for regex groups, e.g. tool[-1][3][link] | regex https?://(.*?)/ $1.",
             ),
             _bi(
                 "- 请严格使用该语法；无法解析的引用会触发工具输入错误。",
