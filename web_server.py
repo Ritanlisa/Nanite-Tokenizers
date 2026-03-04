@@ -41,6 +41,7 @@ class ChatRequest(BaseModel):
     rag_db_names: Optional[list[str]] = None
     force_agent: bool = False
     messages: Optional[list[dict]] = None
+    conversation_path: Optional[list[str]] = None
     language: Optional[str] = None
 
 
@@ -368,6 +369,7 @@ def create_app() -> FastAPI:
                         rag_db_names=rag_db_names,
                         force_agent=request.force_agent,
                         messages=request.messages,  # 新增参数
+                        conversation_path=request.conversation_path,
                     ):
                         yield chunk
                 except Exception as exc:
@@ -387,6 +389,7 @@ def create_app() -> FastAPI:
                 rag_db_names=rag_db_names,
                 force_agent=request.force_agent,
                 messages=request.messages,  # 新增参数
+                conversation_path=request.conversation_path,
             )
         except Exception as exc:
             logging.getLogger(__name__).exception("Chat failed")

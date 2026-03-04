@@ -129,7 +129,7 @@ class ReadAgentSkillDetails(AgentSkill):
 
         skill_md = target_dir / "SKILL.md"
         if not skill_md.exists():
-            return f"Skill directory exists but no SKILL.md found."
+            return "Skill directory exists but no SKILL.md found."
 
         try:
             content = await asyncio.to_thread(skill_md.read_text, encoding="utf-8")

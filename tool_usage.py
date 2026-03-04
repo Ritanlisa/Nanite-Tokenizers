@@ -20,6 +20,7 @@ class ToolCallRecord:
     tool_output: str
     started_at: float
     ended_at: Optional[float]
+    scope_key: str
 
 
 class ToolUsageStore:
@@ -100,6 +101,7 @@ class ToolUsageStore:
                     tool_output=str(item.get("tool_output") or ""),
                     started_at=started_at,
                     ended_at=ended_at,
+                    scope_key=str(item.get("scope_key") or ""),
                 )
                 calls.append(record)
                 call_tool_map[call_id] = tool_name
@@ -120,6 +122,7 @@ class ToolUsageStore:
                     "tool_output": record.tool_output,
                     "started_at": record.started_at,
                     "ended_at": record.ended_at,
+                    "scope_key": record.scope_key,
                 }
                 for record in self._calls.get(session_id, [])
             ],
@@ -129,7 +132,7 @@ class ToolUsageStore:
         tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp_path, file_path)
 
-    def record_start(self, session_id: str, call_id: str, tool_name: str, tool_input: str) -> None:
+    def record_start(self, session_id: str, call_id: str, tool_name: str, tool_input: str, scope_key: str) -> None:
         with self._lock:
             self._ensure_loaded(session_id)
             self._counts.setdefault(session_id, {})
@@ -142,6 +145,7 @@ class ToolUsageStore:
                     tool_output="",
                     started_at=time.time(),
                     ended_at=None,
+                    scope_key=scope_key,
                 )
             )
             self._save(session_id)
@@ -175,6 +179,7 @@ class ToolUsageStore:
                     "tool_output": record.tool_output,
                     "started_at": record.started_at,
                     "ended_at": record.ended_at,
+                    "scope_key": record.scope_key,
                 }
                 for record in calls
             ],
@@ -197,6 +202,7 @@ class ToolUsageStore:
 
 _STORE = ToolUsageStore()
 _CURRENT_SESSION_ID: ContextVar[str] = ContextVar("current_tool_usage_session", default="default")
+_CURRENT_SCOPE_KEY: ContextVar[str] = ContextVar("current_tool_usage_scope", default="")
 
 
 def _stringify(value: object, limit: int = 200000) -> str:
@@ -216,7 +222,7 @@ def _stringify(value: object, limit: int = 200000) -> str:
 
 
 def record_tool_start(session_id: str, call_id: str, tool_name: str, tool_input: object) -> None:
-    _STORE.record_start(session_id, call_id, tool_name, _stringify(tool_input))
+    _STORE.record_start(session_id, call_id, tool_name, _stringify(tool_input), get_current_scope_key())
 
 
 def record_tool_end(session_id: str, call_id: str, tool_output: object) -> None:
@@ -241,6 +247,18 @@ def reset_current_session_id(token: Token) -> None:
 
 def get_current_session_id() -> str:
     return _CURRENT_SESSION_ID.get()
+
+
+def set_current_scope_key(scope_key: str) -> Token:
+    return _CURRENT_SCOPE_KEY.set((scope_key or "").strip())
+
+
+def reset_current_scope_key(token: Token) -> None:
+    _CURRENT_SCOPE_KEY.reset(token)
+
+
+def get_current_scope_key() -> str:
+    return _CURRENT_SCOPE_KEY.get()
 
 
 def start_current_tool_call(tool_name: str, tool_input: object) -> str:

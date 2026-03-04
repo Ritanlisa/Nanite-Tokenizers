@@ -35,6 +35,8 @@ from tool_usage import (
     record_tool_start,
     set_current_session_id,
     reset_current_session_id,
+    set_current_scope_key,
+    reset_current_scope_key,
 )
 from contextvars import ContextVar
 
@@ -260,6 +262,20 @@ class SmartAgent:
         return f"{text[:limit]}...(truncated, len={len(text)})"
 
     @staticmethod
+    def _build_tool_scope_key(conversation_path: Optional[list[str]]) -> str:
+        if not conversation_path:
+            return ""
+        normalized: list[str] = []
+        for item in conversation_path:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            safe = re.sub(r"[^A-Za-z0-9_.:-]", "_", text)
+            if safe:
+                normalized.append(safe)
+        return ">".join(normalized)
+
+    @staticmethod
     def _is_retryable_timeout_error(exc: Exception) -> bool:
         if isinstance(exc, (asyncio.TimeoutError, TimeoutError, concurrent.futures.TimeoutError)):
             return True
@@ -479,6 +495,7 @@ class SmartAgent:
         image_urls: Optional[list[str]] = None,
         rag_db_names: Optional[list[str]] = None,
         force_agent: bool = False,
+        conversation_path: Optional[list[str]] = None,
     ) -> str:
         self.memory.add_user_message(user_input)
 
@@ -495,6 +512,7 @@ class SmartAgent:
 
         original_db_name, original_db_names = self._apply_rag_scope(rag_db_names)
         session_token = set_current_session_id(self.session_id)
+        scope_token = set_current_scope_key(self._build_tool_scope_key(conversation_path))
         try:
             if not force_agent:
                 rag_answer = self._try_rag_shortcut(user_input, rag_db_names=rag_db_names)
@@ -530,6 +548,7 @@ class SmartAgent:
                         answer = f"Request failed: {str(exc)[:100]}"
         finally:
             self._restore_rag_scope(original_db_name, original_db_names)
+            reset_current_scope_key(scope_token)
             reset_current_session_id(session_token)
 
         self.memory.add_ai_message(answer)
@@ -542,6 +561,7 @@ class SmartAgent:
         rag_db_names: Optional[list[str]] = None,
         force_agent: bool = False,
         messages: Optional[list[dict]] = None,  # 新增参数
+        conversation_path: Optional[list[str]] = None,
     ) -> str:
         # 如果提供了 messages，则直接使用它们构建输入
         if messages is not None:
@@ -573,6 +593,7 @@ class SmartAgent:
 
         original_db_name, original_db_names = self._apply_rag_scope(rag_db_names)
         session_token = set_current_session_id(self.session_id)
+        scope_token = set_current_scope_key(self._build_tool_scope_key(conversation_path))
         try:
             if not force_agent:
                 rag_answer = await asyncio.to_thread(
@@ -618,6 +639,7 @@ class SmartAgent:
                         answer = f"Request failed: {str(exc)[:100]}"
         finally:
             self._restore_rag_scope(original_db_name, original_db_names)
+            reset_current_scope_key(scope_token)
             reset_current_session_id(session_token)
 
         self.memory.add_ai_message(answer)
@@ -630,6 +652,7 @@ class SmartAgent:
         rag_db_names: Optional[list[str]] = None,
         force_agent: bool = False,
         messages: Optional[list[dict]] = None,
+        conversation_path: Optional[list[str]] = None,
     ):
         # 与 achat 类似的逻辑，构建 input_messages
         if messages is not None:
@@ -658,6 +681,7 @@ class SmartAgent:
 
         original_db_name, original_db_names = self._apply_rag_scope(rag_db_names)
         session_token = set_current_session_id(self.session_id)
+        scope_token = set_current_scope_key(self._build_tool_scope_key(conversation_path))
         try:
             if not force_agent:
                 rag_answer = await asyncio.to_thread(
@@ -769,10 +793,7 @@ class SmartAgent:
                     return text
 
                 def _write_to_front_end(self, message: str) -> None:
-                    print(message, flush=True, end='')  # for debugging
-                    if '</result></tool>' in message:
-                        # 人工断点
-                        pass
+                    # print(message, flush=True, end='')  # for debugging
                     self.queue.put_nowait(message)
                     
                 def on_llm_new_token(self, token: str, **kwargs):
@@ -922,6 +943,7 @@ class SmartAgent:
                 self.memory.add_ai_message(fallback_answer)
         finally:
             self._restore_rag_scope(original_db_name, original_db_names)
+            reset_current_scope_key(scope_token)
             reset_current_session_id(session_token)
 
     def _try_rag_shortcut(

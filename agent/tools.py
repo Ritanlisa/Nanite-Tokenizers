@@ -22,6 +22,7 @@ from tool_usage import (
     end_current_tool_call,
     get_tool_usage,
     get_current_session_id,
+    get_current_scope_key,
 )
 
 import subprocess
@@ -155,7 +156,7 @@ def _select_tool_call_output(call_index: int) -> Any:
     usage = get_tool_usage(get_current_session_id())
     calls_obj = usage.get("calls") if isinstance(usage, dict) else []
     calls: list[Any] = calls_obj if isinstance(calls_obj, list) else []
-    completed = [item for item in calls if isinstance(item, dict) and item.get("ended_at") is not None]
+    completed = _filter_completed_calls_by_scope(calls)
     if not completed:
         raise ValueError(_t("当前没有可用的已完成工具调用。", "No completed tool calls available yet."))
 
@@ -179,6 +180,28 @@ def _select_tool_call_output(call_index: int) -> Any:
     parsed = _try_parse_json(output_text)
     call_id = str(selected_call.get("call_id") or "")
     return _inject_hidden_links(parsed, call_id)
+
+
+def _is_scope_ancestor(ancestor: str, descendant: str) -> bool:
+    a = (ancestor or "").strip()
+    d = (descendant or "").strip()
+    if not a:
+        return False
+    return d == a or d.startswith(f"{a}>")
+
+
+def _filter_completed_calls_by_scope(calls: list[Any]) -> list[dict[str, Any]]:
+    completed = [item for item in calls if isinstance(item, dict) and item.get("ended_at") is not None]
+    scope_key = (get_current_scope_key() or "").strip()
+    if not scope_key:
+        return completed
+
+    scoped = [
+        item
+        for item in completed
+        if _is_scope_ancestor(str(item.get("scope_key") or ""), scope_key)
+    ]
+    return scoped
 
 
 def _inject_hidden_links(parsed_output: Any, call_id: str) -> Any:
@@ -370,7 +393,7 @@ def _predict_next_tool_call_index() -> int:
     usage = get_tool_usage(get_current_session_id())
     calls_obj = usage.get("calls") if isinstance(usage, dict) else []
     calls: list[Any] = calls_obj if isinstance(calls_obj, list) else []
-    completed_count = sum(1 for item in calls if isinstance(item, dict) and item.get("ended_at") is not None)
+    completed_count = len(_filter_completed_calls_by_scope(calls))
     return max(1, completed_count + 1)
 
 
