@@ -88,3 +88,4 @@ tmp/*
 # edgedriver
 # =========================
 edgedriver/
+edgedriver_linux64/
