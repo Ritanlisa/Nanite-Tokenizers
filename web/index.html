@@ -1437,6 +1437,7 @@
           pendingInput: "(no input payload)",
           pendingOutput: "(waiting for tool output...)",
           emptyOutput: "(empty output)",
+          toolCallingInProgress: "(tool calling)",
         },
         zh: {
           title: "Nanite 智能体",
@@ -1550,6 +1551,7 @@
           pendingInput: "（无输入参数）",
           pendingOutput: "（等待工具返回中...）",
           emptyOutput: "（空输出）",
+          toolCallingInProgress: "（工具调用中）",
         },
       };
 
@@ -2065,32 +2067,67 @@
           const calls = [];
           let cleaned = "";
           let cursor = 0;
-          while (true) {
-              const open = text.indexOf("<tool>", cursor);
-              if (open === -1) {
-                  cleaned += text.slice(cursor);
-                  break;
-              }
-              cleaned += text.slice(cursor, open);
-              const close = text.indexOf("</tool>", open);
-              const isIncomplete = close === -1;
-              const chunk = isIncomplete ? text.slice(open + 6) : text.slice(open + 6, close);
-              const call = {
-                  call_id: htmlDecode(extractTagText(chunk, "id") || `stream-${open}`),
-                  tool_name: htmlDecode(extractTagText(chunk, "type") || "tool"),
-                  tool_input: htmlDecode(extractTagText(chunk, "query") || ""),
-                  tool_output: htmlDecode(extractTagText(chunk, "result") || ""),
-                  ended_at: null,
+
+          const extractLooseTag = (source, tagName) => {
+            const open = `<${tagName}>`;
+            const close = `</${tagName}>`;
+            const openIdx = source.indexOf(open);
+            if (openIdx === -1) {
+              return { value: "", found: false, closed: false };
+            }
+            const start = openIdx + open.length;
+            const closeIdx = source.indexOf(close, start);
+            if (closeIdx === -1) {
+              return {
+                value: source.slice(start),
+                found: true,
+                closed: false,
               };
-              if (!isIncomplete && call.tool_output) {
-                  call.ended_at = Date.now() / 1000;
-              }
-              calls.push(call);
-              if (isIncomplete) {
-                  break;
-              }
-              cursor = close + 7;
+            }
+            return {
+              value: source.slice(start, closeIdx),
+              found: true,
+              closed: true,
+            };
+          };
+
+          while (true) {
+            const open = text.indexOf("<tool>", cursor);
+            if (open === -1) {
+              cleaned += text.slice(cursor);
+              break;
+            }
+            cleaned += text.slice(cursor, open);
+            const close = text.indexOf("</tool>", open);
+            const isIncomplete = close === -1;
+            const chunk = isIncomplete ? text.slice(open + 6) : text.slice(open + 6, close);
+
+            const idPart = extractLooseTag(chunk, "id");
+            const typePart = extractLooseTag(chunk, "type");
+            const queryPart = extractLooseTag(chunk, "query");
+            const resultPart = extractLooseTag(chunk, "result");
+
+            const call = {
+              call_id: htmlDecode((idPart.value || "").trim() || `stream-${open}`),
+              tool_name: htmlDecode((typePart.value || "").trim() || "tool"),
+              tool_input: htmlDecode(queryPart.value || ""),
+              tool_output: htmlDecode(resultPart.value || ""),
+              ended_at: null,
+            };
+
+            const consideredFinished =
+              !isIncomplete || (resultPart.found && resultPart.closed);
+            if (consideredFinished) {
+              call.ended_at = Date.now() / 1000;
+            }
+
+            calls.push(call);
+            if (isIncomplete) {
+              break;
+            }
+            cursor = close + 7;
           }
+
           return { cleanText: cleaned, calls };
       };
 
@@ -2342,58 +2379,33 @@
                 fragments.push({ type: "think", content: innerContent, incomplete: true });
                 break; // 重要：跳出循环，剩余内容已全部处理
               } else {
-                // 未闭合的 tool：尝试提取已存在的子标签
-                let nextIdx = 0;
-                const extractTag = (tag, content, start) => {
-                  const open = `<${tag}>`;
-                  const close = `</${tag}>`;
-                  const openIdx = content.indexOf(open, start);
-                  if (openIdx === -1) return null;
-                  const closeIdx = content.indexOf(close, openIdx + open.length);
-                  if (closeIdx === -1) return null;
-                  const value = content.slice(openIdx + open.length, closeIdx);
-                  return { value, endIdx: closeIdx + close.length };
+                const extractLooseTag = (content, tag) => {
+                  const openTag = `<${tag}>`;
+                  const closeTag = `</${tag}>`;
+                  const openIdx = content.indexOf(openTag);
+                  if (openIdx === -1) return { value: "", found: false, closed: false };
+                  const start = openIdx + openTag.length;
+                  const closeIdx = content.indexOf(closeTag, start);
+                  if (closeIdx === -1) {
+                    return { value: content.slice(start), found: true, closed: false };
+                  }
+                  return { value: content.slice(start, closeIdx), found: true, closed: true };
                 };
 
-                const idResult = extractTag('id', innerContent, nextIdx);
-                if (!idResult) {
-                  break;
-                }
-                nextIdx = idResult.endIdx;
-
-                const typeResult = extractTag('type', innerContent, nextIdx);
-                if (!typeResult) {
-                  break;
-                }
-                nextIdx = typeResult.endIdx;
-
-                let query = '';
-                const queryResult = extractTag('query', innerContent, nextIdx);
-                if (queryResult) {
-                  query = queryResult.value;
-                  nextIdx = queryResult.endIdx;
-                } else {
-                  const openQuery = '<query>';
-                  const openIdx = innerContent.indexOf(openQuery, nextIdx);
-                  if (openIdx !== -1) {
-                    query = innerContent.slice(openIdx + openQuery.length);
-                    nextIdx = innerContent.length;
-                  } else {
-                    break;
-                  }
-                }
+                const idResult = extractLooseTag(innerContent, "id");
+                const typeResult = extractLooseTag(innerContent, "type");
+                const queryResult = extractLooseTag(innerContent, "query");
+                const resultResult = extractLooseTag(innerContent, "result");
 
                 const call = {
-                  call_id: idResult.value,
-                  tool_name: typeResult.value,
-                  tool_input: query,
-                  tool_output: "",
-                  ended_at: null,
+                  call_id: htmlDecode((idResult.value || "").trim() || `stream-${i}`),
+                  tool_name: htmlDecode((typeResult.value || "").trim() || "tool"),
+                  tool_input: htmlDecode(queryResult.value || ""),
+                  tool_output: htmlDecode(resultResult.value || ""),
+                  ended_at: resultResult.found && resultResult.closed ? Date.now() / 1000 : null,
                 };
                 fragments.push({ type: "tool", call, incomplete: true });
-
-                i = i + nextIdx;
-                continue; // 继续处理剩余内容
+                break;
               }
             }
 
@@ -2424,6 +2436,7 @@
         let thinkIndex = 0;
         let toolIndex = 0;
         let answerText = "";
+        const isStreamingBubble = Boolean(bubble.closest(".chat-item")?.classList.contains("streaming"));
         fragments.forEach((frag) => {
           if (frag.type === "think") {
             if (answerText.trim()) {
@@ -2467,6 +2480,7 @@
             }
             const call = frag.call;
             const isRunning = !call.ended_at;
+            const pendingTool = isRunning || Boolean(frag.incomplete);
             const callDetails = document.createElement("details");
             callDetails.className = "call-entry";
             callDetails.dataset.callId = call.call_id || "";
@@ -2484,20 +2498,29 @@
             callSummary.textContent = `${t("callLabel")} ${call.tool_name || "tool"}${suffix}`;
             callDetails.appendChild(callSummary);
 
-            const inputText = formatToolPayloadText(call.tool_input || "") || t("pendingInput");
-            const outputText = formatToolPayloadText(call.tool_output || "")
-              || (isRunning ? t("pendingOutput") : t("emptyOutput"));
+            if (pendingTool) {
+              const pending = document.createElement("div");
+              pending.className = "call-detail";
+              pending.textContent = t("toolCallingInProgress");
+              callDetails.appendChild(pending);
+              if (isStreamingBubble) {
+                callDetails.open = true;
+              }
+            } else {
+              const inputText = formatToolPayloadText(call.tool_input || "") || t("pendingInput");
+              const outputText = formatToolPayloadText(call.tool_output || "") || t("emptyOutput");
 
-            const input = document.createElement("div");
-            input.className = "call-detail";
-            input.textContent = `${t("inputLabel")}\n${inputText}`;
+              const input = document.createElement("div");
+              input.className = "call-detail";
+              input.textContent = `${t("inputLabel")}\n${inputText}`;
 
-            const output = document.createElement("div");
-            output.className = "call-detail";
-            output.textContent = `${t("outputLabel")}\n${outputText}`;
+              const output = document.createElement("div");
+              output.className = "call-detail";
+              output.textContent = `${t("outputLabel")}\n${outputText}`;
 
-            callDetails.appendChild(input);
-            callDetails.appendChild(output);
+              callDetails.appendChild(input);
+              callDetails.appendChild(output);
+            }
             bubble.appendChild(callDetails);
             callDetails.addEventListener("toggle", () => {
               persistMessageCollapseState(session, message, "tool", toolStateKey, callDetails.open);

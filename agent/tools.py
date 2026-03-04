@@ -1573,7 +1573,7 @@ class WebVisitTool(InputSugarTool):
                     text = (driver.execute_script("return (document.body && document.body.innerText) || '';") or "").strip()
                     if not text:
                         text = _strip_html(driver.page_source or "")
-                    return text[:max_chars]
+                    return f"```html\n{text[:max_chars]}\n```"
                 finally:
                     driver.quit()
 

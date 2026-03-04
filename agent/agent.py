@@ -168,6 +168,10 @@ class SmartAgent:
                     "1) Use rag_search first for internal knowledge. The rag_doc_list -> rag_doc_catalog -> rag_regex_search flow is an efficient and reliable internal retrieval solution."
                     ) + "\n"
                 + _bi(
+                    "   建议 rag_regex_search 中使用 可选捕获组()? + capture_group_weights 来按照你的需求排序搜索结果，每个捕获组对应一个权重。", 
+                    "   It is recommended to use optional capture groups ()? + capture_group_weights in rag_regex_search to sort search results according to your needs, with each capture group corresponding to a weight."
+                    ) + "\n"
+                + _bi(
                     "2) 若 rag_search 无效，再使用 fetch_webpage、skill_web_visit 或 skill_search。",
                     "2) If rag_search is not useful, use fetch_webpage, skill_web_visit, or skill_search.",
                 ) + "\n"
