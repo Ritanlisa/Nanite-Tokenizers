@@ -116,36 +116,52 @@ class SmartAgent:
     def _tool_sugar_protocol_note() -> str:
         lines = [
             _bi(
-                "MCP 工具输入协议扩展（tool 引用语法糖）：", 
+                "MCP 工具输入协议扩展（tool 引用语法糖）：",
                 "MCP Tool Input Protocol Extension (tool reference sugar):"
-                ),
-            _bi(
-                "- 在任意工具输入字符串中，可以使用 tool[index] 引用历史工具输出。所有索引均从1开始，负数索引表示从最近的工具调用开始倒数，正数索引表示从最早的工具调用开始正数。",
-                "- In any tool input string, you may reference historical tool outputs with tool[index]. All indices start from 1, negative indices count from the most recent tool call, and positive indices count from the earliest tool call.",
             ),
             _bi(
-                "- 索引规则：tool[-1] 为最近一次已完成工具调用输出；tool[1] 为第一次已完成调用输出；tool[0] 无效。",
-                "- Indexing rules: tool[-1] is the latest completed tool call output; tool[1] is the first completed call output; tool[0] is invalid.",
+                "- 在任何工具输入字符串中，可以使用 `tool[index]` 引用历史工具输出。",
+                "- In any tool input string, you may reference historical tool outputs with `tool[index]`."
             ),
             _bi(
-                "- 支持访问器链，例如 tool[-1][3][link] 或 tool[-1][results][0]。",
-                "- Accessor chain is supported, e.g. tool[-1][3][link] or tool[-1][results][0].",
+                "  - 索引规则：正数从 1 开始，表示从最早的工具调用起算；负数从 -1 开始，表示从最近的工具调用倒数。`tool[0]` 无效。",
+                "  - Index rules: positive indices start at 1 (earliest call), negative indices start at -1 (most recent call). `tool[0]` is invalid."
             ),
             _bi(
-                "- 支持可选管道变换：| regex <pattern> [replacement]。",
-                "- Optional pipe transform is supported: | regex <pattern> [replacement].",
+                "  - 示例：`tool[-1]` 最近一次工具输出，`tool[1]` 第一次工具输出。",
+                "  - Example: `tool[-1]` refers to the most recent tool output, `tool[1]` to the first tool output."
             ),
             _bi(
-                "- 若省略 replacement，默认返回整组匹配（$0）。",
-                "- If replacement is omitted, defaults to full match ($0).",
+                "- 支持访问器链，通过 `[key]` 或 `[index]` 逐级提取数据。",
+                "- Accessor chains are supported: use `[key]` or `[index]` to drill down."
             ),
             _bi(
-                "- replacement 支持 $0/$1/$2... 捕获组，例如 tool[-1][3][link] | regex https?://(.*?)/ $1。",
-                "- Replacement supports $0/$1/$2... for regex groups, e.g. tool[-1][3][link] | regex https?://(.*?)/ $1.",
+                "  - 对于列表：**索引与结果在返回列表中的显示序号一致**，第一个结果的索引为 1，第二个为 2，以此类推。",
+                "  - For lists: **the index corresponds to the displayed order in the returned list**; the first result has index 1, the second index 2, etc."
             ),
             _bi(
-                "- 请严格使用该语法；无法解析的引用会触发工具输入错误。",
-                "- Keep syntax exact; unresolved references will raise tool input errors.",
+                "  - 示例：若 `skill_search` 返回了 5 条结果，要引用第三条结果的链接，应使用 `tool[-1][3][link]`。",
+                "  - Example: if `skill_search` returned 5 results, to reference the link of the third result, use `tool[-1][3][link]`."
+            ),
+            _bi(
+                "- 支持简单的管道变换：`| regex <pattern> [replacement]`，用于从字符串中提取部分内容。",
+                "- Simple pipe transform is available: `| regex <pattern> [replacement]`, used to extract part of a string."
+            ),
+            _bi(
+                "  - `replacement` 默认为 `$0`（完整匹配），可使用 `$1`、`$2` 等引用捕获组。",
+                "  - `replacement` defaults to `$0` (full match); `$1`, `$2`… can be used for captured groups."
+            ),
+            _bi(
+                "  - 示例：`tool[-1][3][link] | regex https?://(.*?)/ $1` 可提取域名。",
+                "  - Example: `tool[-1][3][link] | regex https?://(.*?)/ $1` extracts the domain."
+            ),
+            _bi(
+                "⚠️ 重要提示：直接使用上述语法即可，所有索引已按规则自动转换，无需自行加/减 1。",
+                "⚠️ Important: Use the syntax exactly as described; indices are automatically converted according to the rules, so you do not need to add/subtract 1 manually."
+            ),
+            _bi(
+                "若引用无效或越界，工具调用将失败并返回明确错误信息。",
+                "If the reference is invalid or out of bounds, the tool call will fail with a clear error message."
             ),
         ]
         return "\n\n" + "\n".join(lines)
@@ -699,6 +715,8 @@ class SmartAgent:
             token_buffer: list[str] = []
             error_text: Optional[str] = None
             final_answer: Optional[str] = None
+            stream_started_at = time.perf_counter()
+            agent_session_id = self.session_id
 
             @DeprecationWarning
             def _tool_markup(call: dict[str, Any]) -> str:
@@ -721,6 +739,8 @@ class SmartAgent:
                 def __init__(self, queue: asyncio.Queue[str]):
                     self.queue = queue
                     self.thinking = False
+                    self._first_emit_at: float | None = None
+                    self._tool_started_at: dict[str, float] = {}
 
                 @staticmethod
                 def _escape_xml(value: Any) -> str:
@@ -793,9 +813,15 @@ class SmartAgent:
                     return text
 
                 def _write_to_front_end(self, message: str) -> None:
-                    # print(message, flush=True, end='')  # for debugging
+                    if self._first_emit_at is None:
+                        self._first_emit_at = time.perf_counter()
+                        logger.info(
+                            "astream first_emit: session=%s first_emit_ms=%.1f",
+                            agent_session_id,
+                            (self._first_emit_at - stream_started_at) * 1000.0,
+                        )
                     self.queue.put_nowait(message)
-                    
+
                 def on_llm_new_token(self, token: str, **kwargs):
                     """流式输出 token"""
                     chunk = kwargs.get("chunk")
@@ -837,6 +863,7 @@ class SmartAgent:
                     run_id = kwargs.get("run_id")
                     if run_id:
                         call_id = str(run_id)
+                        self._tool_started_at[call_id] = time.perf_counter()
                         safe_input = self._escape_xml(self._format_tool_payload(input_str))
                         safe_tool_name = self._escape_xml(tool_name)
                         # 发送开始部分，不闭合标签
@@ -851,7 +878,17 @@ class SmartAgent:
                 def on_tool_end(self, output: Any, **kwargs):
                     run_id = kwargs.get("run_id")
                     if run_id:
+                        call_id = str(run_id)
+                        started = self._tool_started_at.pop(call_id, None)
                         safe_output = self._escape_xml(self._format_tool_payload(output))
+                        if started is not None:
+                            logger.info(
+                                "astream tool_done: session=%s call_id=%s ms=%.1f output_chars=%s",
+                                agent_session_id,
+                                call_id,
+                                (time.perf_counter() - started) * 1000.0,
+                                len(safe_output),
+                            )
                         # 发送结果和闭合标签
                         tool_xml = f"<result>{safe_output}</result></tool>"
                         if self.thinking:
@@ -930,6 +967,12 @@ class SmartAgent:
                     len(token_buffer),
                     final_answer,
                     error_text,
+                )
+                logger.info(
+                    "astream done: session=%s total_ms=%.1f emitted_chunks=%s",
+                    self.session_id,
+                    (time.perf_counter() - stream_started_at) * 1000.0,
+                    len(token_buffer),
                 )
             except Exception:
                 pass

@@ -158,6 +158,7 @@ def _select_tool_call_output(call_index: int) -> Any:
     calls: list[Any] = calls_obj if isinstance(calls_obj, list) else []
     completed = _filter_completed_calls_by_scope(calls)
     if not completed:
+        logger.debug(f"session id {get_current_session_id()} scope {get_current_scope_key()} calls: {calls}")
         raise ValueError(_t("当前没有可用的已完成工具调用。", "No completed tool calls available yet."))
 
     if call_index < 0:
@@ -257,13 +258,18 @@ def _apply_accessor_chain(base_value: Any, chain_text: str) -> Any:
         if isinstance(value, (list, tuple)):
             if not isinstance(key, int):
                 raise ValueError(_t("列表索引必须是整数。", "List index must be an integer."))
+            # 处理索引转换
             if key < 0:
-                key = len(value) + key
-            elif key > 0 and key >= len(value) and (key - 1) < len(value):
-                key = key - 1
-            if key < 0 or key >= len(value):
+                # 负数索引：转换为Python索引
+                index = len(value) + key
+            elif key > 0:
+                # 正数索引：1-based → 0-based
+                index = key - 1
+            else:  # key == 0
+                raise ValueError(_t("索引0无效，正数索引从1开始。", "Index 0 is invalid; positive indices start at 1."))
+            if index < 0 or index >= len(value):
                 raise ValueError(_t("列表索引越界。", "List index out of range."))
-            value = value[key]
+            value = value[index]
             continue
 
         if isinstance(value, dict):
@@ -1513,7 +1519,7 @@ class FetchWebpageTool(InputSugarTool):
         retry=retry_if_exception_type((ConnectionError, asyncio.TimeoutError)),
     )
     async def _arun(self, url: str) -> str:
-        
+        started_at = time.perf_counter()
         call_id = start_current_tool_call(self.name, {"url": url})
         output_text = ""
         client = get_mcp_client()
@@ -1526,7 +1532,30 @@ class FetchWebpageTool(InputSugarTool):
                 output_text = _t("仅支持 http/https URL。", "Only http/https URLs are supported.")
                 return output_text
 
+            fetch_started_at = time.perf_counter()
             fetched = await client.fetch(target_url)
+            fetch_elapsed_ms = (time.perf_counter() - fetch_started_at) * 1000.0
+
+            max_chars = int(getattr(config.settings, "FETCH_WEBPAGE_MAX_CHARS", 16000) or 16000)
+            max_chars = max(1000, min(max_chars, 200000))
+            original_len = len(fetched or "")
+            if original_len > max_chars:
+                fetched = (
+                    f"{(fetched or '')[:max_chars]}\n\n---\n"
+                    + _t(
+                        f"⚠️ 页面内容已截断：原始 {original_len} 字符，保留前 {max_chars} 字符以提升工具与模型处理速度。",
+                        f"⚠️ Web content truncated: original {original_len} chars, kept first {max_chars} chars to improve tool/model latency.",
+                    )
+                )
+
+            logger.info(
+                "fetch_webpage done: url=%s fetch_ms=%.1f total_ms=%.1f len=%s->%s",
+                target_url,
+                fetch_elapsed_ms,
+                (time.perf_counter() - started_at) * 1000.0,
+                original_len,
+                len(fetched or ""),
+            )
             output_text = f"{warning}\n\n{fetched}" if warning else fetched
             return output_text
         except MCPFatalError:

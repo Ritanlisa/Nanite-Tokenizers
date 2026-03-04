@@ -79,6 +79,7 @@ class Settings(BaseSettings):
 
     MCP_RETRY_TIMES: int = Field(2, ge=0, le=5)
     MCP_RETRY_DELAY: float = Field(1.0, ge=0.1)
+    FETCH_WEBPAGE_MAX_CHARS: int = Field(16000, ge=1000, le=200000)
 
     AGENT_VERBOSE: bool = Field(False, validation_alias="AGENT_VERBOSE")
     MAX_ITERATIONS: int = Field(5, ge=1, le=20)
