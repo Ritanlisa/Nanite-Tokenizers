@@ -82,7 +82,7 @@ _STORE = ToolUsageStore()
 _CURRENT_SESSION_ID: ContextVar[str] = ContextVar("current_tool_usage_session", default="default")
 
 
-def _stringify(value: object, limit: int = 800) -> str:
+def _stringify(value: object, limit: int = 200000) -> str:
     if value is None:
         return ""
     if isinstance(value, (dict, list)):

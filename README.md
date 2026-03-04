@@ -54,6 +54,21 @@ Built-in skill tools are enabled by default and exposed to the agent via tool-ca
 
 Related switches are in `settings.yaml` (`ENABLE_AGENT_SKILLS`, `ENABLE_*_SKILL`).
 
+MCP Tool Input Protocol Extension
+---------------------------------
+For tool-calling, the agent supports an input sugar for referencing previous tool outputs:
+- `tool[-1]`: latest completed tool output
+- `tool[1]`: first completed tool output (positive index starts at 1)
+- Accessor chain: `tool[-1][3]["link"]`, `tool[-1]["results"][0]`
+- Pipe transform: `| regex <pattern> [replacement]`
+- If replacement is omitted, default is full match (`$0`)
+- Replacement supports `$0/$1/$2...` capture groups
+
+Examples:
+- `tool[-1][3]["link"]`
+- `tool[-1][3]["link"] | regex https?://(.*?)/ $1`
+- `tool[-1][3]["link"] | regex https?://(.*?)\.(.*?)\.(.*?)/ $1 $2 $3`
+
 Run the agent
 -------------
 - Configure `settings.yaml` (set `OPENAI_API_KEY`)

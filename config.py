@@ -83,6 +83,10 @@ class Settings(BaseSettings):
     AGENT_VERBOSE: bool = Field(False, validation_alias="AGENT_VERBOSE")
     MAX_ITERATIONS: int = Field(5, ge=1, le=20)
     RECURSION_LIMIT: int = Field(50, ge=5, le=1000)
+    LLM_REQUEST_TIMEOUT: int = Field(120, ge=10, le=600)
+    AGENT_INVOKE_TIMEOUT: int = Field(180, ge=10, le=1200)
+    AGENT_LLM_RETRY_TIMES: int = Field(2, ge=0, le=5)
+    AGENT_LLM_RETRY_DELAY: float = Field(1.0, ge=0.1, le=30.0)
     MAX_TOTAL_TOKENS: int = Field(4000, ge=1000)
     MAX_HISTORY_ROUNDS: int = Field(10, ge=1, le=50)
     SYSTEM_PROMPT: Optional[str] = None

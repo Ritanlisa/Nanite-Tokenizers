@@ -12,7 +12,7 @@ from uuid import UUID
 
 from langchain.agents import create_agent
 from langchain_core.callbacks.base import BaseCallbackHandler
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
 from agent.chatOpenAIWithReasoning import ChatOpenAIWithReasoning
 from pydantic import SecretStr
@@ -29,6 +29,7 @@ from capabilities import get_capabilities
 from exceptions import TokenLimitExceeded
 from rag.engine import RAGEngine
 from monitoring import agent_token_usage
+from locale_context import get_current_language
 from tool_usage import (
     record_tool_end,
     record_tool_start,
@@ -52,6 +53,21 @@ def set_agent_active() -> int:
 
 def reset_agent_active(prev: int) -> None:
     _agent_active_ctx.set(prev)
+
+
+def _lang() -> str:
+    language = (get_current_language() or "zh").strip().lower()
+    if language.startswith("en"):
+        return "en"
+    return "zh"
+
+
+def _t(zh: str, en: str) -> str:
+    return zh if _lang() == "zh" else en
+
+
+def _bi(zh: str, en: str) -> str:
+    return f"{zh} / {en}"
 
 
 class TokenLimitCallback(BaseCallbackHandler):
@@ -84,7 +100,7 @@ class SmartAgent:
             ),
             api_key=SecretStr(resolved_api_key) if resolved_api_key else None,
             base_url=api_url or config.settings.OPENAI_API_URL,
-            timeout=60,
+            timeout=getattr(config.settings, "LLM_REQUEST_TIMEOUT", 120),
             streaming=True,
         )
         caps = get_capabilities()
@@ -94,25 +110,107 @@ class SmartAgent:
             self.tools = tools
         self.agent = self._create_agent()
 
+    @staticmethod
+    def _tool_sugar_protocol_note() -> str:
+        lines = [
+            _bi(
+                "MCP 工具输入协议扩展（tool 引用语法糖）：", 
+                "MCP Tool Input Protocol Extension (tool reference sugar):"
+                ),
+            _bi(
+                "- 在任意工具输入字符串中，可以使用 tool[index] 引用历史工具输出。",
+                "- In any tool input string, you may reference historical tool outputs with tool[index].",
+            ),
+            _bi(
+                "- 索引规则：tool[-1] 为最近一次已完成工具调用输出；tool[1] 为第一次已完成调用输出；tool[0] 无效。",
+                "- Indexing rules: tool[-1] is the latest completed tool call output; tool[1] is the first completed call output; tool[0] is invalid.",
+            ),
+            _bi(
+                "- 支持访问器链，例如 tool[-1][3][\"link\"] 或 tool[-1][\"results\"][0]。",
+                "- Accessor chain is supported, e.g. tool[-1][3][\"link\"] or tool[-1][\"results\"][0].",
+            ),
+            _bi(
+                "- 支持可选管道变换：| regex <pattern> [replacement]。",
+                "- Optional pipe transform is supported: | regex <pattern> [replacement].",
+            ),
+            _bi(
+                "- 若省略 replacement，默认返回整组匹配（$0）。",
+                "- If replacement is omitted, defaults to full match ($0).",
+            ),
+            _bi(
+                "- replacement 支持 $0/$1/$2... 捕获组，例如 tool[-1][3][\"link\"] | regex https?://(.*?)/ $1。",
+                "- Replacement supports $0/$1/$2... for regex groups, e.g. tool[-1][3][\"link\"] | regex https?://(.*?)/ $1.",
+            ),
+            _bi(
+                "- 请严格使用该语法；无法解析的引用会触发工具输入错误。",
+                "- Keep syntax exact; unresolved references will raise tool input errors.",
+            ),
+        ]
+        return "\n\n" + "\n".join(lines)
+
     def _create_agent(self):
+        protocol_note = self._tool_sugar_protocol_note() if self.tools else ""
         custom_prompt = (config.settings.SYSTEM_PROMPT or "").strip()
         if custom_prompt:
-            system_prompt = custom_prompt
+            system_prompt = custom_prompt + protocol_note
         elif self.tools:
             system_prompt = (
-                "You are a helpful assistant with access to retrieval and execution tools.\n"
-                "Strategy:\n"
-                "1) Use rag_search first for internal knowledge.\n"
-                "2) If rag_search is not useful, use fetch_webpage, skill_web_visit, or skill_search.\n"
-                "3) Use skill_file_io for workspace-local file read/write tasks.\n"
-                "4) Use skill_shell for safe command execution when needed.\n"
-                "5) Ground answers on retrieved content and tool output.\n"
-                "6) If tools fail, retry or explain limitations."
-            )
+                _bi(
+                    "你是一个可使用检索与执行工具的智能助手。", 
+                    "You are a helpful assistant with access to retrieval and execution tools."
+                    ) + "\n"
+                + _bi(
+                    "策略：", 
+                    "Strategy:"
+                    ) + "\n"
+                + _bi(
+                    "1) 优先使用 rag_search 检索内部知识。事实证明， rag_doc_list -> rag_doc_catalog -> rag_regex_search 的执行流是十分高效且可靠的内部知识检索方案。", 
+                    "1) Use rag_search first for internal knowledge. The rag_doc_list -> rag_doc_catalog -> rag_regex_search flow is an efficient and reliable internal retrieval solution."
+                    ) + "\n"
+                + _bi(
+                    "2) 若 rag_search 无效，再使用 fetch_webpage、skill_web_visit 或 skill_search。",
+                    "2) If rag_search is not useful, use fetch_webpage, skill_web_visit, or skill_search.",
+                ) + "\n"
+                + _bi(
+                    "3) 需要工作区文件读写时使用 skill_file_io。",
+                    "3) Use skill_file_io for workspace-local file read/write tasks.",
+                ) + "\n"
+                + _bi(
+                    "4) 需要安全执行命令时使用 skill_shell。",
+                    "4) Use skill_shell for safe command execution when needed.",
+                ) + "\n"
+                + _bi(
+                    "5) 回答应基于检索内容与工具输出。",
+                    "5) Ground answers on retrieved content and tool output.",
+                ) + "\n"
+                + _bi(
+                    "6) 工具失败时应重试或说明限制。",
+                    "6) If tools fail, retry or explain limitations.",
+                ) + "\n"
+                + _bi(
+                    "⚠️**关键警告**⚠️",
+                    "⚠️**Critical Warning**⚠️",
+                ) + "\n"
+                + _bi(
+                    "⚠️ 你不应该在回答/思考中包含任何未经工具验证的内容，除非你明确说明这是基于模型推测的结论，并且可能不准确，否则你可能会造成难以挽回的损失。",
+                    "⚠️ You should not include any content in your answers/thoughts that has not been verified by tools, unless you explicitly state that it is based on model inference and may be inaccurate. Failure to do so may lead to irreparable consequences."
+                ) + "\n"
+                + _bi(
+                    "⚠️ 你不应该在回答/思考中直接提及 MCP 工具返回的无自然语言意义的长字符串（比如 URL 等），这可能会导致 LLM 对关键内容的错误复制或者引发 LLM 输出崩坏，你应该尽量使用 ```tool``` 语法糖代指这一类工具返回结果。",
+                    "⚠️ You should avoid directly including long strings with no natural language meaning returned by MCP tools (like URLs) in your answers/thoughts, as this may lead to LLM mis-copying key content or output corruption. You should use the ```tool``` reference sugar to refer to such tool outputs whenever possible."
+                )
+            ) + protocol_note
         else:
             system_prompt = (
-                "You are a helpful assistant.\n"
-                "Tools are unavailable for this model; answer directly."
+                _bi(
+                    "你是一个乐于助人的助手。", 
+                    "You are a helpful assistant."
+                    )
+                + "\n"
+                + _bi(
+                    "当前模型不可用工具，请直接回答。", 
+                    "Tools are unavailable for this model; answer directly."
+                )
             )
         return create_agent(
             model=self.llm,
@@ -156,6 +254,101 @@ class SmartAgent:
         if len(text) <= limit:
             return text
         return f"{text[:limit]}...(truncated, len={len(text)})"
+
+    @staticmethod
+    def _is_retryable_timeout_error(exc: Exception) -> bool:
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError, concurrent.futures.TimeoutError)):
+            return True
+        type_name = type(exc).__name__.lower()
+        if "timeout" in type_name:
+            return True
+        message = str(exc).lower()
+        timeout_keys = (
+            "readtimeout",
+            "read timeout",
+            "connecttimeout",
+            "connect timeout",
+            "timeout",
+            "timed out",
+        )
+        return any(item in message for item in timeout_keys)
+
+    async def _ainvoke_with_retry(self, input_messages: list[Any], callbacks: list[BaseCallbackHandler]) -> dict:
+        retry_times = max(0, int(getattr(config.settings, "AGENT_LLM_RETRY_TIMES", 0)))
+        base_delay = float(getattr(config.settings, "AGENT_LLM_RETRY_DELAY", 1.0))
+        attempts = retry_times + 1
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                result = await self.agent.ainvoke(
+                    cast(Any, {"messages": input_messages}),
+                    cast(
+                        Any,
+                        {
+                            "callbacks": callbacks,
+                            "recursion_limit": config.settings.RECURSION_LIMIT,
+                        },
+                    ),
+                )
+                return cast(dict, result)
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_retryable_timeout_error(exc) or attempt >= attempts:
+                    raise
+                delay = max(0.0, base_delay * attempt)
+                logger.warning(
+                    "Agent ainvoke timeout, retrying (%s/%s) after %.2fs: %s",
+                    attempt,
+                    attempts,
+                    delay,
+                    self._short_debug_text(exc),
+                )
+                await asyncio.sleep(delay)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("ainvoke retry loop exited unexpectedly")
+
+    def _invoke_with_retry(self, input_messages: list[Any], callbacks: list[BaseCallbackHandler]) -> dict:
+        retry_times = max(0, int(getattr(config.settings, "AGENT_LLM_RETRY_TIMES", 0)))
+        base_delay = float(getattr(config.settings, "AGENT_LLM_RETRY_DELAY", 1.0))
+        invoke_timeout = int(getattr(config.settings, "AGENT_INVOKE_TIMEOUT", 180))
+        attempts = retry_times + 1
+        last_exc: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    fut = ex.submit(
+                        self.agent.invoke,
+                        cast(Any, {"messages": input_messages}),
+                        cast(
+                            Any,
+                            {
+                                "callbacks": callbacks,
+                                "recursion_limit": config.settings.RECURSION_LIMIT,
+                            },
+                        ),
+                    )
+                    try:
+                        return cast(dict, fut.result(timeout=invoke_timeout))
+                    except concurrent.futures.TimeoutError:
+                        fut.cancel()
+                        raise
+            except Exception as exc:
+                last_exc = exc
+                if not self._is_retryable_timeout_error(exc) or attempt >= attempts:
+                    raise
+                delay = max(0.0, base_delay * attempt)
+                logger.warning(
+                    "Agent invoke timeout, retrying (%s/%s) after %.2fs: %s",
+                    attempt,
+                    attempts,
+                    delay,
+                    self._short_debug_text(exc),
+                )
+                time.sleep(delay)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("invoke retry loop exited unexpectedly")
 
     def _tool_callback(self) -> BaseCallbackHandler:
         session_id = self.session_id
@@ -308,18 +501,10 @@ class SmartAgent:
             callback = TokenLimitCallback(config.settings.MAX_TOTAL_TOKENS)
             tool_callback = self._tool_callback()
             try:
-                # run agent.invoke in thread with timeout to protect against hangs
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-                    fut = ex.submit(
-                        self.agent.invoke,
-                        cast(Any, {"messages": messages_override or self.memory.get_messages()}),
-                        cast(Any, {"callbacks": [callback, tool_callback], "recursion_limit": config.settings.RECURSION_LIMIT}),
-                    )
-                    try:
-                        result = fut.result(timeout=getattr(config.settings, "AGENT_INVOKE_TIMEOUT", 60))
-                    except concurrent.futures.TimeoutError:
-                        fut.cancel()
-                        raise
+                result = self._invoke_with_retry(
+                    cast(list[Any], messages_override or self.memory.get_messages()),
+                    [callback, tool_callback],
+                )
                 answer, total_tokens = self._extract_answer_and_tokens(cast(dict, result))
                 logger.info("Token usage: %s", total_tokens)
                 agent_token_usage.inc(total_tokens)
@@ -401,16 +586,10 @@ class SmartAgent:
                 token = set_agent_active()
                 try:
                     # 使用 messages_override（如果存在）或 self.memory.get_messages()
-                    input_messages = messages_override or self.memory.get_messages()
-                    result = await self.agent.ainvoke(
-                        cast(Any, {"messages": input_messages}),
-                        cast(
-                            Any,
-                            {
-                                "callbacks": [callback, tool_callback],
-                                "recursion_limit": config.settings.RECURSION_LIMIT,
-                            },
-                        ),
+                    input_messages = cast(list[Any], messages_override or self.memory.get_messages())
+                    result = await self._ainvoke_with_retry(
+                        input_messages,
+                        [callback, tool_callback],
                     )
                 finally:
                     reset_agent_active(token)
@@ -493,6 +672,7 @@ class SmartAgent:
             error_text: Optional[str] = None
             final_answer: Optional[str] = None
 
+            @DeprecationWarning
             def _tool_markup(call: dict[str, Any]) -> str:
                 call_id = html.escape(str(call.get("call_id") or ""), quote=False)
                 tool_name = html.escape(str(call.get("tool_name") or "tool"), quote=False)
@@ -585,12 +765,20 @@ class SmartAgent:
                     return text
 
                 def _write_to_front_end(self, message: str) -> None:
-                    print(message, flush=True, end="")  # for debugging
+                    print(message, flush=True, end='')  # for debugging
+                    if '</result></tool>' in message:
+                        # 人工断点
+                        pass
                     self.queue.put_nowait(message)
                     
                 def on_llm_new_token(self, token: str, **kwargs):
                     """流式输出 token"""
-                    reasoning = kwargs['chunk'].message.additional_kwargs.get("reasoning")
+                    chunk = kwargs.get("chunk")
+                    chunk_message = getattr(chunk, "message", None)
+                    if not isinstance(chunk_message, AIMessageChunk):
+                        return
+
+                    reasoning = (getattr(chunk_message, "additional_kwargs", None) or {}).get("reasoning")
                     assert not ((reasoning is not None and len(reasoning) > 0) and (len(token) > 0)), \
                         f"Token({token})(length:{len(token) if isinstance(token, str) else 'N/A'}) and reasoning({reasoning})(length:{len(reasoning) if isinstance(reasoning, str) else 'N/A'}) cannot both be present"
                     if reasoning is not None and len(reasoning) > 0:
@@ -666,13 +854,10 @@ class SmartAgent:
                 nonlocal error_text, final_answer
                 token = set_agent_active()
                 try:
-                    input_messages = messages_override or self.memory.get_messages()
-                    result = await self.agent.ainvoke(
-                        cast(Any, {"messages": input_messages}),
-                        cast(Any, {
-                            "callbacks": [callback, stream_callback, tool_callback],
-                            "recursion_limit": config.settings.RECURSION_LIMIT,
-                        }),
+                    input_messages = cast(list[Any], messages_override or self.memory.get_messages())
+                    result = await self._ainvoke_with_retry(
+                        input_messages,
+                        [callback, stream_callback, tool_callback],
                     )
                     answer, total_tokens = self._extract_answer_and_tokens(cast(dict, result))
                     final_answer = answer

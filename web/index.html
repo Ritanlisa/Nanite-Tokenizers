@@ -1263,6 +1263,7 @@
       let sessionId = null;
       let attachmentsState = [];
       let mcpLinks = [];
+      let settingsSnapshot = null;
       let graphState = { counts: {}, calls: [] };
       let graphAnimationId = null;
       let capabilities = { tool_calling_supported: null, multimodal_supported: null };
@@ -1557,6 +1558,122 @@
         return table[key] || translations.en[key] || key;
       };
 
+      const settingLabelTranslations = {
+        en: {
+          ENV: "Environment",
+          DATA_DIR: "Data Directory",
+          PERSIST_DIR: "Persist Directory",
+          OFFLINE_ONLY: "Offline Only",
+          OPENAI_API_KEY: "OpenAI API Key",
+          OPENAI_API_URL: "OpenAI API URL",
+          LLM_MODEL: "LLM Model",
+          TEMPERATURE: "Temperature",
+          EMBED_MODEL: "Embedding Model",
+          EMBED_DIM: "Embedding Dimension",
+          ENABLE_RAG: "Enable RAG",
+          CHUNK_SIZE: "Chunk Size",
+          CHUNK_OVERLAP: "Chunk Overlap",
+          SIMILARITY_TOP_K: "Similarity Top K",
+          ENABLE_RERANK: "Enable Rerank",
+          RERANK_MODEL: "Rerank Model",
+          RERANK_TOP_N: "Rerank Top N",
+          RAG_CONFIDENCE_THRESHOLD: "RAG Confidence Threshold",
+          MIN_RAG_SOURCES: "Min RAG Sources",
+          VECTOR_STORE_TYPE: "Vector Store Type",
+          FAISS_INDEX_TYPE: "FAISS Index Type",
+          SAMPLE_FOR_TRAINING: "Sample For Training",
+          VECTOR_STORE_FALLBACK_WARNING: "Vector Store Fallback Warning",
+          CACHE_TYPE: "Cache Type",
+          REDIS_URL: "Redis URL",
+          CACHE_TTL: "Cache TTL (s)",
+          MEMORY_CACHE_MAXSIZE: "Memory Cache Max Size",
+          MCP_FETCH_SERVER_COMMAND: "MCP Fetch Server Command",
+          MCP_TIMEOUT: "MCP Timeout (s)",
+          MCP_INIT_TIMEOUT: "MCP Init Timeout (s)",
+          MCP_MAX_RESTART: "MCP Max Restart",
+          MCP_RETRY_TIMES: "MCP Retry Times",
+          MCP_RETRY_DELAY: "MCP Retry Delay (s)",
+          AGENT_VERBOSE: "Agent Verbose",
+          MAX_ITERATIONS: "Max Iterations",
+          LLM_REQUEST_TIMEOUT: "LLM Request Timeout (s)",
+          AGENT_INVOKE_TIMEOUT: "Agent Invoke Timeout (s)",
+          AGENT_LLM_RETRY_TIMES: "Agent LLM Retry Times",
+          AGENT_LLM_RETRY_DELAY: "Agent LLM Retry Delay (s)",
+          MAX_TOTAL_TOKENS: "Max Total Tokens",
+          MAX_HISTORY_ROUNDS: "Max History Rounds",
+          SYSTEM_PROMPT: "System Prompt",
+          BATCH_CONCURRENCY: "Batch Concurrency",
+          LOG_LEVEL: "Log Level",
+          LOG_FILE: "Log File",
+          LOG_MAX_BYTES: "Log Max Bytes",
+          LOG_BACKUP_COUNT: "Log Backup Count",
+          OCR_API_KEY: "OCR API Key",
+          OCR_API_URL: "OCR API URL",
+          OCR_MODEL: "OCR Model",
+          OCR_PROMPT: "OCR Prompt",
+          OCR_TIMEOUT: "OCR Timeout (s)",
+        },
+        zh: {
+          ENV: "环境",
+          DATA_DIR: "数据目录",
+          PERSIST_DIR: "持久化目录",
+          OFFLINE_ONLY: "仅离线模式",
+          OPENAI_API_KEY: "OpenAI API 密钥",
+          OPENAI_API_URL: "OpenAI API 地址",
+          LLM_MODEL: "大语言模型",
+          TEMPERATURE: "温度",
+          EMBED_MODEL: "向量模型",
+          EMBED_DIM: "向量维度",
+          ENABLE_RAG: "启用 RAG",
+          CHUNK_SIZE: "分块大小",
+          CHUNK_OVERLAP: "分块重叠",
+          SIMILARITY_TOP_K: "相似度 Top K",
+          ENABLE_RERANK: "启用重排",
+          RERANK_MODEL: "重排模型",
+          RERANK_TOP_N: "重排 Top N",
+          RAG_CONFIDENCE_THRESHOLD: "RAG 置信阈值",
+          MIN_RAG_SOURCES: "最少 RAG 来源",
+          VECTOR_STORE_TYPE: "向量库类型",
+          FAISS_INDEX_TYPE: "FAISS 索引类型",
+          SAMPLE_FOR_TRAINING: "训练采样数",
+          VECTOR_STORE_FALLBACK_WARNING: "向量库降级告警",
+          CACHE_TYPE: "缓存类型",
+          REDIS_URL: "Redis 地址",
+          CACHE_TTL: "缓存 TTL（秒）",
+          MEMORY_CACHE_MAXSIZE: "内存缓存最大条目",
+          MCP_FETCH_SERVER_COMMAND: "MCP 拉取服务命令",
+          MCP_TIMEOUT: "MCP 超时（秒）",
+          MCP_INIT_TIMEOUT: "MCP 初始化超时（秒）",
+          MCP_MAX_RESTART: "MCP 最大重启次数",
+          MCP_RETRY_TIMES: "MCP 重试次数",
+          MCP_RETRY_DELAY: "MCP 重试间隔（秒）",
+          AGENT_VERBOSE: "智能体详细日志",
+          MAX_ITERATIONS: "最大迭代次数",
+          LLM_REQUEST_TIMEOUT: "LLM 请求超时（秒）",
+          AGENT_INVOKE_TIMEOUT: "Agent 调用超时（秒）",
+          AGENT_LLM_RETRY_TIMES: "Agent LLM 重试次数",
+          AGENT_LLM_RETRY_DELAY: "Agent LLM 重试间隔（秒）",
+          MAX_TOTAL_TOKENS: "最大总 Token",
+          MAX_HISTORY_ROUNDS: "最大历史轮数",
+          SYSTEM_PROMPT: "系统提示词",
+          BATCH_CONCURRENCY: "批处理并发数",
+          LOG_LEVEL: "日志级别",
+          LOG_FILE: "日志文件",
+          LOG_MAX_BYTES: "日志最大大小（字节）",
+          LOG_BACKUP_COUNT: "日志备份数量",
+          OCR_API_KEY: "OCR API 密钥",
+          OCR_API_URL: "OCR API 地址",
+          OCR_MODEL: "OCR 模型",
+          OCR_PROMPT: "OCR 提示词",
+          OCR_TIMEOUT: "OCR 超时（秒）",
+        },
+      };
+
+      const settingLabel = (key) => {
+        const table = settingLabelTranslations[currentLang] || settingLabelTranslations.en;
+        return table[key] || settingLabelTranslations.en[key] || key;
+      };
+
       const applyTranslations = () => {
         document.title = t("title");
         appTitle.textContent = t("title");
@@ -1611,6 +1728,9 @@
         sessionLabel.textContent = t("sessionLabel");
         if (requestCancelBtn) requestCancelBtn.textContent = t("modalCancel");
         if (requestConfirmBtn) requestConfirmBtn.textContent = t("modalConfirm");
+        if (settingsSnapshot) {
+          renderSettings(settingsSnapshot);
+        }
         renderAttachments();
         renderMcpLinks();
         const current = getActiveSession();
@@ -1620,6 +1740,10 @@
       };
 
       const createNode = (role, text, extra = {}) => {
+        const hasGenerationMs =
+          extra.generationMs !== null &&
+          extra.generationMs !== undefined &&
+          Number.isFinite(Number(extra.generationMs));
         return {
           id: crypto.randomUUID(),
           role,
@@ -1628,7 +1752,7 @@
           toolPolling: Boolean(extra.toolPolling),
           collapseState: normalizeCollapseState(extra.collapseState),
           generationStartedAt: Number(extra.generationStartedAt) || null,
-          generationMs: Number.isFinite(Number(extra.generationMs))
+          generationMs: hasGenerationMs
             ? Math.max(0, Number(extra.generationMs))
             : null,
           parentId: extra.parentId || null,
@@ -2182,14 +2306,12 @@
 
                 const idResult = extractTag('id', innerContent, nextIdx);
                 if (!idResult) {
-                  currentText += rawText.slice(i - (tagEnd - i + 1));
                   break;
                 }
                 nextIdx = idResult.endIdx;
 
                 const typeResult = extractTag('type', innerContent, nextIdx);
                 if (!typeResult) {
-                  currentText += rawText.slice(i - (tagEnd - i + 1));
                   break;
                 }
                 nextIdx = typeResult.endIdx;
@@ -2206,7 +2328,6 @@
                     query = innerContent.slice(openIdx + openQuery.length);
                     nextIdx = innerContent.length;
                   } else {
-                    currentText += rawText.slice(i - (tagEnd - i + 1));
                     break;
                   }
                 }
@@ -2350,8 +2471,14 @@
           bubble.appendChild(indicator);
         }
 
-        const hasDuration = Number.isFinite(Number(message?.generationMs));
-        const hasStart = Number.isFinite(Number(message?.generationStartedAt));
+        const hasDuration =
+          message?.generationMs !== null &&
+          message?.generationMs !== undefined &&
+          Number.isFinite(Number(message.generationMs));
+        const hasStart =
+          message?.generationStartedAt !== null &&
+          message?.generationStartedAt !== undefined &&
+          Number.isFinite(Number(message.generationStartedAt));
         if (hasDuration || hasStart) {
           const timing = document.createElement("div");
           timing.className = "timing-indicator";
@@ -3948,6 +4075,10 @@
         MIN_RAG_SOURCES: { type: "range", min: 1, max: 10, step: 1 },
         SAMPLE_FOR_TRAINING: { type: "range", min: 1, max: 5000, step: 50 },
         MAX_ITERATIONS: { type: "range", min: 1, max: 20, step: 1 },
+        LLM_REQUEST_TIMEOUT: { type: "range", min: 10, max: 600, step: 5 },
+        AGENT_INVOKE_TIMEOUT: { type: "range", min: 10, max: 1200, step: 10 },
+        AGENT_LLM_RETRY_TIMES: { type: "range", min: 0, max: 5, step: 1 },
+        AGENT_LLM_RETRY_DELAY: { type: "range", min: 0.1, max: 30, step: 0.1 },
         MAX_TOTAL_TOKENS: { type: "range", min: 1000, max: 16000, step: 100 },
         MAX_HISTORY_ROUNDS: { type: "range", min: 1, max: 50, step: 1 },
         CACHE_TTL: { type: "range", min: 60, max: 7200, step: 60 },
@@ -3962,7 +4093,7 @@
         ENV: { type: "select", options: ["dev", "test", "prod"] },
       };
 
-      const sections = [
+      const getSettingsSections = () => [
         {
           title: t("sectionGeneral"),
           keys: ["ENV", "DATA_DIR", "PERSIST_DIR", "OFFLINE_ONLY"],
@@ -4016,6 +4147,10 @@
           keys: [
             "AGENT_VERBOSE",
             "MAX_ITERATIONS",
+            "LLM_REQUEST_TIMEOUT",
+            "AGENT_INVOKE_TIMEOUT",
+            "AGENT_LLM_RETRY_TIMES",
+            "AGENT_LLM_RETRY_DELAY",
             "MAX_TOTAL_TOKENS",
             "MAX_HISTORY_ROUNDS",
             "SYSTEM_PROMPT",
@@ -4041,7 +4176,7 @@
           const wrapper = document.createElement("div");
           wrapper.className = "field";
           const label = document.createElement("label");
-          label.textContent = key;
+          label.textContent = settingLabel(key);
           wrapper.appendChild(label);
 
           const config = meta[key] || {};
@@ -4122,7 +4257,7 @@
           return wrapper;
         };
 
-        sections.forEach((section) => {
+        getSettingsSections().forEach((section) => {
           const sectionWrapper = document.createElement("div");
           sectionWrapper.className = "settings-section";
 
@@ -4158,11 +4293,12 @@
             return;
           }
           const data = await response.json();
+          settingsSnapshot = data.settings || {};
           mcpLinks = Array.isArray(data.settings.MCP_SERVER_URLS)
             ? data.settings.MCP_SERVER_URLS
             : [];
           renderMcpLinks();
-          renderSettings(data.settings || {});
+          renderSettings(settingsSnapshot);
           if (data.settings) {
             const current = getActiveSession();
             const sessionRagDbs = getSessionRagDbNames(current);

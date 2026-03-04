@@ -17,10 +17,16 @@ from exceptions import MCPFatalError
 from mcp_client.client import get_mcp_client
 from rag.documents import RAG_DB_Document
 from rag.engine import RAGEngine
-from tool_usage import start_current_tool_call, end_current_tool_call
+from tool_usage import (
+    start_current_tool_call,
+    end_current_tool_call,
+    get_tool_usage,
+    get_current_session_id,
+)
 
 import subprocess
 import re
+import shlex
 from html import unescape
 import os
 from pathlib import Path
@@ -47,6 +53,10 @@ logger = logging.getLogger(__name__)
 rag_engine = RAGEngine()
 _EMPTY = object()
 _LAST_SEARCH_STATE: dict[str, Any] | None = None
+_HIDDEN_LINK_STORE: dict[str, list[str]] = {}
+_SUGAR_URL_MARKS: dict[str, int] = {}
+_TOOL_REF_PATTERN = re.compile(r"^tool\[(-?\d+)\]")
+_ACCESSOR_PATTERN = re.compile(r"\[(?:(-?\d+)|\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)')\]")
 
 
 def _lang() -> str:
@@ -127,6 +137,203 @@ def _strip_html(text: str) -> str:
 def _sleep_with_jitter(base: float, jitter: float = 0.35) -> None:
     delay = max(0.0, base + random.uniform(0.0, max(0.0, jitter)))
     time.sleep(delay)
+
+
+def _try_parse_json(text: str) -> Any:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    try:
+        return json.loads(raw)
+    except Exception:
+        return raw
+
+
+def _select_tool_call_output(call_index: int) -> Any:
+    usage = get_tool_usage(get_current_session_id())
+    calls_obj = usage.get("calls") if isinstance(usage, dict) else []
+    calls: list[Any] = calls_obj if isinstance(calls_obj, list) else []
+    completed = [item for item in calls if isinstance(item, dict) and item.get("ended_at") is not None]
+    if not completed:
+        raise ValueError(_t("当前没有可用的已完成工具调用。", "No completed tool calls available yet."))
+
+    if call_index < 0:
+        idx = len(completed) + call_index
+    else:
+        if call_index == 0:
+            raise ValueError(_t("tool[0] 无效，正数索引从 1 开始。", "tool[0] is invalid; positive indices start at 1."))
+        idx = call_index - 1
+
+    if idx < 0 or idx >= len(completed):
+        raise ValueError(
+            _t(
+                f"tool[{call_index}] 越界，当前已完成调用数为 {len(completed)}。",
+                f"tool[{call_index}] is out of range; completed calls: {len(completed)}.",
+            )
+        )
+
+    selected_call = completed[idx]
+    output_text = str(selected_call.get("tool_output") or "")
+    parsed = _try_parse_json(output_text)
+    call_id = str(selected_call.get("call_id") or "")
+    return _inject_hidden_links(parsed, call_id)
+
+
+def _inject_hidden_links(parsed_output: Any, call_id: str) -> Any:
+    links = _HIDDEN_LINK_STORE.get(call_id) if call_id else None
+    if not links:
+        return parsed_output
+
+    def _attach(items: list[Any]) -> list[Any]:
+        result: list[Any] = []
+        for index, item in enumerate(items):
+            if isinstance(item, dict):
+                row = dict(item)
+                if index < len(links):
+                    row["_url"] = links[index]
+                result.append(row)
+            else:
+                result.append(item)
+        return result
+
+    if isinstance(parsed_output, list):
+        return _attach(parsed_output)
+    if isinstance(parsed_output, dict):
+        results = parsed_output.get("results")
+        if isinstance(results, list):
+            cloned = dict(parsed_output)
+            cloned["results"] = _attach(results)
+            return cloned
+    return parsed_output
+
+
+def _apply_accessor_chain(base_value: Any, chain_text: str) -> Any:
+    value = base_value
+    cursor = 0
+    for match in _ACCESSOR_PATTERN.finditer(chain_text or ""):
+        if match.start() != cursor:
+            raise ValueError(_t("无效的 tool 访问器语法。", "Invalid tool accessor syntax."))
+        cursor = match.end()
+
+        int_part = match.group(1)
+        dq_key = match.group(2)
+        sq_key = match.group(3)
+
+        if int_part is not None:
+            key: Any = int(int_part)
+        else:
+            key_text = dq_key if dq_key is not None else (sq_key or "")
+            key = bytes(key_text, "utf-8").decode("unicode_escape")
+
+        if isinstance(value, (list, tuple)):
+            if not isinstance(key, int):
+                raise ValueError(_t("列表索引必须是整数。", "List index must be an integer."))
+            if key < 0:
+                key = len(value) + key
+            if key < 0 or key >= len(value):
+                raise ValueError(_t("列表索引越界。", "List index out of range."))
+            value = value[key]
+            continue
+
+        if isinstance(value, dict):
+            dict_key: Any = key
+            if dict_key not in value and isinstance(dict_key, int):
+                dict_key = str(dict_key)
+            if dict_key not in value:
+                raise ValueError(_t("字典键不存在。", "Dictionary key does not exist."))
+            value = value[dict_key]
+            continue
+
+        raise ValueError(_t("当前值不支持继续索引。", "Current value is not indexable."))
+
+    if cursor != len(chain_text or ""):
+        raise ValueError(_t("无效的 tool 访问器语法。", "Invalid tool accessor syntax."))
+    return value
+
+
+def _render_regex_replacement(template: str, matched: re.Match[str]) -> str:
+    result = template.replace("$0", matched.group(0))
+    for idx, group in enumerate(matched.groups(), start=1):
+        result = result.replace(f"${idx}", group or "")
+    return result
+
+
+def _apply_pipe_regex(value: Any, spec: str) -> Any:
+    text = str(value)
+    parts = shlex.split(spec)
+    if not parts or parts[0].strip().lower() != "regex":
+        raise ValueError(_t("仅支持 | regex ... 管道。", "Only | regex ... pipe is supported."))
+    if len(parts) < 2:
+        raise ValueError(_t("regex 管道缺少 pattern。", "regex pipe requires a pattern."))
+
+    pattern_text = parts[1]
+    repl = "$0" if len(parts) == 2 else " ".join(parts[2:])
+    pattern = re.compile(pattern_text, re.S)
+    matched = pattern.search(text)
+    if not matched:
+        return ""
+    return _render_regex_replacement(repl, matched)
+
+
+def _resolve_tool_reference_sugar(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _resolve_tool_reference_sugar(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_resolve_tool_reference_sugar(item) for item in value]
+    if not isinstance(value, str):
+        return value
+
+    source = value.strip()
+    if not source.startswith("tool["):
+        return value
+
+    segments = [segment.strip() for segment in source.split("|")]
+    if not segments:
+        return value
+
+    expr = segments[0]
+    match = _TOOL_REF_PATTERN.match(expr)
+    if not match:
+        return value
+
+    call_index = int(match.group(1))
+    accessor_text = expr[match.end():].strip()
+    resolved: Any = _select_tool_call_output(call_index)
+
+    if accessor_text:
+        resolved = _apply_accessor_chain(resolved, accessor_text)
+
+    for pipe_spec in segments[1:]:
+        if not pipe_spec:
+            continue
+        resolved = _apply_pipe_regex(resolved, pipe_spec)
+
+    _mark_sugar_url_candidates(resolved)
+    return resolved
+
+
+def _extract_domain(url: str) -> str:
+    try:
+        netloc = (urlsplit(url).netloc or "").strip().lower()
+    except Exception:
+        netloc = ""
+    if not netloc:
+        return ""
+    if ":" in netloc:
+        netloc = netloc.split(":", 1)[0]
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    return netloc
+
+
+def _mask_result_url(item: dict[str, str]) -> dict[str, str]:
+    full_url = str(item.get("link") or "").strip()
+    domain = _extract_domain(full_url)
+    return {
+        "title": item.get("title") or domain or full_url,
+        "link": domain or _t("未知域名", "unknown-domain"),
+        "snippet": item.get("snippet") or "",
+    }
 
 
 def _configure_driver_options(kind: str) -> tuple[str, Any]:
@@ -259,6 +466,73 @@ def _set_url_query_param(url: str, key: str, value: str) -> str:
     if not replaced:
         normalized.append((key, value))
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(normalized), parsed.fragment))
+
+
+_DOMAIN_OR_IP_PATTERN = re.compile(
+    r"^(?:"
+    r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}"
+    r"|(?:\d{1,3}\.){3}\d{1,3}"
+    r")"
+    r"(?::\d+)?"
+    r"(?:/[^\s]*)?"
+    r"$"
+)
+
+
+def _normalize_url_with_warning(raw_url: str) -> tuple[str, str]:
+    candidate = (raw_url or "").strip()
+    if not candidate:
+        return "", ""
+    if re.match(r"^https?://", candidate, re.I):
+        normalized = candidate
+        if _consume_sugar_url_mark(normalized):
+            return normalized, ""
+        warning = _t(
+            "⚠️ 检测到直接传入 URL（未通过 tool[i]... 语法糖引用）。建议使用语法糖以避免 URL 明文泄露。",
+            "⚠️ Direct URL input detected (not via tool[i]... sugar reference). Prefer sugar references to avoid exposing raw URLs.",
+        )
+        return normalized, warning
+    if _DOMAIN_OR_IP_PATTERN.match(candidate):
+        normalized = f"https://{candidate}"
+        if _consume_sugar_url_mark(normalized):
+            return normalized, ""
+        warning = _t(
+            "⚠️ 检测到直接传入 URL（未通过 tool[i]... 语法糖引用）。建议使用语法糖以避免 URL 明文泄露。",
+            "⚠️ Direct URL input detected (not via tool[i]... sugar reference). Prefer sugar references to avoid exposing raw URLs.",
+        )
+        return normalized, warning
+    return candidate, ""
+
+
+def _mark_sugar_url_candidates(value: Any) -> None:
+    if isinstance(value, dict):
+        for item in value.values():
+            _mark_sugar_url_candidates(item)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            _mark_sugar_url_candidates(item)
+        return
+    if not isinstance(value, str):
+        return
+
+    text = value.strip()
+    if not text:
+        return
+    normalized = text if re.match(r"^https?://", text, re.I) else f"https://{text}"
+    if re.match(r"^https?://", normalized, re.I):
+        _SUGAR_URL_MARKS[normalized] = _SUGAR_URL_MARKS.get(normalized, 0) + 1
+
+
+def _consume_sugar_url_mark(url: str) -> bool:
+    count = int(_SUGAR_URL_MARKS.get(url) or 0)
+    if count <= 0:
+        return False
+    if count == 1:
+        _SUGAR_URL_MARKS.pop(url, None)
+    else:
+        _SUGAR_URL_MARKS[url] = count - 1
+    return True
 
 
 def _fill_search_input(element: Any, query: str) -> None:
@@ -453,7 +727,23 @@ class MathComputeInput(BaseModel):
     )
 
 
-class MathComputeTool(BaseTool):
+class InputSugarTool(BaseTool):
+    @staticmethod
+    def _normalize_tool_input(input_value: Any) -> Any:
+        if isinstance(input_value, dict):
+            return _resolve_tool_reference_sugar(input_value)
+        return input_value
+
+    async def ainvoke(self, input: Any = None, config: Any = None, **kwargs: Any) -> Any:
+        normalized_input = self._normalize_tool_input(input)
+        return await super().ainvoke(normalized_input, config=config, **kwargs)
+
+    def invoke(self, input: Any = None, config: Any = None, **kwargs: Any) -> Any:
+        normalized_input = self._normalize_tool_input(input)
+        return super().invoke(normalized_input, config=config, **kwargs)
+
+
+class MathComputeTool(InputSugarTool):
     name: str = "math_compute"
     description: str = _bi("数学计算工具：表达式计算/表达式化简/函数计算/方程求解/矩阵运算。", "Math tool: expression eval/simplify, function eval, equation solving, and matrix operations.")
     args_schema: Any = MathComputeInput
@@ -619,7 +909,7 @@ class MathComputeTool(BaseTool):
         raise NotImplementedError("Use async call")
 
 
-class RAGDocListTool(BaseTool):
+class RAGDocListTool(InputSugarTool):
     name: str = "rag_doc_list"
     description: str = _bi("列举当前RAG数据库中的所有文档标题及其估计页数。", "List all documents in the current RAG database with estimated page counts.")
     args_schema: Any = RAGDocListInput
@@ -659,7 +949,7 @@ class RAGDocListTool(BaseTool):
     def _run(self) -> str:
         raise NotImplementedError("Use async call")
 
-class RAGDocCatalogTool(BaseTool):
+class RAGDocCatalogTool(InputSugarTool):
     name: str = "rag_doc_catalog"
     description: str = _bi(
         "返回指定RAG文档的目录结构（章节路径及页码）。⚠️ 页面范围可能不准确，目录及页码均为程序自动提取，可能存在缺失或错误，请谨慎使用并勿过度依赖页码准确性。", 
@@ -701,7 +991,7 @@ class RAGDocCatalogTool(BaseTool):
     def _run(self, doc_name: str) -> str:
         raise NotImplementedError("Use async call")
 
-class RAGRegexSearchTool(BaseTool):
+class RAGRegexSearchTool(InputSugarTool):
     name: str = "rag_regex_search"
     description: str = _bi(
         "根据正则表达式检索文档片段，支持指定文档和页面范围，请确保正则表达式正确。可选动态权重：在 regex 使用 (..)? 等捕获组，并通过 capture_group_weights 按组顺序传入加分权重；命中对应组即加分。",
@@ -812,7 +1102,7 @@ class RAGRegexSearchTool(BaseTool):
     def _run(self, **kwargs) -> str:
         raise NotImplementedError("Use async call")
 
-class RAGVectorSearchTool(BaseTool):
+class RAGVectorSearchTool(InputSugarTool):
     name: str = "rag_vector_search"
     description: str = _bi(
         "根据查询文本的向量相似度检索文档片段（结果不准确），支持指定文档和页面范围，建议谨慎使用。", 
@@ -895,7 +1185,7 @@ class RAGVectorSearchTool(BaseTool):
         raise NotImplementedError("Use async call")
 
 
-class RAGLastSearchPagingTool(BaseTool):
+class RAGLastSearchPagingTool(InputSugarTool):
     name: str = "rag_last_search_paging"
     description: str = _bi(
         "对最后一次 rag_regex_search / rag_vector_search 结果翻页：支持 +x、-x、x、first、last。",
@@ -947,7 +1237,7 @@ class RAGLastSearchPagingTool(BaseTool):
         raise NotImplementedError("Use async call")
 
 
-class RAGGetPagesTool(BaseTool):
+class RAGGetPagesTool(InputSugarTool):
     name: str = "rag_get_pages"
     description: str = _bi(
         "直接按页获取指定文档内容，并整理为 Markdown 供 LLM 使用。⚠️ 请勿一次性获取过长范围或过大内容，否则会显著占用上下文长度并影响后续推理。",
@@ -1145,7 +1435,7 @@ class SeleniumWebVisitInput(BaseModel):
     )
 
 
-class FetchWebpageTool(BaseTool):
+class FetchWebpageTool(InputSugarTool):
     name: str = "fetch_webpage"
     description: str = _bi("抓取指定网页 URL 的内容。", "Fetch content from a specified webpage URL.")
     args_schema: Any = FetchWebpageInput
@@ -1161,7 +1451,16 @@ class FetchWebpageTool(BaseTool):
         output_text = ""
         client = get_mcp_client()
         try:
-            output_text = await client.fetch(url)
+            target_url, warning = _normalize_url_with_warning(url)
+            if not target_url:
+                output_text = _t("缺少 URL 参数。", "Missing URL argument.")
+                return output_text
+            if not re.match(r"^https?://", target_url, re.I):
+                output_text = _t("仅支持 http/https URL。", "Only http/https URLs are supported.")
+                return output_text
+
+            fetched = await client.fetch(target_url)
+            output_text = f"{warning}\n\n{fetched}" if warning else fetched
             return output_text
         except MCPFatalError:
             output_text = _t("MCP 服务不可用。", "MCP service unavailable.")
@@ -1183,7 +1482,7 @@ class FetchWebpageTool(BaseTool):
         raise NotImplementedError("Use async call")
 
 
-class WebVisitTool(BaseTool):
+class WebVisitTool(InputSugarTool):
     name: str = "skill_web_visit"
     description: str = _bi(
         "基于 Selenium 访问网页并提取正文文本（适用于需要 JS 渲染的页面）。",
@@ -1195,7 +1494,7 @@ class WebVisitTool(BaseTool):
         call_id = start_current_tool_call(self.name, {"url": url, "wait_xpath": wait_xpath, "max_chars": max_chars})
         output_text = ""
         try:
-            target_url = (url or "").strip()
+            target_url, warning = _normalize_url_with_warning(url)
             if not target_url:
                 output_text = _t("缺少 URL 参数。", "Missing URL argument.")
                 return output_text
@@ -1234,9 +1533,13 @@ class WebVisitTool(BaseTool):
                 finally:
                     driver.quit()
 
-            output_text = await asyncio.to_thread(_visit)
-            if not output_text:
+            visited_text = await asyncio.to_thread(_visit)
+            if not visited_text:
                 output_text = _t("页面内容为空或未提取到文本。", "Page content is empty or no text extracted.")
+            elif warning:
+                output_text = f"{warning}\n\n{visited_text}"
+            else:
+                output_text = visited_text
             return output_text
         except Exception as exc:
             logger.exception("selenium web visit failed")
@@ -1255,20 +1558,21 @@ class WebVisitTool(BaseTool):
         raise NotImplementedError("Use async call")
 
 
-class SkillBridgeTool(BaseTool):
+class SkillBridgeTool(InputSugarTool):
     skill: AgentSkill
     name: str = ""
     description: str = ""
     args_schema: Any = None
 
     def __init__(self, skill: AgentSkill, **kwargs: Any):
-        super().__init__(
-            name=skill.name,
-            description=skill.description,
-            args_schema=skill.args_schema,
-            skill=skill,
-            **kwargs,
-        )
+        init_data = {
+            "name": skill.name,
+            "description": skill.description,
+            "args_schema": skill.args_schema,
+            "skill": skill,
+        }
+        init_data.update(kwargs)
+        super().__init__(**init_data)
 
     async def _arun(self, **kwargs: Any) -> str:
         
@@ -1289,7 +1593,7 @@ class ShellInput(BaseModel):
     timeout: int = Field(default=20, ge=1, le=120, description=_bi("执行超时时间（秒）", "Execution timeout in seconds"))
 
 
-class ShellTool(BaseTool):
+class ShellTool(InputSugarTool):
     name: str = "skill_shell"
     description: str = _bi("在工作区执行 Shell 命令，并返回标准输出/标准错误。", "Execute shell commands in the workspace and return stdout/stderr.")
     args_schema: Any = ShellInput
@@ -1361,7 +1665,7 @@ class FileIOInput(BaseModel):
     content: str = Field(default="", description=_bi("write/append 时要写入的内容", "Content to write/append"))
 
 
-class FileIOTool(BaseTool):
+class FileIOTool(InputSugarTool):
     name: str = "skill_file_io"
     description: str = _bi("在工作区根目录下读/写/追加文件，并列出/创建目录。", "Read/write/append files and list/create directories under workspace root.")
     args_schema: Any = FileIOInput
@@ -1478,7 +1782,7 @@ class URLRegSearchInput(BaseModel):
 class AgentIdeaInput(BaseModel):
     content: str = Field(description=_bi("要记录的内容", "Content to record"))
 
-class SearchTool(BaseTool):
+class SearchTool(InputSugarTool):
     name: str = "skill_search"
     description: str = _bi(
         "使用 Selenium 驱动搜索引擎页面并返回结果，支持可配置 XPath/Regex 与翻页。",
@@ -1560,7 +1864,9 @@ class SearchTool(BaseTool):
             if not items:
                 output_text = _t("未解析到搜索结果。", "No search results were parsed.")
                 return output_text
-            output_text = json.dumps(items, ensure_ascii=False)
+            _HIDDEN_LINK_STORE[call_id] = [str(item.get("link") or "") for item in items]
+            masked_items = [_mask_result_url(item) for item in items]
+            output_text = json.dumps(masked_items, ensure_ascii=False)
             return output_text
         except Exception as exc:
             logger.exception("search tool failed")
@@ -1579,7 +1885,7 @@ class SearchTool(BaseTool):
         raise NotImplementedError("Use async call")
 
 
-class URLRegSearchTool(BaseTool):
+class URLRegSearchTool(InputSugarTool):
     name: str = "skill_url_reg_search"
     description: str = _bi(
         "从指定 URL 抓取页面 HTML，并按给定正则匹配搜索结果（命名组：link/title/snippet）。",
@@ -1598,7 +1904,7 @@ class URLRegSearchTool(BaseTool):
                 output_text = _t("搜索工具已被配置禁用。", "Search tool is disabled by configuration.")
                 return output_text
 
-            target_url = (url or "").strip()
+            target_url, warning = _normalize_url_with_warning(url)
             if not target_url:
                 output_text = _t("缺少 URL 参数。", "Missing URL argument.")
                 return output_text
@@ -1641,7 +1947,16 @@ class URLRegSearchTool(BaseTool):
             if not items:
                 output_text = _t("未匹配到任何结果。", "No results matched.")
                 return output_text
-            output_text = json.dumps(items, ensure_ascii=False)
+            _HIDDEN_LINK_STORE[call_id] = [str(item.get("link") or "") for item in items]
+            masked_items = [_mask_result_url(item) for item in items]
+            if warning:
+                payload = {
+                    "warning": warning,
+                    "results": masked_items,
+                }
+                output_text = json.dumps(payload, ensure_ascii=False)
+            else:
+                output_text = json.dumps(masked_items, ensure_ascii=False)
             return output_text
         except Exception as exc:
             logger.exception("url reg search tool failed")
@@ -1660,7 +1975,7 @@ class URLRegSearchTool(BaseTool):
         raise NotImplementedError("Use async call")
 
 
-class FeedbackTool(BaseTool):
+class FeedbackTool(InputSugarTool):
     name: str = "feedback"
     description: str = _bi("反馈 Agent 自己需要的功能，追加记录到 ./agentIdeas/feedback.txt", "Record desired agent features, appended to ./agentIdeas/feedback.txt")
     args_schema: Any = AgentIdeaInput
@@ -1701,7 +2016,7 @@ class FeedbackTool(BaseTool):
         raise NotImplementedError("Use async call")
 
 
-class BugTool(BaseTool):
+class BugTool(InputSugarTool):
     name: str = "bug"
     description: str = _bi("反馈 Agent 自己遇到的 bug，追加记录到 ./agentIdeas/bug.txt", "Record agent bugs encountered, appended to ./agentIdeas/bug.txt")
     args_schema: Any = AgentIdeaInput
