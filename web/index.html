@@ -1674,6 +1674,57 @@
         return table[key] || settingLabelTranslations.en[key] || key;
       };
 
+      const settingOptionTranslations = {
+        en: {
+          ENV: {
+            dev: "Development",
+            test: "Test",
+            prod: "Production",
+          },
+          CACHE_TYPE: {
+            memory: "Memory",
+            redis: "Redis",
+          },
+          VECTOR_STORE_TYPE: {
+            chroma: "Chroma",
+            faiss: "FAISS",
+          },
+          FAISS_INDEX_TYPE: {
+            Flat: "Flat",
+            IVF: "IVF",
+          },
+        },
+        zh: {
+          ENV: {
+            dev: "开发",
+            test: "测试",
+            prod: "生产",
+          },
+          CACHE_TYPE: {
+            memory: "内存",
+            redis: "Redis",
+          },
+          VECTOR_STORE_TYPE: {
+            chroma: "Chroma",
+            faiss: "FAISS",
+          },
+          FAISS_INDEX_TYPE: {
+            Flat: "Flat",
+            IVF: "IVF",
+          },
+        },
+      };
+
+      const settingOptionLabel = (key, value) => {
+        const table = settingOptionTranslations[currentLang] || settingOptionTranslations.en;
+        const fallback = settingOptionTranslations.en || {};
+        return (
+          table?.[key]?.[value]
+          || fallback?.[key]?.[value]
+          || value
+        );
+      };
+
       const applyTranslations = () => {
         document.title = t("title");
         appTitle.textContent = t("title");
@@ -4188,7 +4239,7 @@
             config.options.forEach((option) => {
               const opt = document.createElement("option");
               opt.value = option;
-              opt.textContent = option;
+              opt.textContent = settingOptionLabel(key, option);
               if (String(value) === option) {
                 opt.selected = true;
               }

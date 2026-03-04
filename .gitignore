@@ -83,3 +83,8 @@ tmp/*
 # Notebook checkpoints
 # =========================
 .ipynb_checkpoints/
+
+# =========================
+# edgedriver
+# =========================
+edgedriver/
