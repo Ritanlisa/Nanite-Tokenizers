@@ -50,6 +50,7 @@ from rag.documents import (
 )
 from rag.vector_store import get_vector_store
 from rag.line_profiler_instrument import profile_if_enabled, start_profiler, stop_profiler
+from rag.keyword_extractor import tfidf_extract as extract_document_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -1412,11 +1413,23 @@ class RAGEngine:
             SUPPORTED_RAG_EXTENSIONS,
         )
         by_doc_name: Dict[str, Dict[str, Any]] = {}
+        texts_by_doc_name: Dict[str, List[str]] = {}
         for rag_doc in rag_docs:
             payload = rag_doc.list_payload()
             doc_name = str(payload.get("doc_name") or "").strip()
             if not doc_name:
                 continue
+
+            keyword_text_parts: List[str] = []
+            title = str(payload.get("title") or "").strip()
+            if title:
+                keyword_text_parts.append(title)
+            cleaned_text = str(getattr(rag_doc, "cleaned_text", "") or "").strip()
+            if cleaned_text:
+                keyword_text_parts.append(cleaned_text)
+            if keyword_text_parts:
+                texts_by_doc_name.setdefault(doc_name, []).append("\n".join(keyword_text_parts))
+
             existing = by_doc_name.get(doc_name)
             if existing is None:
                 by_doc_name[doc_name] = payload
@@ -1429,6 +1442,11 @@ class RAGEngine:
                 int(existing.get("chunk_count") or 0),
                 int(payload.get("chunk_count") or 0),
             )
+
+        keyword_map = extract_document_keywords(texts_by_doc_name, top_k=12)
+        for doc_name, payload in by_doc_name.items():
+            payload["keywords"] = keyword_map.get(doc_name, [])
+
         return sorted(by_doc_name.values(), key=lambda d: str(d.get("title") or ""))
 
 

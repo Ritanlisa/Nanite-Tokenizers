@@ -39,6 +39,9 @@ dependencies = [
   "pymupdf4llm>=0.3.4",
   "colorlog>=6.10.1",
   "selenium>=4.41.0",
+  "matplotlib>=3.8.0",
+  "transformers>=4.45.0",
+  "jieba>=0.42.1",
 ]
 
 [project.scripts]

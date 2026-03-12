@@ -978,7 +978,10 @@ class MathComputeTool(InputSugarTool):
 
 class RAGDocListTool(InputSugarTool):
     name: str = "rag_doc_list"
-    description: str = _bi("列举当前RAG数据库中的所有文档标题及其估计页数。", "List all documents in the current RAG database with estimated page counts.")
+    description: str = _bi(
+        "列举当前RAG数据库中的所有文档标题、估计页数及TF-IDF关键词。",
+        "List all documents in the current RAG database with estimated page counts and TF-IDF keywords.",
+    )
     args_schema: Any = RAGDocListInput
 
     async def _arun(self) -> str:

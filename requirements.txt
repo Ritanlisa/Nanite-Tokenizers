@@ -26,3 +26,6 @@ pymupdf4llm>=0.0.17
 PyYAML>=6.0
 tqdm>=4.66.0
 selenium>=4.41.0
+matplotlib>=3.8.0
+transformers>=4.45.0
+jieba>=0.42.1
