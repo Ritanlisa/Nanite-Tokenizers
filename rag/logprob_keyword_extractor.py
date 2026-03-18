@@ -55,7 +55,7 @@ def _suppress_jieba_warnings() -> None:
 def logprobs_extract(
     texts_by_doc_name: Dict[str, List[str]],
     *,
-    top_k: int = 12,
+    top_k: int = 50,
 ) -> Dict[str, List[str]]:
     if not texts_by_doc_name:
         return {}
@@ -341,7 +341,7 @@ def _load_jieba_open_source_stop_words() -> FrozenSet[str]:
         return _JIEBA_STOP_WORDS_CACHE
 
     stop_words: set[str] = set()
-    stop_words_path = Path(__file__).resolve().parent / "resources" / "jieba_stop_words.txt"
+    stop_words_path = Path(__file__).resolve().parent / "resources" / "jieba_stop_words_merged.txt"
 
     if stop_words_path.is_file():
         try:
@@ -400,6 +400,9 @@ def _load_jieba_open_source_stop_words() -> FrozenSet[str]:
 def _is_noise_token(token: str) -> bool:
     value = str(token).strip()
     if not value:
+        return True
+
+    if any(ch.isdigit() for ch in value):
         return True
 
     # 过滤纯标点/符号/空白的 token，例如：，。、“”…—

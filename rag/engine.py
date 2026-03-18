@@ -1443,7 +1443,7 @@ class RAGEngine:
                 int(payload.get("chunk_count") or 0),
             )
 
-        keyword_map = extract_document_keywords(texts_by_doc_name, top_k=12)
+        keyword_map = extract_document_keywords(texts_by_doc_name, top_k=50)
         for doc_name, payload in by_doc_name.items():
             payload["keywords"] = keyword_map.get(doc_name, [])
 

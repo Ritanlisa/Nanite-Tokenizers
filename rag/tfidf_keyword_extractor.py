@@ -29,6 +29,8 @@ def tokenize_keyword_terms(text: str) -> List[str]:
         item = token.strip("_-")
         if len(item) < 2:
             continue
+        if any(ch.isdigit() for ch in item):
+            continue
         if item in stop_terms:
             continue
         if item.isdigit():
@@ -40,7 +42,7 @@ def tokenize_keyword_terms(text: str) -> List[str]:
 def tfidf_extract(
     texts_by_doc_name: Dict[str, List[str]],
     *,
-    top_k: int = 12,
+    top_k: int = 50,
 ) -> Dict[str, List[str]]:
     if not texts_by_doc_name:
         return {}
@@ -64,7 +66,7 @@ def tfidf_extract(
         doc_freq.update(set(tokens))
 
     keyword_map: Dict[str, List[str]] = {}
-    limit = max(1, min(int(top_k), 30))
+    limit = max(1, min(int(top_k), 50))
     for doc_name, counter in docs_counter.items():
         token_total = sum(counter.values())
         if token_total <= 0:

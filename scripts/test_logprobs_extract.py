@@ -617,7 +617,7 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
         if isinstance(raw_ab_star, list) and len(raw_ab_star) > 0:
             initial_top_k = int(len(raw_ab_star))
         else:
-            initial_top_k = 12
+            initial_top_k = 50
     initial_top_k = max(1, min(500, initial_top_k))
 
     token_spans: List[str] = []
@@ -861,7 +861,7 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
 def main() -> None:
     from rag.logprob_keyword_extractor import logprobs_extract
 
-    top_k = 12
+    top_k = 50
     files = [
         "/home/ritanlisa/文档/LID.pdf",
         "/home/ritanlisa/文档/浪潮虚拟化InCloud Sphere 6.5.1运维手册.pdf",
