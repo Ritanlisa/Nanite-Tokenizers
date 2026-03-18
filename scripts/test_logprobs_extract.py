@@ -3,8 +3,10 @@ from __future__ import annotations
 import importlib
 import json
 import math
+import os
 import re
 import sys
+import time
 import webbrowser
 import warnings
 from pathlib import Path
@@ -331,7 +333,7 @@ def _plot_logprob_bars(
         axes[4, 1].set_axis_off()
 
     fig.tight_layout()
-    fig.savefig(str(out_path), dpi=240)
+    fig.savefig(str(out_path), dpi=360)
     plt.close(fig)
 
 
@@ -540,42 +542,44 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
         else:
             minus_log2_logits.append(None)
 
-    raw_a = payload.get("a_prob_upper")
-    raw_b = payload.get("b_prob_lower")
-    a_prob_upper = float(raw_a) if isinstance(raw_a, (int, float)) else 0.2
-    b_prob_lower = float(raw_b) if isinstance(raw_b, (int, float)) else 0.6
-    raw_jieba_words = payload.get("jieba_words")
-    if not isinstance(raw_jieba_words, list):
-        raw_jieba_words = []
-    jieba_words = [str(item) for item in raw_jieba_words]
+    raw_dictionary_words = payload.get("dictionary_words")
+    if not isinstance(raw_dictionary_words, list):
+        raw_dictionary_words = payload.get("jieba_words")
+    if not isinstance(raw_dictionary_words, list):
+        raw_dictionary_words = []
+    dictionary_words = [str(item) for item in raw_dictionary_words]
 
-    raw_jieba_probs = payload.get("jieba_probs")
-    if not isinstance(raw_jieba_probs, list):
-        raw_jieba_probs = []
-    jieba_probs = [
+    raw_dictionary_probs = payload.get("dictionary_probs")
+    if not isinstance(raw_dictionary_probs, list):
+        raw_dictionary_probs = payload.get("jieba_probs")
+    if not isinstance(raw_dictionary_probs, list):
+        raw_dictionary_probs = []
+    dictionary_probs = [
         max(float(item), 1e-300)
-        for item in raw_jieba_probs
+        for item in raw_dictionary_probs
         if isinstance(item, (int, float)) and math.isfinite(float(item))
     ]
 
-    jieba_n = min(len(jieba_words), len(jieba_probs))
-    jieba_words = jieba_words[:jieba_n]
-    jieba_probs = jieba_probs[:jieba_n]
-    raw_token_to_jieba_idx = payload.get("token_to_jieba_idx")
+    dictionary_n = min(len(dictionary_words), len(dictionary_probs))
+    dictionary_words = dictionary_words[:dictionary_n]
+    dictionary_probs = dictionary_probs[:dictionary_n]
+    raw_token_to_dictionary_idx = payload.get("token_to_dict_idx")
+    if not isinstance(raw_token_to_dictionary_idx, list):
+        raw_token_to_dictionary_idx = payload.get("token_to_jieba_idx")
     mapping_source = "fallback"
-    if isinstance(raw_token_to_jieba_idx, list):
+    if isinstance(raw_token_to_dictionary_idx, list):
         mapped = [
-            int(item) if isinstance(item, (int, float)) and 0 <= int(item) < jieba_n else -1
-            for item in raw_token_to_jieba_idx[: len(tokens)]
+            int(item) if isinstance(item, (int, float)) and 0 <= int(item) < dictionary_n else -1
+            for item in raw_token_to_dictionary_idx[: len(tokens)]
         ]
         if len(mapped) < len(tokens):
             mapped.extend([-1] * (len(tokens) - len(mapped)))
 
-        if jieba_n > 0:
+        if dictionary_n > 0:
             last_valid = -1
             for idx in range(len(mapped)):
                 current = mapped[idx]
-                if 0 <= current < jieba_n:
+                if 0 <= current < dictionary_n:
                     last_valid = current
                 elif last_valid >= 0:
                     mapped[idx] = last_valid
@@ -583,7 +587,7 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
             next_valid = -1
             for idx in range(len(mapped) - 1, -1, -1):
                 current = mapped[idx]
-                if 0 <= current < jieba_n:
+                if 0 <= current < dictionary_n:
                     next_valid = current
                 elif next_valid >= 0:
                     mapped[idx] = next_valid
@@ -592,10 +596,10 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
                 if mapped[idx] < 0:
                     mapped[idx] = 0
 
-        token_to_jieba_idx = mapped
+        token_to_dictionary_idx = mapped
         mapping_source = "backend"
     else:
-        token_to_jieba_idx = _map_token_to_jieba_indices(tokens, jieba_words)
+        token_to_dictionary_idx = _map_token_to_jieba_indices(tokens, dictionary_words)
 
     roles: Dict[int, str] = {}
 
@@ -605,20 +609,9 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
     safe_name = _sanitize_filename(doc_name)
     html_path = output_dir / f"{safe_name}.debug.html"
 
-    probs_js_literal = json.dumps([float(v) for v in probs], ensure_ascii=False)
-    tokens_js_literal = json.dumps([str(v) for v in tokens], ensure_ascii=False)
-    jieba_words_js_literal = json.dumps([str(v) for v in jieba_words], ensure_ascii=False)
-    jieba_probs_js_literal = json.dumps([float(v) for v in jieba_probs], ensure_ascii=False)
-    initial_top_k_raw = payload.get("top_k")
-    if isinstance(initial_top_k_raw, (int, float)):
-        initial_top_k = int(initial_top_k_raw)
-    else:
-        raw_ab_star = payload.get("ab_star_phrases")
-        if isinstance(raw_ab_star, list) and len(raw_ab_star) > 0:
-            initial_top_k = int(len(raw_ab_star))
-        else:
-            initial_top_k = 12
-    initial_top_k = max(1, min(500, initial_top_k))
+    dictionary_words_js_literal = json.dumps([str(v) for v in dictionary_words], ensure_ascii=False)
+    dictionary_probs_js_literal = json.dumps([float(v) for v in dictionary_probs], ensure_ascii=False)
+    initial_top_k = 500
 
     token_spans: List[str] = []
     for idx, token in enumerate(tokens):
@@ -630,18 +623,19 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
             if isinstance(minus_log2_logit_value, float)
             else "N/A (logits<=0)"
         )
-        jieba_idx = token_to_jieba_idx[idx] if idx < len(token_to_jieba_idx) else -1
-        if 0 <= jieba_idx < jieba_n:
-            jieba_word = str(jieba_words[jieba_idx])
-            jieba_prob = float(jieba_probs[jieba_idx])
-            jieba_logprob = float(math.log(max(jieba_prob, 1e-300)))
-            jieba_word_text = _preview_token(jieba_word)
-            jieba_prob_text = _fmt_float_full(jieba_prob)
-            jieba_logprob_text = _fmt_float_full(jieba_logprob)
+        dict_idx = token_to_dictionary_idx[idx] if idx < len(token_to_dictionary_idx) else -1
+        if 0 <= dict_idx < dictionary_n:
+            dict_word = str(dictionary_words[dict_idx])
+            dict_prob = float(dictionary_probs[dict_idx])
+            dict_logprob = float(math.log(max(dict_prob, 1e-300)))
+            dict_word_text = _preview_token(dict_word)
+            dict_prob_text = _fmt_float_full(dict_prob)
+            dict_logprob_text = _fmt_float_full(dict_logprob)
         else:
-            jieba_word_text = "N/A"
-            jieba_prob_text = "N/A"
-            jieba_logprob_text = "N/A"
+            dict_word_text = "N/A"
+            dict_prob_text = "N/A"
+            dict_logprob_text = "N/A"
+        seg_class = f"seg-{dict_idx % 12}" if dict_idx >= 0 else ""
         title = (
             f"idx={idx}\n"
             f"token='{_preview_token(token)}'\n"
@@ -651,13 +645,13 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
             f"-log2(probs)={_fmt_float_full(minus_log2_probs[idx])}\n"
             f"softmax_denominator={_fmt_float_full(softmax_denominators[idx])}\n"
             f"log2(softmax_denominator)={_fmt_float_full(softmax_denominator_log2[idx])}\n"
-            f"jieba_token='{jieba_word_text}'\n"
-            f"jieba_probs={jieba_prob_text}\n"
-            f"jieba_logprobs={jieba_logprob_text}\n"
+            f"dictionary_token='{dict_word_text}'\n"
+            f"dictionary_probs={dict_prob_text}\n"
+            f"dictionary_logprobs={dict_logprob_text}\n"
             f"type={role}"
         )
         token_spans.append(
-            f"<span class='tok {role_class}' data-idx='{idx}' data-prob='{_fmt_float_full(probs[idx])}' data-token=\"{_escape_html(token)}\" title=\"{_escape_html(title)}\">{_escape_html(token)}</span>"
+            f"<span class='tok {role_class} {seg_class}' data-idx='{idx}' data-prob='{_fmt_float_full(probs[idx])}' data-token=\"{_escape_html(token)}\" title=\"{_escape_html(title)}\">{_escape_html(token)}</span>"
         )
 
     html = f"""<!doctype html>
@@ -681,20 +675,32 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
     .tok {{ cursor: default; }}
     .role-a {{ color: red; }}
     .role-b {{ color: #d9a300; }}
+        .seg-0 {{ background: rgba(229, 115, 115, 0.75); }}
+        .seg-1 {{ background: rgba(240, 98, 146, 0.75); }}
+        .seg-2 {{ background: rgba(186, 104, 200, 0.75); }}
+        .seg-3 {{ background: rgba(126, 87, 194, 0.75); }}
+        .seg-4 {{ background: rgba(100, 181, 246, 0.75); }}
+        .seg-5 {{ background: rgba(77, 208, 225, 0.75); }}
+        .seg-6 {{ background: rgba(77, 182, 172, 0.75); }}
+        .seg-7 {{ background: rgba(129, 199, 132, 0.75); }}
+        .seg-8 {{ background: rgba(174, 213, 129, 0.75); }}
+        .seg-9 {{ background: rgba(255, 241, 118, 0.75); }}
+        .seg-10 {{ background: rgba(255, 183, 77, 0.75); }}
+        .seg-11 {{ background: rgba(161, 136, 127, 0.75); }}
   </style>
 </head>
 <body>
-    <div class=\"meta\">doc={_escape_html(doc_name)} | token_count={n} | jieba_count={jieba_n} | probs来源={prob_source} | 映射来源={mapping_source} | AB*=已禁用</div>
-  <div class=\"hint\">将鼠标悬停在 token 上查看 prob/logprob；当前列表按 jieba 分词聚合概率排序。</div>
+        <div class="meta">doc={_escape_html(doc_name)} | token_count={n} | dictionary_count={dictionary_n} | probs来源={prob_source} | 映射来源={mapping_source} | AB*=已禁用</div>
+    <div class="hint">将鼠标悬停在 token 上查看 prob/logprob；已按词典分词进行彩色标注，列表按词典聚合概率排序。</div>
     <div class="controls">
         <label class="ctrl">排序字段
             <select id="sortBy">
-                <option value="jieba_idx">jieba位置</option>
-                <option value="jieba_prob" selected>jieba-probs</option>
-                <option value="jieba_logit">jieba-logits</option>
-                <option value="jieba_sum_minus_log2_unique">Sum(-log2(jieba probs), 去重token)</option>
-                <option value="jieba_avg_minus_log2_unique">Aveg(-log2(jieba probs), 去重token)</option>
-                <option value="jieba_sum_minus_log2_unique_plus">Sum(-log2(jieba probs)/log2(cnt+1), 去重token)</option>
+                <option value="dict_idx">词典位置</option>
+                <option value="dict_prob">词典-probs</option>
+                <option value="dict_logit">词典-logits</option>
+                <option value="dict_sum_minus_log2_unique">Sum(-log2(dict probs), 去重token)</option>
+                <option value="dict_avg_minus_log2_unique">Aveg(-log2(dict probs), 去重token)</option>
+                <option value="dict_sum_minus_log2_unique_plus" selected>Sum(-log2(dict probs)/log2(cnt+1), 去重token)</option>
             </select>
         </label>
         <label class="ctrl">顺序
@@ -714,8 +720,8 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
 
     <script>
         const DEFAULT_TOP_K = {initial_top_k};
-        const JIEBA_WORDS = {jieba_words_js_literal};
-        const JIEBA_PROBS = {jieba_probs_js_literal};
+        const DICT_WORDS = {dictionary_words_js_literal};
+        const DICT_PROBS = {dictionary_probs_js_literal};
 
         const sortBy = document.getElementById('sortBy');
         const sortOrder = document.getElementById('sortOrder');
@@ -729,20 +735,20 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
         }}
 
         function recompute() {{
-            const sortField = String(sortBy.value || 'jieba_prob');
+            const sortField = String(sortBy.value || 'dict_sum_minus_log2_unique_plus');
             const order = String(sortOrder.value || 'desc');
             const topK = Math.max(1, Math.min(500, Number(topKInput.value) || DEFAULT_TOP_K));
             topKInput.value = String(topK);
-            const n = Math.min(JIEBA_WORDS.length, JIEBA_PROBS.length);
+            const n = Math.min(DICT_WORDS.length, DICT_PROBS.length);
             const phraseItems = [];
             for (let i = 0; i < n; i++) {{
-                const prob = Number(JIEBA_PROBS[i]);
+                const prob = Number(DICT_PROBS[i]);
                 if (!Number.isFinite(prob)) continue;
                 phraseItems.push({{
-                    jieba_idx: i,
-                    jieba_prob: prob,
-                    jieba_logit: Math.log(Math.max(prob, 1e-300)),
-                    text: String(JIEBA_WORDS[i] ?? ''),
+                    dict_idx: i,
+                    dict_prob: prob,
+                    dict_logit: Math.log(Math.max(prob, 1e-300)),
+                    text: String(DICT_WORDS[i] ?? ''),
                 }});
             }}
 
@@ -755,28 +761,28 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
                 if (!Number.isFinite(vy)) return -1;
                 if (vx < vy) return -1 * sign;
                 if (vx > vy) return 1 * sign;
-                if (x.jieba_idx < y.jieba_idx) return -1;
-                if (x.jieba_idx > y.jieba_idx) return 1;
+                if (x.dict_idx < y.dict_idx) return -1;
+                if (x.dict_idx > y.dict_idx) return 1;
                 return 0;
             }});
 
             let topItems = [];
             if (
-                sortField === 'jieba_sum_minus_log2_unique' ||
-                sortField === 'jieba_avg_minus_log2_unique' ||
-                sortField === 'jieba_sum_minus_log2_unique_plus'
+                sortField === 'dict_sum_minus_log2_unique' ||
+                sortField === 'dict_avg_minus_log2_unique' ||
+                sortField === 'dict_sum_minus_log2_unique_plus'
             ) {{
                 const grouped = new Map();
                 for (const item of phraseItems) {{
                     const token = String(item.text || '');
                     if (!token) continue;
-                    const p = Number(item.jieba_prob);
+                    const p = Number(item.dict_prob);
                     if (!Number.isFinite(p) || p <= 0) continue;
                     const value = -Math.log2(Math.max(p, 1e-300));
                     if (!grouped.has(token)) {{
                         grouped.set(token, {{
                             text: token,
-                            jieba_idx: Number(item.jieba_idx),
+                            dict_idx: Number(item.dict_idx),
                             sum_minus_log2: value,
                             count: 1,
                         }});
@@ -784,8 +790,8 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
                         const cur = grouped.get(token);
                         cur.sum_minus_log2 += value;
                         cur.count += 1;
-                        if (Number(item.jieba_idx) < Number(cur.jieba_idx)) {{
-                            cur.jieba_idx = Number(item.jieba_idx);
+                        if (Number(item.dict_idx) < Number(cur.dict_idx)) {{
+                            cur.dict_idx = Number(item.dict_idx);
                         }}
                     }}
                 }}
@@ -800,25 +806,25 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
                 groupedItems.sort(function(x, y) {{
                     const sign = order === 'desc' ? -1 : 1;
                     let field = 'sum_minus_log2';
-                    if (sortField === 'jieba_avg_minus_log2_unique') {{
+                    if (sortField === 'dict_avg_minus_log2_unique') {{
                         field = 'avg_minus_log2';
-                    }} else if (sortField === 'jieba_sum_minus_log2_unique_plus') {{
+                    }} else if (sortField === 'dict_sum_minus_log2_unique_plus') {{
                         field = 'sum_minus_log2_plus';
                     }}
                     const vx = Number(x[field]);
                     const vy = Number(y[field]);
                     if (vx < vy) return -1 * sign;
                     if (vx > vy) return 1 * sign;
-                    if (x.jieba_idx < y.jieba_idx) return -1;
-                    if (x.jieba_idx > y.jieba_idx) return 1;
+                    if (x.dict_idx < y.dict_idx) return -1;
+                    if (x.dict_idx > y.dict_idx) return 1;
                     return 0;
                 }});
                 topItems = groupedItems.slice(0, topK);
 
-                stats.textContent = 'AB*=已禁用 | jieba词项总数: ' + phraseItems.length + ' | 去重词项数: ' + groupedItems.length + ' | 显示: top' + topItems.length + ' | 排序: ' + sortField + ' ' + order;
+                stats.textContent = 'AB*=已禁用 | 词典词项总数: ' + phraseItems.length + ' | 去重词项数: ' + groupedItems.length + ' | 显示: top' + topItems.length + ' | 排序: ' + sortField + ' ' + order;
                 phrasesEl.innerHTML = topItems
                   .map(function(item, i) {{
-                                            const info = '[jieba#' + item.jieba_idx + ', sum(-log2(p))=' + Number(item.sum_minus_log2).toFixed(12) + ', aveg(-log2(p))=' + Number(item.avg_minus_log2).toFixed(12) + ', sum(-log2(p))/log2(cnt+1)=' + Number(item.sum_minus_log2_plus).toFixed(12) + ', count=' + String(item.count) + '] ';
+                                            const info = '[dict#' + item.dict_idx + ', sum(-log2(p))=' + Number(item.sum_minus_log2).toFixed(12) + ', aveg(-log2(p))=' + Number(item.avg_minus_log2).toFixed(12) + ', sum(-log2(p))/log2(cnt+1)=' + Number(item.sum_minus_log2_plus).toFixed(12) + ', count=' + String(item.count) + '] ';
                       return String(i + 1) + '. ' + escapeHtml(info + item.text);
                   }})
                   .join('<br/>');
@@ -826,10 +832,10 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
             }}
 
             topItems = phraseItems.slice(0, topK);
-            stats.textContent = 'AB*=已禁用 | jieba词项总数: ' + phraseItems.length + ' | 显示: top' + topItems.length + ' | 排序: ' + sortField + ' ' + order;
+            stats.textContent = 'AB*=已禁用 | 词典词项总数: ' + phraseItems.length + ' | 显示: top' + topItems.length + ' | 排序: ' + sortField + ' ' + order;
             phrasesEl.innerHTML = topItems
               .map(function(item, i) {{
-                  const info = '[jieba#' + item.jieba_idx + ', p=' + item.jieba_prob.toFixed(12) + ', logit=' + item.jieba_logit.toFixed(12) + '] ';
+                  const info = '[dict#' + item.dict_idx + ', p=' + item.dict_prob.toFixed(12) + ', logit=' + item.dict_logit.toFixed(12) + '] ';
                   return String(i + 1) + '. ' + escapeHtml(info + item.text);
               }})
               .join('<br/>');
@@ -839,7 +845,7 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
         sortOrder.addEventListener('change', recompute);
         topKInput.addEventListener('input', recompute);
         resetBtn.addEventListener('click', () => {{
-            sortBy.value = 'jieba_prob';
+            sortBy.value = 'dict_sum_minus_log2_unique_plus';
             sortOrder.value = 'desc';
             topKInput.value = String(DEFAULT_TOP_K);
             recompute();
@@ -859,15 +865,32 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
 
 
 def main() -> None:
-    from rag.keyword_extractor import logprobs_extract
+    from rag.line_profiler_instrument import start_profiler, stop_profiler
+    from rag.logprob_keyword_extractor import logprobs_extract
 
     top_k = 12
+    profile_enabled = str(os.getenv("ENABLE_KEYWORD_EXTRACTOR_LINE_PROFILER") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    profile_output_path: Optional[str] = None
+    if profile_enabled:
+        profile_output_path = start_profiler(str((Path("tmp") / "logprobs_extract" / "keyword_extractor.lprof").resolve()))
+        if profile_output_path:
+            print(f"line_profiler 已启用，输出文件: {profile_output_path}")
+        else:
+            print("line_profiler 不可用，改为仅输出 wall-clock 耗时。")
+
+    extractor_total_seconds = 0.0
+    extractor_total_calls = 0
     files = [
         "/home/ritanlisa/文档/LID.pdf",
+        "/home/ritanlisa/文档/TBP.pdf",
         "/home/ritanlisa/文档/浪潮虚拟化InCloud Sphere 6.5.1运维手册.pdf",
         "/home/ritanlisa/文档/湖超-硬件维护手册20231225.doc",
         "/home/ritanlisa/文档/初步验收与试运行分册-6-硬件维护手册 - 1227.doc",
-        "/home/ritanlisa/文档/TBP.pdf",
         ]
     for file in files:
         if not Path(file).exists():
@@ -881,7 +904,14 @@ def main() -> None:
             raise FileNotFoundError(f"文件不存在: {source_file}")
 
         texts_by_doc_name = build_texts_by_doc_name(str(source_file))
+        run_start = time.perf_counter()
         keyword_map = logprobs_extract(texts_by_doc_name, top_k=top_k)
+        run_elapsed = time.perf_counter() - run_start
+        extractor_total_seconds += run_elapsed
+        extractor_total_calls += 1
+        print(
+            f"[keyword_extractor] doc={source_file.name} 调用耗时: {run_elapsed:.4f}s"
+        )
 
         output_dir = Path("tmp") / "logprobs_extract"
         print(f"关键词结果: {keyword_map}")
@@ -949,7 +979,7 @@ def main() -> None:
                 if isinstance(item, (int, float)) and math.isfinite(float(item))
             ]
             _plot_logprob_bars(
-                doc_name=str(payload.get("doc_name") or doc_name),
+                doc_name=str(payload.get("doc_name") or doc_name).split("/")[-1],
                 probs=raw_probs,
                 minus_log2_probs=[-math.log2(prob) for prob in raw_probs],
                 sampled_probs=sampled_probs,
@@ -967,6 +997,22 @@ def main() -> None:
                 raise FileNotFoundError(f"图像未生成: {png_path}")
             show_chart(png_path)
             show_debug_gui_from_payload(payload)
+
+    dumped_profile = stop_profiler() if profile_enabled else None
+    print("\n===== keyword_extractor 性能汇总 =====")
+    if extractor_total_calls > 0:
+        avg_seconds = extractor_total_seconds / float(extractor_total_calls)
+        print(f"调用次数: {extractor_total_calls}")
+        print(f"总耗时: {extractor_total_seconds:.4f}s")
+        print(f"平均耗时: {avg_seconds:.4f}s/次")
+    else:
+        print("未执行 logprobs_extract（可能所有输入文件都被跳过）。")
+
+    final_profile_path = dumped_profile or profile_output_path
+    if final_profile_path:
+        print(f"line_profiler 统计文件: {final_profile_path}")
+    elif profile_enabled:
+        print("line_profiler 未生成统计文件（可能未安装 line_profiler）。")
 
 
 if __name__ == "__main__":
