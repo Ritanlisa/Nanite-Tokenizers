@@ -6,9 +6,10 @@ import logging
 import math
 import os
 import re
+import unicodedata
 import warnings
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 import numpy as np
 
@@ -34,6 +35,7 @@ _LOGPROB_BACKEND_CACHE: Optional[
         ],
     ]
 ] = None
+_JIEBA_STOP_WORDS_CACHE: Optional[FrozenSet[str]] = None
 
 
 def _suppress_jieba_warnings() -> None:
@@ -302,12 +304,17 @@ def _rank_unique_jieba_by_sum_minus_log2(
         return []
 
     limit = max(1, min(int(top_k), 100))
+    stop_words = _load_jieba_open_source_stop_words()
     token_scores: Dict[str, float] = {}
     first_positions: Dict[str, int] = {}
 
     for idx, (word, prob) in enumerate(zip(jieba_words, jieba_probs)):
         token = str(word).strip()
         if not token:
+            continue
+        if _is_noise_token(token):
+            continue
+        if token.lower() in stop_words:
             continue
         if not isinstance(prob, (int, float)):
             continue
@@ -325,6 +332,84 @@ def _rank_unique_jieba_by_sum_minus_log2(
         key=lambda item: (-item[1], first_positions.get(item[0], 10**9), item[0]),
     )
     return [token for token, _ in ranked[:limit]]
+
+
+def _load_jieba_open_source_stop_words() -> FrozenSet[str]:
+    global _JIEBA_STOP_WORDS_CACHE
+
+    if _JIEBA_STOP_WORDS_CACHE is not None:
+        return _JIEBA_STOP_WORDS_CACHE
+
+    stop_words: set[str] = set()
+    stop_words_path = Path(__file__).resolve().parent / "resources" / "jieba_stop_words.txt"
+
+    if stop_words_path.is_file():
+        try:
+            with stop_words_path.open("r", encoding="utf-8") as fin:
+                for line in fin:
+                    token = line.strip()
+                    if token:
+                        stop_words.add(token.lower())
+        except Exception as exc:
+            logger.warning("加载 jieba 停用词表失败（%s）：%s", stop_words_path, exc)
+    else:
+        logger.warning("未找到 jieba 停用词表：%s", stop_words_path)
+
+    if not stop_words:
+        # 回退到 jieba 内置默认停用词，避免过滤集为空。
+        stop_words.update(
+            {
+                "the",
+                "of",
+                "is",
+                "and",
+                "to",
+                "in",
+                "that",
+                "we",
+                "for",
+                "an",
+                "are",
+                "by",
+                "be",
+                "as",
+                "on",
+                "with",
+                "can",
+                "if",
+                "from",
+                "which",
+                "you",
+                "it",
+                "this",
+                "then",
+                "at",
+                "have",
+                "all",
+                "not",
+                "one",
+                "has",
+                "or",
+            }
+        )
+
+    _JIEBA_STOP_WORDS_CACHE = frozenset(stop_words)
+    return _JIEBA_STOP_WORDS_CACHE
+
+
+def _is_noise_token(token: str) -> bool:
+    value = str(token).strip()
+    if not value:
+        return True
+
+    # 过滤纯标点/符号/空白的 token，例如：，。、“”…—
+    if all(
+        unicodedata.category(ch).startswith(("P", "S", "Z"))
+        for ch in value
+    ):
+        return True
+
+    return False
 
 
 def _aggregate_jieba_word_probs(
