@@ -50,7 +50,7 @@ from rag.documents import (
 )
 from rag.vector_store import get_vector_store
 from rag.line_profiler_instrument import profile_if_enabled, start_profiler, stop_profiler
-from rag.keyword_extractor import tfidf_extract as extract_document_keywords
+from rag.tfidf_keyword_extractor import tfidf_extract as extract_document_keywords
 
 logger = logging.getLogger(__name__)
 

@@ -859,7 +859,7 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
 
 
 def main() -> None:
-    from rag.keyword_extractor import logprobs_extract
+    from rag.logprob_keyword_extractor import logprobs_extract
 
     top_k = 12
     files = [
