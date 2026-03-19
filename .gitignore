@@ -89,3 +89,9 @@ tmp/*
 # =========================
 edgedriver/
 edgedriver_linux64/
+
+# =========================
+# local agent metadata
+# =========================
+.agent/
+.agents/
