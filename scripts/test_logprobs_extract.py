@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import math
+import os
 import re
 import sys
 import webbrowser
@@ -490,6 +491,31 @@ def _map_token_to_jieba_indices(tokens: List[str], jieba_words: List[str]) -> Li
     return corrected
 
 
+def _build_python_stopword_filter_for_debug(jieba_words: List[str]) -> tuple[List[bool], bool]:
+    if not jieba_words:
+        return [], False
+
+    try:
+        from rag.logprob_keyword_extractor import _is_noise_token, _load_jieba_open_source_stop_words
+    except Exception as exc:
+        print(f"警告：无法加载 Python 停用词规则，debug 前端将不启用该过滤：{exc}")
+        return [False for _ in jieba_words], False
+
+    try:
+        stop_words = _load_jieba_open_source_stop_words()
+    except Exception as exc:
+        print(f"警告：加载 Python 停用词失败，debug 前端将不启用该过滤：{exc}")
+        return [False for _ in jieba_words], False
+
+    flags: List[bool] = []
+    for word in jieba_words:
+        token = str(word).strip()
+        filtered = _is_noise_token(token) or token.lower() in stop_words
+        flags.append(bool(filtered))
+
+    return flags, True
+
+
 def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
     raw_tokens = payload.get("tokens")
     if not isinstance(raw_tokens, list):
@@ -540,10 +566,6 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
         else:
             minus_log2_logits.append(None)
 
-    raw_a = payload.get("a_prob_upper")
-    raw_b = payload.get("b_prob_lower")
-    a_prob_upper = float(raw_a) if isinstance(raw_a, (int, float)) else 0.2
-    b_prob_lower = float(raw_b) if isinstance(raw_b, (int, float)) else 0.6
     raw_jieba_words = payload.get("jieba_words")
     if not isinstance(raw_jieba_words, list):
         raw_jieba_words = []
@@ -561,6 +583,10 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
     jieba_n = min(len(jieba_words), len(jieba_probs))
     jieba_words = jieba_words[:jieba_n]
     jieba_probs = jieba_probs[:jieba_n]
+    jieba_filtered_flags, python_stopword_filter_available = _build_python_stopword_filter_for_debug(jieba_words)
+    if len(jieba_filtered_flags) < jieba_n:
+        jieba_filtered_flags.extend([False] * (jieba_n - len(jieba_filtered_flags)))
+    jieba_filtered_flags = jieba_filtered_flags[:jieba_n]
     raw_token_to_jieba_idx = payload.get("token_to_jieba_idx")
     mapping_source = "fallback"
     if isinstance(raw_token_to_jieba_idx, list):
@@ -605,10 +631,9 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
     safe_name = _sanitize_filename(doc_name)
     html_path = output_dir / f"{safe_name}.debug.html"
 
-    probs_js_literal = json.dumps([float(v) for v in probs], ensure_ascii=False)
-    tokens_js_literal = json.dumps([str(v) for v in tokens], ensure_ascii=False)
     jieba_words_js_literal = json.dumps([str(v) for v in jieba_words], ensure_ascii=False)
     jieba_probs_js_literal = json.dumps([float(v) for v in jieba_probs], ensure_ascii=False)
+    jieba_filtered_flags_js_literal = json.dumps([bool(v) for v in jieba_filtered_flags], ensure_ascii=False)
     initial_top_k_raw = payload.get("top_k")
     if isinstance(initial_top_k_raw, (int, float)):
         initial_top_k = int(initial_top_k_raw)
@@ -618,7 +643,7 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
             initial_top_k = int(len(raw_ab_star))
         else:
             initial_top_k = 50
-    initial_top_k = max(1, min(500, initial_top_k))
+    initial_top_k = max(1, initial_top_k)
 
     token_spans: List[str] = []
     for idx, token in enumerate(tokens):
@@ -675,7 +700,7 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
     .ctrl input[type=range] {{ width: 240px; }}
     .btn {{ border: 1px solid #bbb; border-radius: 6px; background: #f7f7f7; padding: 4px 10px; cursor: pointer; }}
     .stats {{ margin-bottom: 10px; color: #444; font-size: 13px; }}
-    .phrases {{ border: 1px solid #ddd; border-radius: 8px; padding: 8px; margin-bottom: 10px; max-height: 24vh; overflow: auto; font-family: 'DejaVu Sans Mono', monospace; font-size: 12px; white-space: pre-wrap; }}
+    .phrases {{ border: 1px solid #ddd; border-radius: 8px; padding: 8px; margin-bottom: 10px; max-height: 24vh; overflow: auto; font-family: 'DejaVu Sans Mono', monospace; font-size: 12px; white-space: pre; line-height: 1.35; }}
     .panel {{ border: 1px solid #ddd; border-radius: 8px; padding: 10px; max-height: 78vh; overflow: auto; }}
     .text {{ white-space: pre-wrap; word-break: break-word; font-family: 'DejaVu Sans Mono', 'Noto Sans Mono CJK SC', monospace; line-height: 1.4; font-size: 13px; }}
     .tok {{ cursor: default; }}
@@ -687,16 +712,23 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
     <div class=\"meta\">doc={_escape_html(doc_name)} | token_count={n} | jieba_count={jieba_n} | probs来源={prob_source} | 映射来源={mapping_source} | AB*=已禁用</div>
   <div class=\"hint\">将鼠标悬停在 token 上查看 prob/logprob；当前列表按 jieba 分词聚合概率排序。</div>
     <div class="controls">
+                <label class="ctrl"><input id="usePythonStopwords" type="checkbox" checked /> 使用 Python 停用词规则</label>
         <label class="ctrl">排序字段
             <select id="sortBy">
                 <option value="jieba_idx">jieba位置</option>
-                <option value="jieba_prob" selected>jieba-probs</option>
+                <option value="jieba_prob">jieba-probs</option>
                 <option value="jieba_logit">jieba-logits</option>
                 <option value="jieba_sum_minus_log2_unique">Sum(-log2(jieba probs), 去重token)</option>
                 <option value="jieba_avg_minus_log2_unique">Aveg(-log2(jieba probs), 去重token)</option>
                 <option value="jieba_sum_minus_log2_unique_plus">Sum(-log2(jieba probs)/log2(cnt+1), 去重token)</option>
+                <option value="jieba_square_surprise_unique" selected>平方惊喜度(Σ惊喜度², 去重token)</option>
+                <option value="jieba_max_surprise_unique">最大惊喜度(max 惊喜度, 去重token)</option>
+                <option value="jieba_geometric_surprise_unique">几何惊喜度(惊喜度之积, 去重token)</option>
+                <option value="jieba_adjusted_geometric_surprise_unique">调整几何惊喜度((惊喜度+1)之积, 去重token)</option>
+                <option value="jieba_harmonic_surprise_unique">调和惊喜度(词频*调和平均惊喜度, 去重token)</option>
             </select>
         </label>
+        <label class="ctrl"><input id="showSelectedMetricOnly" type="checkbox" checked /> 仅显示当前排序字段</label>
         <label class="ctrl">顺序
             <select id="sortOrder">
                 <option value="asc">升序</option>
@@ -704,7 +736,7 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
             </select>
         </label>
         <label class="ctrl">topk
-            <input id="topKInput" type="number" min="1" max="500" step="1" value="{initial_top_k}" style="width:80px;" />
+            <input id="topKInput" type="number" min="1" step="1" value="{initial_top_k}" style="width:120px;" />
         </label>
         <button id="resetBtn" class="btn" type="button">复位默认阈值</button>
     </div>
@@ -716,28 +748,61 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
         const DEFAULT_TOP_K = {initial_top_k};
         const JIEBA_WORDS = {jieba_words_js_literal};
         const JIEBA_PROBS = {jieba_probs_js_literal};
+        const JIEBA_FILTERED_FLAGS = {jieba_filtered_flags_js_literal};
+        const PYTHON_STOPWORD_FILTER_AVAILABLE = {str(bool(python_stopword_filter_available)).lower()};
 
         const sortBy = document.getElementById('sortBy');
         const sortOrder = document.getElementById('sortOrder');
+        const usePythonStopwords = document.getElementById('usePythonStopwords');
+        const showSelectedMetricOnly = document.getElementById('showSelectedMetricOnly');
         const topKInput = document.getElementById('topKInput');
         const stats = document.getElementById('stats');
         const phrasesEl = document.getElementById('phrases');
         const resetBtn = document.getElementById('resetBtn');
 
+        usePythonStopwords.disabled = !PYTHON_STOPWORD_FILTER_AVAILABLE;
+        if (!PYTHON_STOPWORD_FILTER_AVAILABLE) {{
+            usePythonStopwords.checked = false;
+            usePythonStopwords.title = 'Python 停用词规则不可用（导入失败）';
+        }}
+
         function escapeHtml(v) {{
             return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');
+        }}
+
+        function formatAlignedColumns(columns) {{
+            const normalized = columns.map(function(item) {{
+                const key = String(item[0] ?? '');
+                const value = String(item[1] ?? '');
+                return [key, value];
+            }});
+            const keyWidth = normalized.reduce(function(maxV, pair) {{
+                return Math.max(maxV, pair[0].length);
+            }}, 0);
+            return normalized
+                .map(function(pair) {{
+                    return pair[0].padEnd(keyWidth, ' ') + ' = ' + pair[1];
+                }})
+                .join(' | ');
         }}
 
         function recompute() {{
             const sortField = String(sortBy.value || 'jieba_prob');
             const order = String(sortOrder.value || 'desc');
-            const topK = Math.max(1, Math.min(500, Number(topKInput.value) || DEFAULT_TOP_K));
+            const enablePythonStopwordFilter = Boolean(usePythonStopwords.checked) && PYTHON_STOPWORD_FILTER_AVAILABLE;
+            const selectedOnly = Boolean(showSelectedMetricOnly.checked);
+            const topK = Math.max(1, Math.floor(Number(topKInput.value) || DEFAULT_TOP_K));
             topKInput.value = String(topK);
             const n = Math.min(JIEBA_WORDS.length, JIEBA_PROBS.length);
             const phraseItems = [];
+            let filteredOutCount = 0;
             for (let i = 0; i < n; i++) {{
                 const prob = Number(JIEBA_PROBS[i]);
                 if (!Number.isFinite(prob)) continue;
+                if (enablePythonStopwordFilter && Boolean(JIEBA_FILTERED_FLAGS[i])) {{
+                    filteredOutCount += 1;
+                    continue;
+                }}
                 phraseItems.push({{
                     jieba_idx: i,
                     jieba_prob: prob,
@@ -764,7 +829,12 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
             if (
                 sortField === 'jieba_sum_minus_log2_unique' ||
                 sortField === 'jieba_avg_minus_log2_unique' ||
-                sortField === 'jieba_sum_minus_log2_unique_plus'
+                sortField === 'jieba_sum_minus_log2_unique_plus' ||
+                sortField === 'jieba_square_surprise_unique' ||
+                sortField === 'jieba_max_surprise_unique' ||
+                sortField === 'jieba_geometric_surprise_unique' ||
+                sortField === 'jieba_adjusted_geometric_surprise_unique' ||
+                sortField === 'jieba_harmonic_surprise_unique'
             ) {{
                 const grouped = new Map();
                 for (const item of phraseItems) {{
@@ -772,17 +842,28 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
                     if (!token) continue;
                     const p = Number(item.jieba_prob);
                     if (!Number.isFinite(p) || p <= 0) continue;
-                    const value = -Math.log2(Math.max(p, 1e-300));
+                    const surprise = -Math.log2(Math.max(p, 1e-300));
+                    const safeSurprise = Math.max(surprise, 1e-12);
                     if (!grouped.has(token)) {{
                         grouped.set(token, {{
                             text: token,
                             jieba_idx: Number(item.jieba_idx),
-                            sum_minus_log2: value,
+                            sum_minus_log2: surprise,
+                            sum_square_surprise: safeSurprise * safeSurprise,
+                            max_surprise: safeSurprise,
+                            sum_inv_surprise: 1.0 / safeSurprise,
+                            log_product_surprise: Math.log(safeSurprise),
+                            log_product_surprise_plus_one: Math.log(safeSurprise + 1.0),
                             count: 1,
                         }});
                     }} else {{
                         const cur = grouped.get(token);
-                        cur.sum_minus_log2 += value;
+                        cur.sum_minus_log2 += surprise;
+                        cur.sum_square_surprise += safeSurprise * safeSurprise;
+                        cur.max_surprise = Math.max(Number(cur.max_surprise), safeSurprise);
+                        cur.sum_inv_surprise += 1.0 / safeSurprise;
+                        cur.log_product_surprise += Math.log(safeSurprise);
+                        cur.log_product_surprise_plus_one += Math.log(safeSurprise + 1.0);
                         cur.count += 1;
                         if (Number(item.jieba_idx) < Number(cur.jieba_idx)) {{
                             cur.jieba_idx = Number(item.jieba_idx);
@@ -796,6 +877,18 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
                     item.avg_minus_log2 = Number(item.sum_minus_log2) / cnt;
                     const denom = Math.log2(cnt + 1);
                     item.sum_minus_log2_plus = Number(item.sum_minus_log2) / Math.max(denom, 1e-12);
+                    item.square_surprise = Number(item.sum_square_surprise);
+                    item.max_surprise = Number(item.max_surprise);
+
+                    const expLimit = 700.0;
+                    const logProd = Number(item.log_product_surprise);
+                    const logProdPlusOne = Number(item.log_product_surprise_plus_one);
+                    item.geometric_surprise = logProd > expLimit ? Infinity : Math.exp(logProd);
+                    item.adjusted_geometric_surprise = logProdPlusOne > expLimit ? Infinity : Math.exp(logProdPlusOne);
+
+                    const sumInv = Math.max(Number(item.sum_inv_surprise), 1e-12);
+                    const harmonicMeanSurprise = cnt / sumInv;
+                    item.harmonic_surprise = cnt * harmonicMeanSurprise;
                 }}
                 groupedItems.sort(function(x, y) {{
                     const sign = order === 'desc' ? -1 : 1;
@@ -804,6 +897,16 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
                         field = 'avg_minus_log2';
                     }} else if (sortField === 'jieba_sum_minus_log2_unique_plus') {{
                         field = 'sum_minus_log2_plus';
+                    }} else if (sortField === 'jieba_square_surprise_unique') {{
+                        field = 'square_surprise';
+                    }} else if (sortField === 'jieba_max_surprise_unique') {{
+                        field = 'max_surprise';
+                    }} else if (sortField === 'jieba_geometric_surprise_unique') {{
+                        field = 'log_product_surprise';
+                    }} else if (sortField === 'jieba_adjusted_geometric_surprise_unique') {{
+                        field = 'log_product_surprise_plus_one';
+                    }} else if (sortField === 'jieba_harmonic_surprise_unique') {{
+                        field = 'harmonic_surprise';
                     }}
                     const vx = Number(x[field]);
                     const vy = Number(y[field]);
@@ -815,32 +918,75 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
                 }});
                 topItems = groupedItems.slice(0, topK);
 
-                stats.textContent = 'AB*=已禁用 | jieba词项总数: ' + phraseItems.length + ' | 去重词项数: ' + groupedItems.length + ' | 显示: top' + topItems.length + ' | 排序: ' + sortField + ' ' + order;
+                                stats.textContent = 'AB*=已禁用 | jieba词项总数: ' + phraseItems.length + ' | 过滤词项数: ' + filteredOutCount + ' | 去重词项数: ' + groupedItems.length + ' | 显示: top' + topItems.length + ' | 排序: ' + sortField + ' ' + order + ' | Python停用词规则: ' + (enablePythonStopwordFilter ? '开' : '关');
                 phrasesEl.innerHTML = topItems
                   .map(function(item, i) {{
-                                            const info = '[jieba#' + item.jieba_idx + ', sum(-log2(p))=' + Number(item.sum_minus_log2).toFixed(12) + ', aveg(-log2(p))=' + Number(item.avg_minus_log2).toFixed(12) + ', sum(-log2(p))/log2(cnt+1)=' + Number(item.sum_minus_log2_plus).toFixed(12) + ', count=' + String(item.count) + '] ';
-                      return String(i + 1) + '. ' + escapeHtml(info + item.text);
+                                            const geomText = Number.isFinite(Number(item.geometric_surprise)) ? Number(item.geometric_surprise).toFixed(12) : 'Infinity';
+                                            const adjGeomText = Number.isFinite(Number(item.adjusted_geometric_surprise)) ? Number(item.adjusted_geometric_surprise).toFixed(12) : 'Infinity';
+
+                                            const allColumns = [
+                                                ['idx', item.jieba_idx],
+                                                ['sum(-log2(p))', Number(item.sum_minus_log2).toFixed(12)],
+                                                ['aveg(-log2(p))', Number(item.avg_minus_log2).toFixed(12)],
+                                                ['sum(-log2(p))/log2(cnt+1)', Number(item.sum_minus_log2_plus).toFixed(12)],
+                                                ['平方惊喜度', Number(item.square_surprise).toFixed(12)],
+                                                ['最大惊喜度', Number(item.max_surprise).toFixed(12)],
+                                                ['几何惊喜度', geomText],
+                                                ['调整几何惊喜度', adjGeomText],
+                                                ['调和惊喜度', Number(item.harmonic_surprise).toFixed(12)],
+                                                ['count', String(item.count)],
+                                            ];
+
+                                            const selectedColumnsMap = {{
+                                                jieba_sum_minus_log2_unique: [['idx', item.jieba_idx], ['sum(-log2(p))', Number(item.sum_minus_log2).toFixed(12)], ['count', String(item.count)]],
+                                                jieba_avg_minus_log2_unique: [['idx', item.jieba_idx], ['aveg(-log2(p))', Number(item.avg_minus_log2).toFixed(12)], ['count', String(item.count)]],
+                                                jieba_sum_minus_log2_unique_plus: [['idx', item.jieba_idx], ['sum(-log2(p))/log2(cnt+1)', Number(item.sum_minus_log2_plus).toFixed(12)], ['count', String(item.count)]],
+                                                jieba_square_surprise_unique: [['idx', item.jieba_idx], ['平方惊喜度', Number(item.square_surprise).toFixed(12)], ['count', String(item.count)]],
+                                                jieba_max_surprise_unique: [['idx', item.jieba_idx], ['最大惊喜度', Number(item.max_surprise).toFixed(12)], ['count', String(item.count)]],
+                                                jieba_geometric_surprise_unique: [['idx', item.jieba_idx], ['几何惊喜度', geomText], ['count', String(item.count)]],
+                                                jieba_adjusted_geometric_surprise_unique: [['idx', item.jieba_idx], ['调整几何惊喜度', adjGeomText], ['count', String(item.count)]],
+                                                jieba_harmonic_surprise_unique: [['idx', item.jieba_idx], ['调和惊喜度', Number(item.harmonic_surprise).toFixed(12)], ['count', String(item.count)]],
+                                            }};
+
+                                            const columns = selectedOnly ? (selectedColumnsMap[sortField] || allColumns) : allColumns;
+                                            const info = formatAlignedColumns(columns);
+                                            return String(i + 1).padStart(4, ' ') + '. ' + escapeHtml(info + ' | token=' + String(item.text || ''));
                   }})
-                  .join('<br/>');
+                                      .join(String.fromCharCode(10));
                 return;
             }}
 
             topItems = phraseItems.slice(0, topK);
-            stats.textContent = 'AB*=已禁用 | jieba词项总数: ' + phraseItems.length + ' | 显示: top' + topItems.length + ' | 排序: ' + sortField + ' ' + order;
+                        stats.textContent = 'AB*=已禁用 | jieba词项总数: ' + phraseItems.length + ' | 过滤词项数: ' + filteredOutCount + ' | 显示: top' + topItems.length + ' | 排序: ' + sortField + ' ' + order + ' | Python停用词规则: ' + (enablePythonStopwordFilter ? '开' : '关');
             phrasesEl.innerHTML = topItems
               .map(function(item, i) {{
-                  const info = '[jieba#' + item.jieba_idx + ', p=' + item.jieba_prob.toFixed(12) + ', logit=' + item.jieba_logit.toFixed(12) + '] ';
-                  return String(i + 1) + '. ' + escapeHtml(info + item.text);
+                                    const allColumns = [
+                                        ['idx', item.jieba_idx],
+                                        ['p', item.jieba_prob.toFixed(12)],
+                                        ['logit', item.jieba_logit.toFixed(12)],
+                                    ];
+                                    const selectedColumnsMap = {{
+                                        jieba_idx: [['idx', item.jieba_idx]],
+                                        jieba_prob: [['idx', item.jieba_idx], ['p', item.jieba_prob.toFixed(12)]],
+                                        jieba_logit: [['idx', item.jieba_idx], ['logit', item.jieba_logit.toFixed(12)]],
+                                    }};
+                                    const columns = selectedOnly ? (selectedColumnsMap[sortField] || allColumns) : allColumns;
+                                    const info = formatAlignedColumns(columns);
+                                    return String(i + 1).padStart(4, ' ') + '. ' + escapeHtml(info + ' | token=' + String(item.text || ''));
               }})
-              .join('<br/>');
+                              .join(String.fromCharCode(10));
         }}
 
         sortBy.addEventListener('change', recompute);
         sortOrder.addEventListener('change', recompute);
+        usePythonStopwords.addEventListener('change', recompute);
+                showSelectedMetricOnly.addEventListener('change', recompute);
         topKInput.addEventListener('input', recompute);
         resetBtn.addEventListener('click', () => {{
-            sortBy.value = 'jieba_prob';
+                        sortBy.value = 'jieba_square_surprise_unique';
             sortOrder.value = 'desc';
+            usePythonStopwords.checked = PYTHON_STOPWORD_FILTER_AVAILABLE;
+                        showSelectedMetricOnly.checked = true;
             topKInput.value = String(DEFAULT_TOP_K);
             recompute();
         }});
@@ -859,9 +1005,28 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
 
 
 def main() -> None:
+    from rag.line_profiler_instrument import profile_if_enabled, start_profiler, stop_profiler
     from rag.logprob_keyword_extractor import logprobs_extract
 
     top_k = 50
+    profile_enabled = str(os.getenv("ENABLE_KEYWORD_EXTRACTOR_LINE_PROFILER") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    profile_output_path: Optional[str] = None
+    if profile_enabled:
+        profile_output_path = start_profiler(
+            str((Path("tmp") / "logprobs_extract" / "keyword_extractor.lprof").resolve())
+        )
+        if profile_output_path:
+            print(f"line_profiler 已启用，输出文件: {profile_output_path}")
+        else:
+            print("line_profiler 不可用，改为仅输出 wall-clock 耗时。")
+
+    profiled_logprobs_extract = profile_if_enabled(logprobs_extract)
+
     files = [
         "/home/ritanlisa/文档/LID.pdf",
         "/home/ritanlisa/文档/浪潮虚拟化InCloud Sphere 6.5.1运维手册.pdf",
@@ -869,104 +1034,112 @@ def main() -> None:
         "/home/ritanlisa/文档/初步验收与试运行分册-6-硬件维护手册 - 1227.doc",
         "/home/ritanlisa/文档/TBP.pdf",
         ]
-    for file in files:
-        if not Path(file).exists():
-            print(f"文件不存在，跳过: {file}")
-            continue
-        # 清理CUDA缓存，确保显存充足
-        torch.cuda.empty_cache()
+    try:
+        for file in files:
+            if not Path(file).exists():
+                print(f"文件不存在，跳过: {file}")
+                continue
+            # 清理CUDA缓存，确保显存充足
+            torch.cuda.empty_cache()
 
-        source_file = Path(file).expanduser().resolve()
-        if not source_file.exists() or not source_file.is_file():
-            raise FileNotFoundError(f"文件不存在: {source_file}")
+            source_file = Path(file).expanduser().resolve()
+            if not source_file.exists() or not source_file.is_file():
+                raise FileNotFoundError(f"文件不存在: {source_file}")
 
-        texts_by_doc_name = build_texts_by_doc_name(str(source_file))
-        keyword_map = logprobs_extract(texts_by_doc_name, top_k=top_k)
+            texts_by_doc_name = build_texts_by_doc_name(str(source_file))
+            keyword_map = profiled_logprobs_extract(texts_by_doc_name, top_k=top_k)
 
-        output_dir = Path("tmp") / "logprobs_extract"
-        print(f"关键词结果: {keyword_map}")
-        print(f"输出目录: {output_dir.resolve()}")
+            output_dir = Path("tmp") / "logprobs_extract"
+            print(f"关键词结果: {keyword_map}")
+            print(f"输出目录: {output_dir.resolve()}")
 
-        for doc_name in texts_by_doc_name.keys():
-            safe_name = _sanitize_filename(doc_name)
-            json_path = output_dir / f"{safe_name}.json"
-            png_path = output_dir / f"{safe_name}.png"
-            print(f"JSON: {json_path.resolve()}")
-            print(f"PNG:  {png_path.resolve()}")
+            for doc_name in texts_by_doc_name.keys():
+                safe_name = _sanitize_filename(doc_name)
+                json_path = output_dir / f"{safe_name}.json"
+                png_path = output_dir / f"{safe_name}.png"
+                print(f"JSON: {json_path.resolve()}")
+                print(f"PNG:  {png_path.resolve()}")
 
-            if not json_path.exists():
-                raise FileNotFoundError(f"结果 JSON 未生成: {json_path}")
+                if not json_path.exists():
+                    raise FileNotFoundError(f"结果 JSON 未生成: {json_path}")
 
-            payload = _load_logprobs_payload(json_path)
-            raw_logprobs = payload.get("logprobs")
-            if not isinstance(raw_logprobs, list):
-                raw_logprobs = []
-            raw_probs = [
-                max(math.exp(float(item)), 1e-12)
-                for item in raw_logprobs
-                if isinstance(item, (int, float)) and math.isfinite(float(item))
-            ]
-            raw_sampled_probs = payload.get("sampled_probs")
-            if not isinstance(raw_sampled_probs, list):
-                raw_sampled_probs = []
-            sampled_probs = [
-                max(float(item), 1e-12)
-                for item in raw_sampled_probs
-                if isinstance(item, (int, float)) and math.isfinite(float(item))
-            ]
-            raw_top_p = payload.get("top_p")
-            top_p_value = float(raw_top_p) if isinstance(raw_top_p, (int, float)) else 1.0
-            raw_jieba_probs = payload.get("jieba_probs")
-            if not isinstance(raw_jieba_probs, list):
-                raw_jieba_probs = []
-            jieba_probs = [
-                max(float(item), 1e-300)
-                for item in raw_jieba_probs
-                if isinstance(item, (int, float)) and math.isfinite(float(item))
-            ]
-            raw_jieba_minus_log2 = payload.get("jieba_minus_log2_probs")
-            if not isinstance(raw_jieba_minus_log2, list):
-                raw_jieba_minus_log2 = []
-            jieba_minus_log2_probs = [
-                float(item)
-                for item in raw_jieba_minus_log2
-                if isinstance(item, (int, float)) and math.isfinite(float(item))
-            ]
-            raw_softmax_denominators = payload.get("softmax_denominators")
-            if not isinstance(raw_softmax_denominators, list):
-                raw_softmax_denominators = []
-            softmax_denominators = [
-                max(float(item), 1e-300)
-                for item in raw_softmax_denominators
-                if isinstance(item, (int, float)) and math.isfinite(float(item))
-            ]
-            raw_softmax_denominator_log2 = payload.get("softmax_denominator_log2")
-            if not isinstance(raw_softmax_denominator_log2, list):
-                raw_softmax_denominator_log2 = []
-            softmax_denominator_log2 = [
-                float(item)
-                for item in raw_softmax_denominator_log2
-                if isinstance(item, (int, float)) and math.isfinite(float(item))
-            ]
-            _plot_logprob_bars(
-                doc_name=str(payload.get("doc_name") or doc_name),
-                probs=raw_probs,
-                minus_log2_probs=[-math.log2(prob) for prob in raw_probs],
-                sampled_probs=sampled_probs,
-                sampled_minus_log2_probs=[-math.log2(prob) for prob in sampled_probs],
-                jieba_probs=jieba_probs,
-                jieba_minus_log2_probs=jieba_minus_log2_probs,
-                softmax_denominators=softmax_denominators,
-                softmax_denominator_log2=softmax_denominator_log2,
-                top_k=top_k,
-                top_p=top_p_value,
-                out_path=png_path,
-            )
+                payload = _load_logprobs_payload(json_path)
+                raw_logprobs = payload.get("logprobs")
+                if not isinstance(raw_logprobs, list):
+                    raw_logprobs = []
+                raw_probs = [
+                    max(math.exp(float(item)), 1e-12)
+                    for item in raw_logprobs
+                    if isinstance(item, (int, float)) and math.isfinite(float(item))
+                ]
+                raw_sampled_probs = payload.get("sampled_probs")
+                if not isinstance(raw_sampled_probs, list):
+                    raw_sampled_probs = []
+                sampled_probs = [
+                    max(float(item), 1e-12)
+                    for item in raw_sampled_probs
+                    if isinstance(item, (int, float)) and math.isfinite(float(item))
+                ]
+                raw_top_p = payload.get("top_p")
+                top_p_value = float(raw_top_p) if isinstance(raw_top_p, (int, float)) else 1.0
+                raw_jieba_probs = payload.get("jieba_probs")
+                if not isinstance(raw_jieba_probs, list):
+                    raw_jieba_probs = []
+                jieba_probs = [
+                    max(float(item), 1e-300)
+                    for item in raw_jieba_probs
+                    if isinstance(item, (int, float)) and math.isfinite(float(item))
+                ]
+                raw_jieba_minus_log2 = payload.get("jieba_minus_log2_probs")
+                if not isinstance(raw_jieba_minus_log2, list):
+                    raw_jieba_minus_log2 = []
+                jieba_minus_log2_probs = [
+                    float(item)
+                    for item in raw_jieba_minus_log2
+                    if isinstance(item, (int, float)) and math.isfinite(float(item))
+                ]
+                raw_softmax_denominators = payload.get("softmax_denominators")
+                if not isinstance(raw_softmax_denominators, list):
+                    raw_softmax_denominators = []
+                softmax_denominators = [
+                    max(float(item), 1e-300)
+                    for item in raw_softmax_denominators
+                    if isinstance(item, (int, float)) and math.isfinite(float(item))
+                ]
+                raw_softmax_denominator_log2 = payload.get("softmax_denominator_log2")
+                if not isinstance(raw_softmax_denominator_log2, list):
+                    raw_softmax_denominator_log2 = []
+                softmax_denominator_log2 = [
+                    float(item)
+                    for item in raw_softmax_denominator_log2
+                    if isinstance(item, (int, float)) and math.isfinite(float(item))
+                ]
+                _plot_logprob_bars(
+                    doc_name=str(payload.get("doc_name") or doc_name),
+                    probs=raw_probs,
+                    minus_log2_probs=[-math.log2(prob) for prob in raw_probs],
+                    sampled_probs=sampled_probs,
+                    sampled_minus_log2_probs=[-math.log2(prob) for prob in sampled_probs],
+                    jieba_probs=jieba_probs,
+                    jieba_minus_log2_probs=jieba_minus_log2_probs,
+                    softmax_denominators=softmax_denominators,
+                    softmax_denominator_log2=softmax_denominator_log2,
+                    top_k=top_k,
+                    top_p=top_p_value,
+                    out_path=png_path,
+                )
 
-            if not png_path.exists():
-                raise FileNotFoundError(f"图像未生成: {png_path}")
-            show_chart(png_path)
-            show_debug_gui_from_payload(payload)
+                if not png_path.exists():
+                    raise FileNotFoundError(f"图像未生成: {png_path}")
+                show_chart(png_path)
+                show_debug_gui_from_payload(payload)
+    finally:
+        dumped_profile = stop_profiler() if profile_enabled else None
+        final_profile_path = dumped_profile or profile_output_path
+        if final_profile_path:
+            print(f"line_profiler 统计文件: {final_profile_path}")
+        elif profile_enabled:
+            print("line_profiler 未生成统计文件（可能未安装 line_profiler）。")
 
 
 if __name__ == "__main__":

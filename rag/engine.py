@@ -1206,6 +1206,22 @@ class RAGEngine:
             "timestamp": datetime.now().isoformat(),
         }
 
+    @staticmethod
+    def _resolve_rag_doc_name(rag_doc: RAG_DB_Document) -> str:
+        direct_name = getattr(rag_doc, "doc_name", None)
+        if isinstance(direct_name, str) and direct_name.strip():
+            return direct_name.strip()
+        try:
+            payload = rag_doc.list_payload()
+        except Exception:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        payload_name = payload.get("doc_name")
+        if not isinstance(payload_name, str):
+            return ""
+        return payload_name.strip()
+
     def _retrieve_documents(
         self,
         *,
@@ -1289,9 +1305,9 @@ class RAGEngine:
         matched_doc_names: Optional[Set[str]] = None
         if doc_name is not None:
             available_doc_names = {
-                rag_doc.doc_name
+                self._resolve_rag_doc_name(rag_doc)
                 for rag_doc in rag_docs
-                if isinstance(rag_doc.doc_name, str) and rag_doc.doc_name.strip()
+                if self._resolve_rag_doc_name(rag_doc)
             }
             matched_doc_names = RAG_DB_Document.resolve_doc_name_matches(
                 doc_name,
@@ -1312,13 +1328,14 @@ class RAGEngine:
         scoped_docs = [
             rag_doc
             for rag_doc in rag_docs
-            if matched_doc_names is None or rag_doc.doc_name in matched_doc_names
+            if matched_doc_names is None or self._resolve_rag_doc_name(rag_doc) in matched_doc_names
         ]
 
         results: List[Dict[str, Any]] = []
         for rag_doc in scoped_docs:
+            candidate_doc_name = self._resolve_rag_doc_name(rag_doc)
             if use_vector:
-                section_scores = vector_section_scores.get(rag_doc.doc_name) or {}
+                section_scores = vector_section_scores.get(candidate_doc_name) or {}
                 if not section_scores:
                     continue
                 results.extend(
@@ -1458,9 +1475,9 @@ class RAGEngine:
             SUPPORTED_RAG_EXTENSIONS,
         )
         available_doc_names = {
-            rag_doc.doc_name
+            self._resolve_rag_doc_name(rag_doc)
             for rag_doc in rag_docs
-            if isinstance(rag_doc.doc_name, str) and rag_doc.doc_name.strip()
+            if self._resolve_rag_doc_name(rag_doc)
         }
         matched_doc_names = RAG_DB_Document.resolve_doc_name_matches(
             doc_name,
@@ -1472,7 +1489,8 @@ class RAGEngine:
 
         catalog: Dict[str, Dict[str, Any]] = {}
         for rag_doc in rag_docs:
-            if rag_doc.doc_name not in matched_doc_names:
+            candidate_doc_name = self._resolve_rag_doc_name(rag_doc)
+            if candidate_doc_name not in matched_doc_names:
                 continue
             for item in rag_doc.catalog_payload():
                 title = str(item.get("title") or "").strip()
