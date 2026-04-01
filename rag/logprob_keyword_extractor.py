@@ -35,7 +35,7 @@ DictionarySegmenterFn = Callable[
     [DictionarySegmentationContext],
     Tuple[List[str], List[float], List[int]],
 ]
-DEFAULT_DICTIONARY_SEGMENTER = "token-transition-chain-hmean"
+DEFAULT_DICTIONARY_SEGMENTER = "token-bpe-positive-pmi"
 _DICTIONARY_SEGMENTERS: Dict[str, DictionarySegmenterFn] = {}
 _ACTIVE_DICTIONARY_SEGMENTER = DEFAULT_DICTIONARY_SEGMENTER
 _LOGPROB_BACKEND_CACHE: Optional[
@@ -478,6 +478,170 @@ def _contains_break_char(token: str) -> bool:
         if _is_break_char(char):
             return True
     return False
+
+
+@dataclass
+class _PhraseUnit:
+    text: str
+    token_indices: List[int]
+
+
+def _merge_phrase_units(
+    *,
+    left: _PhraseUnit,
+    right: _PhraseUnit,
+) -> _PhraseUnit:
+    return _PhraseUnit(
+        text=f"{left.text}{right.text}",
+        token_indices=[*left.token_indices, *right.token_indices],
+    )
+
+
+def _calc_positive_pmi_pairs(
+    segments: List[List[_PhraseUnit]],
+) -> Dict[Tuple[str, str], Tuple[float, int]]:
+    unigram_counts: Dict[str, int] = {}
+    bigram_counts: Dict[Tuple[str, str], int] = {}
+    total_tokens = 0
+    total_bigrams = 0
+
+    for segment in segments:
+        if not segment:
+            continue
+        total_tokens += len(segment)
+        for unit in segment:
+            unigram_counts[unit.text] = int(unigram_counts.get(unit.text, 0) + 1)
+
+        for idx in range(0, len(segment) - 1):
+            pair = (segment[idx].text, segment[idx + 1].text)
+            bigram_counts[pair] = int(bigram_counts.get(pair, 0) + 1)
+            total_bigrams += 1
+
+    if total_tokens <= 0 or total_bigrams <= 0:
+        return {}
+
+    positive_pairs: Dict[Tuple[str, str], Tuple[float, int]] = {}
+    for pair, pair_count in bigram_counts.items():
+        left_count = int(unigram_counts.get(pair[0], 0))
+        right_count = int(unigram_counts.get(pair[1], 0))
+        if pair_count <= 0 or left_count <= 0 or right_count <= 0:
+            continue
+
+        p_ab = float(pair_count) / float(total_bigrams)
+        p_a = float(left_count) / float(total_tokens)
+        p_b = float(right_count) / float(total_tokens)
+        if p_ab <= 0.0 or p_a <= 0.0 or p_b <= 0.0:
+            continue
+
+        pmi = math.log(p_ab / (p_a * p_b))
+        if pmi > 0.0 and math.isfinite(pmi):
+            positive_pairs[pair] = (float(pmi), int(pair_count))
+
+    return positive_pairs
+
+
+def _apply_pair_merge_once(
+    segments: List[List[_PhraseUnit]],
+    target_pair: Tuple[str, str],
+) -> int:
+    merged_total = 0
+    left_target, right_target = target_pair
+
+    for seg_idx, segment in enumerate(segments):
+        if len(segment) < 2:
+            continue
+
+        new_segment: List[_PhraseUnit] = []
+        cursor = 0
+        while cursor < len(segment):
+            if (
+                cursor + 1 < len(segment)
+                and segment[cursor].text == left_target
+                and segment[cursor + 1].text == right_target
+            ):
+                new_segment.append(
+                    _merge_phrase_units(left=segment[cursor], right=segment[cursor + 1])
+                )
+                merged_total += 1
+                cursor += 2
+                continue
+
+            new_segment.append(segment[cursor])
+            cursor += 1
+
+        segments[seg_idx] = new_segment
+
+    return merged_total
+
+
+@profile_if_enabled
+def _segment_bpe_positive_pmi(context: DictionarySegmentationContext) -> Tuple[List[str], List[float], List[int]]:
+    # 在 BitNet token 序列上执行迭代 BPE：每轮全局合并 PMI>0 的最佳相邻 token 对。
+    token_texts = context.token_texts
+    token_probs = context.token_probs
+    n = min(len(token_texts), len(token_probs))
+    if n <= 0:
+        return [], [], []
+
+    segments: List[List[_PhraseUnit]] = []
+    current: List[_PhraseUnit] = []
+    for idx in range(n):
+        token = str(token_texts[idx])
+        if _contains_break_char(token):
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(_PhraseUnit(text=token, token_indices=[idx]))
+    if current:
+        segments.append(current)
+
+    if not segments:
+        return [], [], [-1] * n
+
+    # 限制迭代次数，防止极端输入下过长循环。
+    max_iter = max(8, min(4096, n * 2))
+    for _ in range(max_iter):
+        positive_pairs = _calc_positive_pmi_pairs(segments)
+        if not positive_pairs:
+            break
+
+        best_pair = max(
+            positive_pairs.items(),
+            key=lambda item: (item[1][0], item[1][1], len(item[0][0]) + len(item[0][1]), item[0]),
+        )[0]
+        merged = _apply_pair_merge_once(segments, best_pair)
+        if merged <= 0:
+            break
+
+    phrase_words: List[str] = []
+    phrase_probs: List[float] = []
+    token_to_phrase_idx = [-1] * n
+
+    for segment in segments:
+        for unit in segment:
+            phrase_text = str(unit.text).strip()
+            if not phrase_text:
+                continue
+            unit_probs = [
+                max(float(token_probs[idx]), 1e-300)
+                for idx in unit.token_indices
+                if 0 <= idx < n
+            ]
+            if not unit_probs:
+                continue
+
+            log_sum = sum(math.log(prob) for prob in unit_probs)
+            phrase_prob = max(math.exp(log_sum), 1e-300)
+
+            phrase_idx = len(phrase_words)
+            phrase_words.append(phrase_text)
+            phrase_probs.append(float(phrase_prob))
+            for idx in unit.token_indices:
+                if 0 <= idx < n:
+                    token_to_phrase_idx[idx] = phrase_idx
+
+    return phrase_words, phrase_probs, token_to_phrase_idx
 
 
 def _build_transition_phrase_patterns(
@@ -1145,6 +1309,7 @@ def _initialize_dictionary_segmenters() -> None:
     register_dictionary_segmenter("segment-transition", _segment_transition)
     register_dictionary_segmenter("token-transition-chain", _segment_transition_chain)
     register_dictionary_segmenter("token-transition-chain-hmean", _segment_transition_chain_hmean)
+    register_dictionary_segmenter("token-bpe-positive-pmi", _segment_bpe_positive_pmi)
     register_dictionary_segmenter("jieba", _segment_with_jieba)
     env_method = str(os.getenv("KEYWORD_SEGMENTER_METHOD") or "").strip().lower()
     if env_method:

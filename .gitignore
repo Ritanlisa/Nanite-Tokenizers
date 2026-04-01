@@ -89,3 +89,8 @@ tmp/*
 # =========================
 edgedriver/
 edgedriver_linux64/
+
+# =========================
+# Local agent skill snapshots
+# =========================
+.agents/skills/find-skills/
