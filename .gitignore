@@ -91,7 +91,6 @@ edgedriver/
 edgedriver_linux64/
 
 # =========================
-# local agent metadata
+# Local agent skill snapshots
 # =========================
-.agent/
-.agents/
+.agents/skills/find-skills/

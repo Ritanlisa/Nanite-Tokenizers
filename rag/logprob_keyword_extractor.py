@@ -8,13 +8,38 @@ import os
 import re
 import unicodedata
 import warnings
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
+from rag.line_profiler_instrument import profile_if_enabled
 
 logger = logging.getLogger(__name__)
 LOGPROB_FLOOR = math.log(1e-12)
+TRANSITION_MAX_NEG_LOG2_PROB = 0.4
+TRANSITION_MAX_PHRASE_LEN = 24
+NAME_CONNECTOR_CHARS = {"·", "・", "･", "-", "'", "’"}
+BPE_MIN_NEW_TERM_FREQ = 2
+
+
+@dataclass(frozen=True)
+class DictionarySegmentationContext:
+    text: str
+    token_offsets: List[Tuple[int, int]]
+    token_texts: List[str]
+    token_probs: List[float]
+    top_next_tokens: List[str]
+    top_next_probs: List[float]
+
+
+DictionarySegmenterFn = Callable[
+    [DictionarySegmentationContext],
+    Tuple[List[str], List[float], List[int]],
+]
+DEFAULT_DICTIONARY_SEGMENTER = "token-bpe-positive-pmi"
+_DICTIONARY_SEGMENTERS: Dict[str, DictionarySegmenterFn] = {}
+_ACTIVE_DICTIONARY_SEGMENTER = DEFAULT_DICTIONARY_SEGMENTER
 _LOGPROB_BACKEND_CACHE: Optional[
     Tuple[
         str,
@@ -35,7 +60,58 @@ _LOGPROB_BACKEND_CACHE: Optional[
         ],
     ]
 ] = None
-_JIEBA_STOP_WORDS_CACHE: Optional[FrozenSet[str]] = None
+_STOP_WORDS_CACHE: Optional[Set[str]] = None
+
+
+def register_dictionary_segmenter(name: str, fn: DictionarySegmenterFn) -> None:
+    segmenter_name = str(name or "").strip().lower()
+    if not segmenter_name:
+        raise ValueError("分词策略名称不能为空")
+    _DICTIONARY_SEGMENTERS[segmenter_name] = fn
+
+
+def set_active_dictionary_segmenter(name: str) -> None:
+    global _ACTIVE_DICTIONARY_SEGMENTER
+    segmenter_name = str(name or "").strip().lower()
+    if segmenter_name not in _DICTIONARY_SEGMENTERS:
+        available = ", ".join(sorted(_DICTIONARY_SEGMENTERS.keys())) or "<none>"
+        raise ValueError(f"未知分词策略: {segmenter_name}，可用策略: {available}")
+    _ACTIVE_DICTIONARY_SEGMENTER = segmenter_name
+
+
+def get_active_dictionary_segmenter() -> str:
+    return _ACTIVE_DICTIONARY_SEGMENTER
+
+
+def _segment_dictionary_tokens(
+    *,
+    text: str,
+    token_offsets: List[Tuple[int, int]],
+    token_texts: List[str],
+    token_probs: List[float],
+    top_next_tokens: List[str],
+    top_next_probs: List[float],
+) -> Tuple[List[str], List[float], List[int]]:
+    # 根据当前激活策略做词典分词，未注册时自动回退到默认实现。
+    method = get_active_dictionary_segmenter()
+    fn = _DICTIONARY_SEGMENTERS.get(method)
+    if fn is None:
+        fallback = _DICTIONARY_SEGMENTERS.get(DEFAULT_DICTIONARY_SEGMENTER)
+        if fallback is None:
+            raise RuntimeError("无可用分词策略，请先注册至少一个策略")
+        logger.warning("分词策略 %s 未注册，回退到 %s", method, DEFAULT_DICTIONARY_SEGMENTER)
+        fn = fallback
+    context = _normalize_segmentation_context(
+        DictionarySegmentationContext(
+            text=str(text or ""),
+            token_offsets=token_offsets,
+            token_texts=token_texts,
+            token_probs=token_probs,
+            top_next_tokens=top_next_tokens,
+            top_next_probs=top_next_probs,
+        )
+    )
+    return fn(context)
 
 
 def _suppress_jieba_warnings() -> None:
@@ -52,10 +128,99 @@ def _suppress_jieba_warnings() -> None:
     )
 
 
+def _is_pure_numeric_token(token: str) -> bool:
+    text = str(token or "").strip()
+    if not text:
+        return False
+    normalized = re.sub(r"[,._\-+:/\\，。．、：；]+", "", text)
+    if not normalized:
+        return False
+    return bool(re.fullmatch(r"\d+", normalized))
+
+
+def _is_noise_token(token: str) -> bool:
+    text = str(token or "").strip()
+    if not text:
+        return True
+    if text in NAME_CONNECTOR_CHARS:
+        return False
+    if _is_pure_numeric_token(text):
+        return True
+    if len(text) <= 1 and not ("\u4e00" <= text <= "\u9fff") and text not in NAME_CONNECTOR_CHARS:
+        return True
+    # 仅由标点/连接符组成的项视为噪声。
+    non_space = [ch for ch in text if not ch.isspace()]
+    if non_space and all(unicodedata.category(ch).startswith("P") and ch not in NAME_CONNECTOR_CHARS for ch in non_space):
+        return True
+    return False
+
+
+def _load_jieba_open_source_stop_words() -> Set[str]:
+    global _STOP_WORDS_CACHE
+    if _STOP_WORDS_CACHE is not None:
+        return set(_STOP_WORDS_CACHE)
+
+    builtins = {
+        "的", "了", "和", "是", "在", "及", "与", "或", "为", "对", "将", "可", "而", "就",
+        "the", "and", "for", "with", "that", "this", "from", "are", "was", "were",
+    }
+    path = str(os.getenv("KEYWORD_STOPWORDS_PATH") or "").strip()
+    loaded: Set[str] = set()
+    if path:
+        candidate = Path(path)
+        if candidate.is_file():
+            try:
+                for line in candidate.read_text(encoding="utf-8").splitlines():
+                    word = str(line).strip().lower()
+                    if word and not word.startswith("#"):
+                        loaded.add(word)
+            except Exception:
+                pass
+
+    _STOP_WORDS_CACHE = {*(word.lower() for word in builtins), *loaded}
+    return set(_STOP_WORDS_CACHE)
+
+
+def _is_stopword_filter_enabled() -> bool:
+    raw = str(os.getenv("KEYWORD_ENABLE_STOPWORDS") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _utf8_char_length(text: str) -> int:
+    # Python 字符串按 Unicode 码点计数，和 UTF-8 文本字符数语义一致。
+    return len(str(text or ""))
+
+
+def _filter_keyword_terms(terms: List[str], *, top_k: int, minlength: int) -> List[str]:
+    if not terms:
+        return []
+    min_chars = max(1, int(minlength))
+    stop_words = _load_jieba_open_source_stop_words()
+    result: List[str] = []
+    seen: Set[str] = set()
+    for term in terms:
+        token = str(term or "").strip()
+        if not token:
+            continue
+        if _utf8_char_length(token) < min_chars:
+            continue
+        lowered = token.lower()
+        if _is_noise_token(token) or lowered in stop_words:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        result.append(token)
+        if len(result) >= max(1, int(top_k)):
+            break
+    return result
+
+
 def logprobs_extract(
     texts_by_doc_name: Dict[str, List[str]],
     *,
-    top_k: int = 50,
+    top_k: int = 12,
+    minlength: int = 2,
 ) -> Dict[str, List[str]]:
     if not texts_by_doc_name:
         return {}
@@ -82,9 +247,9 @@ def logprobs_extract(
             sampled_probs,
             _,
             _,
-            jieba_words,
-            jieba_probs,
-            token_to_jieba_idx,
+            dictionary_words,
+            dictionary_probs,
+            token_to_dict_idx,
             softmax_denominators,
         ) = extract_fn(normalized_text)
         if not token_logprobs:
@@ -117,21 +282,21 @@ def logprobs_extract(
         ]
         sampled_minus_log2_probs = [-math.log2(prob) for prob in sampled_probs]
 
-        jieba_count = min(len(jieba_words), len(jieba_probs))
-        jieba_words = jieba_words[:jieba_count]
-        jieba_probs = jieba_probs[:jieba_count]
-        if token_to_jieba_idx:
-            token_to_jieba_idx = [
-                int(idx) if isinstance(idx, (int, float)) and 0 <= int(idx) < jieba_count else -1
-                for idx in token_to_jieba_idx[: len(tokens)]
+        dictionary_count = min(len(dictionary_words), len(dictionary_probs))
+        dictionary_words = dictionary_words[:dictionary_count]
+        dictionary_probs = dictionary_probs[:dictionary_count]
+        if token_to_dict_idx:
+            token_to_dict_idx = [
+                int(idx) if isinstance(idx, (int, float)) and 0 <= int(idx) < dictionary_count else -1
+                for idx in token_to_dict_idx[: len(tokens)]
             ]
-            if len(token_to_jieba_idx) < len(tokens):
-                token_to_jieba_idx.extend([-1] * (len(tokens) - len(token_to_jieba_idx)))
+            if len(token_to_dict_idx) < len(tokens):
+                token_to_dict_idx.extend([-1] * (len(tokens) - len(token_to_dict_idx)))
         else:
-            token_to_jieba_idx = [-1] * len(tokens)
-        jieba_minus_log2_probs = [
+            token_to_dict_idx = [-1] * len(tokens)
+        dictionary_minus_log2_probs = [
             -math.log2(max(prob, 1e-300))
-            for prob in jieba_probs
+            for prob in dictionary_probs
         ]
         softmax_denominators = [
             float(item)
@@ -143,11 +308,31 @@ def logprobs_extract(
         a_prob_upper, b_prob_lower = _estimate_ab_thresholds_from_probs(probs)
         ab_star_phrases: List[str] = []
 
-        jieba_top_terms = _rank_unique_jieba_by_sum_minus_log2(
-            jieba_words=jieba_words,
-            jieba_probs=jieba_probs,
-            top_k=top_k,
+        rank_limit = max(int(top_k), min(300, int(top_k) * 6))
+        dictionary_top_terms = _rank_unique_terms_by_sum_minus_log2(
+            words=dictionary_words,
+            probs=dictionary_probs,
+            top_k=rank_limit,
         )
+        min_chars = max(1, int(minlength))
+        if _is_stopword_filter_enabled():
+            dictionary_top_terms = _filter_keyword_terms(dictionary_top_terms, top_k=top_k, minlength=min_chars)
+        else:
+            filtered_terms: List[str] = []
+            seen_terms: Set[str] = set()
+            for term in dictionary_top_terms:
+                token = str(term or "").strip()
+                if not token:
+                    continue
+                if _utf8_char_length(token) < min_chars:
+                    continue
+                if token in seen_terms:
+                    continue
+                seen_terms.add(token)
+                filtered_terms.append(token)
+                if len(filtered_terms) >= max(1, int(top_k)):
+                    break
+            dictionary_top_terms = filtered_terms
 
         safe_name = _sanitize_filename(doc_name)
         payload_path = output_dir / f"{safe_name}.json"
@@ -165,10 +350,16 @@ def logprobs_extract(
                     "minus_log2_logprobs": minus_log2_probs,
                     "sampled_probs": sampled_probs,
                     "sampled_minus_log2_probs": sampled_minus_log2_probs,
-                    "jieba_words": jieba_words,
-                    "jieba_probs": jieba_probs,
-                    "jieba_minus_log2_probs": jieba_minus_log2_probs,
-                    "token_to_jieba_idx": token_to_jieba_idx,
+                    "dictionary_words": dictionary_words,
+                    "dictionary_probs": dictionary_probs,
+                    "dictionary_minus_log2_probs": dictionary_minus_log2_probs,
+                    "token_to_dict_idx": token_to_dict_idx,
+                    "dictionary_method": get_active_dictionary_segmenter(),
+                    "transition_max_neg_log2_prob": TRANSITION_MAX_NEG_LOG2_PROB,
+                    "jieba_words": dictionary_words,
+                    "jieba_probs": dictionary_probs,
+                    "jieba_minus_log2_probs": dictionary_minus_log2_probs,
+                    "token_to_jieba_idx": token_to_dict_idx,
                     "softmax_denominators": softmax_denominators,
                     "softmax_denominator_log2": softmax_denominator_log2,
                     "a_prob_upper": a_prob_upper,
@@ -176,13 +367,14 @@ def logprobs_extract(
                     "ab_star_phrases": ab_star_phrases,
                     "ab_star_disabled": True,
                     "top_k": int(top_k),
+                    "minlength": int(min_chars),
                 },
                 fout,
                 ensure_ascii=False,
                 indent=4,
             )
 
-        keyword_map[doc_name] = jieba_top_terms
+        keyword_map[doc_name] = dictionary_top_terms
 
     return keyword_map
 
@@ -294,27 +486,42 @@ def _extract_ab_star_phrases(
     return [phrase for _, _, phrase in candidates[:limit]]
 
 
-def _rank_unique_jieba_by_sum_minus_log2(
+def _rank_unique_terms_by_sum_minus_log2(
     *,
-    jieba_words: List[str],
-    jieba_probs: List[float],
+    words: List[str],
+    probs: List[float],
     top_k: int,
 ) -> List[str]:
-    if not jieba_words or not jieba_probs:
+    if not words or not probs:
         return []
 
     limit = max(1, min(int(top_k), 100))
-    stop_words = _load_jieba_open_source_stop_words()
     token_scores: Dict[str, float] = {}
     first_positions: Dict[str, int] = {}
 
-    for idx, (word, prob) in enumerate(zip(jieba_words, jieba_probs)):
+    normalized_words = [str(item).strip() for item in words]
+    higher_terms = {item for item in normalized_words if len(item) >= 2}
+    covered_subword_positions = [False] * len(normalized_words)
+    if higher_terms:
+        max_window = 24
+        for start in range(len(normalized_words)):
+            first = normalized_words[start]
+            if not first:
+                continue
+            merged = first
+            upper = min(len(normalized_words), start + max_window)
+            for end in range(start + 1, upper):
+                part = normalized_words[end]
+                if not part:
+                    break
+                merged = f"{merged}{part}"
+                if merged in higher_terms and len(merged) > len(first):
+                    for idx in range(start, end + 1):
+                        covered_subword_positions[idx] = True
+
+    for idx, (word, prob) in enumerate(zip(words, probs)):
         token = str(word).strip()
         if not token:
-            continue
-        if _is_noise_token(token):
-            continue
-        if token.lower() in stop_words:
             continue
         if not isinstance(prob, (int, float)):
             continue
@@ -322,7 +529,12 @@ def _rank_unique_jieba_by_sum_minus_log2(
         if not math.isfinite(prob_value):
             continue
 
-        score = -math.log2(max(prob_value, 1e-300))
+        if idx < len(covered_subword_positions) and covered_subword_positions[idx]:
+            continue
+
+        # 与 debug 前端默认口径保持一致：按平方惊喜度（surprise^2）累计排序。
+        surprise = -math.log2(max(prob_value, 1e-300))
+        score = surprise * surprise
         token_scores[token] = float(token_scores.get(token, 0.0) + score)
         if token not in first_positions:
             first_positions[token] = idx
@@ -334,134 +546,530 @@ def _rank_unique_jieba_by_sum_minus_log2(
     return [token for token, _ in ranked[:limit]]
 
 
-def _load_jieba_open_source_stop_words() -> FrozenSet[str]:
-    global _JIEBA_STOP_WORDS_CACHE
-
-    if _JIEBA_STOP_WORDS_CACHE is not None:
-        return _JIEBA_STOP_WORDS_CACHE
-
-    stop_words: set[str] = set()
-    stop_words_path = Path(__file__).resolve().parent / "resources" / "jieba_stop_words_merged.txt"
-
-    if stop_words_path.is_file():
-        try:
-            with stop_words_path.open("r", encoding="utf-8") as fin:
-                for line in fin:
-                    token = line.strip()
-                    if token:
-                        stop_words.add(token.lower())
-        except Exception as exc:
-            logger.warning("加载 jieba 停用词表失败（%s）：%s", stop_words_path, exc)
-    else:
-        logger.warning("未找到 jieba 停用词表：%s", stop_words_path)
-
-    if not stop_words:
-        # 回退到 jieba 内置默认停用词，避免过滤集为空。
-        stop_words.update(
-            {
-                "the",
-                "of",
-                "is",
-                "and",
-                "to",
-                "in",
-                "that",
-                "we",
-                "for",
-                "an",
-                "are",
-                "by",
-                "be",
-                "as",
-                "on",
-                "with",
-                "can",
-                "if",
-                "from",
-                "which",
-                "you",
-                "it",
-                "this",
-                "then",
-                "at",
-                "have",
-                "all",
-                "not",
-                "one",
-                "has",
-                "or",
-            }
+def _normalize_segmentation_context(
+    context: DictionarySegmentationContext,
+) -> DictionarySegmentationContext:
+    # 统一清洗输入上下文，避免非法概率值和越界偏移影响后续分词。
+    n = min(len(context.token_texts), len(context.token_probs))
+    if n <= 0:
+        return DictionarySegmentationContext(
+            text=str(context.text or ""),
+            token_offsets=[],
+            token_texts=[],
+            token_probs=[],
+            top_next_tokens=[],
+            top_next_probs=[],
         )
 
-    _JIEBA_STOP_WORDS_CACHE = frozenset(stop_words)
-    return _JIEBA_STOP_WORDS_CACHE
+    token_texts = [str(item) for item in context.token_texts[:n]]
+    token_probs = [
+        max(float(item), 1e-300)
+        for item in context.token_probs[:n]
+        if isinstance(item, (int, float)) and math.isfinite(float(item))
+    ]
+    n = min(len(token_texts), len(token_probs))
+
+    token_offsets: List[Tuple[int, int]] = []
+    for item in context.token_offsets[:n]:
+        if isinstance(item, (tuple, list)) and len(item) >= 2:
+            token_offsets.append((int(item[0]), int(item[1])))
+        else:
+            token_offsets.append((0, 0))
+    if len(token_offsets) < n:
+        token_offsets.extend([(0, 0)] * (n - len(token_offsets)))
+
+    normalized_top_next_tokens = ["" for _ in range(n)]
+    normalized_top_next_probs = [0.0 for _ in range(n)]
+    for idx in range(min(n, len(context.top_next_tokens), len(context.top_next_probs))):
+        normalized_top_next_tokens[idx] = str(context.top_next_tokens[idx])
+        raw_prob = context.top_next_probs[idx]
+        if isinstance(raw_prob, (int, float)) and math.isfinite(float(raw_prob)):
+            normalized_top_next_probs[idx] = max(float(raw_prob), 0.0)
+
+    return DictionarySegmentationContext(
+        text=str(context.text or ""),
+        token_offsets=token_offsets[:n],
+        token_texts=token_texts[:n],
+        token_probs=token_probs[:n],
+        top_next_tokens=normalized_top_next_tokens[:n],
+        top_next_probs=normalized_top_next_probs[:n],
+    )
 
 
-def _is_noise_token(token: str) -> bool:
-    value = str(token).strip()
-    if not value:
+def _is_break_char(char: str) -> bool:
+    if not char:
         return True
-
-    if any(ch.isdigit() for ch in value):
+    if char in NAME_CONNECTOR_CHARS:
+        return False
+    # 放过普通空格（含 Unicode Space_Separator），但换行/制表等控制空白仍作为断点。
+    if char in {"\n", "\r", "\t", "\v", "\f"}:
         return True
-
-    # 过滤纯标点/符号/空白的 token，例如：，。、“”…—
-    if all(
-        unicodedata.category(ch).startswith(("P", "S", "Z"))
-        for ch in value
-    ):
+    category = unicodedata.category(char)
+    if category in {"Zl", "Zp"}:
         return True
+    return category.startswith("P")
 
+
+def _contains_break_char(token: str) -> bool:
+    text = str(token or "")
+    if not text:
+        return True
+    for char in text:
+        if _is_break_char(char):
+            return True
     return False
 
 
-def _aggregate_jieba_word_probs(
+@dataclass
+class _PhraseUnit:
+    text: str
+    token_indices: List[int]
+
+
+def _merge_phrase_units(
     *,
-    text: str,
-    token_offsets: List[Tuple[int, int]],
-    token_texts: List[str],
+    left: _PhraseUnit,
+    right: _PhraseUnit,
+) -> _PhraseUnit:
+    return _PhraseUnit(
+        text=f"{left.text}{right.text}",
+        token_indices=[*left.token_indices, *right.token_indices],
+    )
+
+
+def _calc_positive_pmi_pairs(
+    segments: List[List[_PhraseUnit]],
     token_probs: List[float],
+    *,
+    min_pair_count: int,
+) -> Dict[Tuple[str, str], Tuple[float, int, float, float]]:
+    unigram_counts: Dict[str, int] = {}
+    bigram_counts: Dict[Tuple[str, str], int] = {}
+    bigram_prob_mass: Dict[Tuple[str, str], float] = {}
+    total_tokens = 0
+    total_bigrams = 0
+
+    def _unit_prob(unit: _PhraseUnit) -> float:
+        values = [
+            max(float(token_probs[idx]), 1e-300)
+            for idx in unit.token_indices
+            if 0 <= idx < len(token_probs)
+        ]
+        if not values:
+            return 1e-300
+        return _harmonic_mean(values)
+
+    for segment in segments:
+        if not segment:
+            continue
+        total_tokens += len(segment)
+        for unit in segment:
+            unigram_counts[unit.text] = int(unigram_counts.get(unit.text, 0) + 1)
+
+        for idx in range(0, len(segment) - 1):
+            left_unit = segment[idx]
+            right_unit = segment[idx + 1]
+            pair = (left_unit.text, right_unit.text)
+            bigram_counts[pair] = int(bigram_counts.get(pair, 0) + 1)
+            left_prob = _unit_prob(left_unit)
+            right_prob = _unit_prob(right_unit)
+            pair_confidence = math.sqrt(max(left_prob, 1e-300) * max(right_prob, 1e-300))
+            bigram_prob_mass[pair] = float(bigram_prob_mass.get(pair, 0.0) + pair_confidence)
+            total_bigrams += 1
+
+    if total_tokens <= 0 or total_bigrams <= 0:
+        return {}
+
+    positive_pairs: Dict[Tuple[str, str], Tuple[float, int, float, float]] = {}
+    for pair, pair_count in bigram_counts.items():
+        # 硬性要求：BPE 新合并词在原文中的可观测出现次数至少为 2。
+        # 对于相邻 pair 合并，新词出现次数等价于该 pair 的相邻出现次数。
+        if pair_count < int(BPE_MIN_NEW_TERM_FREQ):
+            continue
+        if pair_count < int(min_pair_count):
+            continue
+        left_count = int(unigram_counts.get(pair[0], 0))
+        right_count = int(unigram_counts.get(pair[1], 0))
+        if pair_count <= 0 or left_count <= 0 or right_count <= 0:
+            continue
+
+        p_ab = float(pair_count) / float(total_bigrams)
+        p_a = float(left_count) / float(total_tokens)
+        p_b = float(right_count) / float(total_tokens)
+        if p_ab <= 0.0 or p_a <= 0.0 or p_b <= 0.0:
+            continue
+
+        pmi = math.log(p_ab / (p_a * p_b))
+        if pmi > 0.0 and math.isfinite(pmi):
+            avg_pair_prob = float(bigram_prob_mass.get(pair, 0.0) / float(max(pair_count, 1)))
+            # 兼顾词频与 LLM 置信度：高频且高置信度 pair 更优先，低频链式扩展会被自然抑制。
+            freq_factor = math.log1p(float(pair_count))
+            prob_factor = 1.0 / (1.0 + max(-math.log2(max(avg_pair_prob, 1e-300)), 0.0))
+            merge_score = float(pmi * freq_factor * prob_factor)
+            positive_pairs[pair] = (float(pmi), int(pair_count), float(avg_pair_prob), merge_score)
+
+    return positive_pairs
+
+
+def _apply_pair_merge_once(
+    segments: List[List[_PhraseUnit]],
+    target_pair: Tuple[str, str],
+) -> int:
+    merged_total = 0
+    left_target, right_target = target_pair
+
+    for seg_idx, segment in enumerate(segments):
+        if len(segment) < 2:
+            continue
+
+        new_segment: List[_PhraseUnit] = []
+        cursor = 0
+        while cursor < len(segment):
+            if (
+                cursor + 1 < len(segment)
+                and segment[cursor].text == left_target
+                and segment[cursor + 1].text == right_target
+            ):
+                new_segment.append(
+                    _merge_phrase_units(left=segment[cursor], right=segment[cursor + 1])
+                )
+                merged_total += 1
+                cursor += 2
+                continue
+
+            new_segment.append(segment[cursor])
+            cursor += 1
+
+        segments[seg_idx] = new_segment
+
+    return merged_total
+
+
+@profile_if_enabled
+def _segment_bpe_positive_pmi(context: DictionarySegmentationContext) -> Tuple[List[str], List[float], List[int]]:
+    # 在 BitNet token 序列上执行迭代 BPE：每轮全局合并 PMI>0 的最佳相邻 token 对。
+    token_texts = context.token_texts
+    token_probs = context.token_probs
+    n = min(len(token_texts), len(token_probs))
+    if n <= 0:
+        return [], [], []
+
+    segments: List[List[_PhraseUnit]] = []
+    current: List[_PhraseUnit] = []
+    for idx in range(n):
+        token = str(token_texts[idx])
+        if _contains_break_char(token):
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(_PhraseUnit(text=token, token_indices=[idx]))
+    if current:
+        segments.append(current)
+
+    if not segments:
+        return [], [], [-1] * n
+
+    # 限制迭代预算并只合并重复 pair，避免 O(n^2) 级退化。
+    max_iter = max(16, min(256, int(math.sqrt(n) * 6)))
+    for _ in range(max_iter):
+        positive_pairs = _calc_positive_pmi_pairs(segments, token_probs, min_pair_count=2)
+        if not positive_pairs:
+            break
+
+        best_pair = max(
+            positive_pairs.items(),
+            key=lambda item: (item[1][3], item[1][0], item[1][1], len(item[0][0]) + len(item[0][1]), item[0]),
+        )[0]
+        merged = _apply_pair_merge_once(segments, best_pair)
+        if merged <= 0:
+            break
+
+    phrase_words: List[str] = []
+    phrase_probs: List[float] = []
+    token_to_phrase_idx = [-1] * n
+
+    for segment in segments:
+        for unit in segment:
+            phrase_text = str(unit.text).strip()
+            if not phrase_text:
+                continue
+            unit_probs = [
+                max(float(token_probs[idx]), 1e-300)
+                for idx in unit.token_indices
+                if 0 <= idx < n
+            ]
+            if not unit_probs:
+                continue
+
+            log_sum = sum(math.log(prob) for prob in unit_probs)
+            phrase_prob = max(math.exp(log_sum), 1e-300)
+
+            phrase_idx = len(phrase_words)
+            phrase_words.append(phrase_text)
+            phrase_probs.append(float(phrase_prob))
+            for idx in unit.token_indices:
+                if 0 <= idx < n:
+                    token_to_phrase_idx[idx] = phrase_idx
+
+    return phrase_words, phrase_probs, token_to_phrase_idx
+
+
+def _build_transition_phrase_patterns(
+    context: DictionarySegmentationContext,
+) -> List[List[str]]:
+    # 用“当前 token A -> 所有后继 AB 的最后出现位置”构造候选短语模板。
+    # 是否继续扩展由该 AB 最后出现位置上 B 的信息量阈值决定。
+    token_texts = context.token_texts
+    token_probs = context.token_probs
+    n = min(len(token_texts), len(token_probs))
+    if n <= 0:
+        return []
+
+    # successor_last_index_by_token[A][B] = AB 最后一次相邻出现时 B 的索引。
+    successor_last_index_by_token: Dict[str, Dict[str, int]] = {}
+    for idx in range(1, n):
+        left = str(token_texts[idx - 1])
+        right = str(token_texts[idx])
+        successor_last_index_by_token.setdefault(left, {})[right] = idx
+
+    unique_tokens: List[str] = []
+    seen_tokens: Set[str] = set()
+    for token in token_texts:
+        if token not in seen_tokens:
+            seen_tokens.add(token)
+            unique_tokens.append(token)
+
+    phrase_patterns: List[List[str]] = []
+    for token in unique_tokens:
+        if _contains_break_char(token):
+            continue
+
+        phrase_tokens = [str(token)]
+        visited_pairs: Set[Tuple[str, str]] = set()
+
+        while len(phrase_tokens) < TRANSITION_MAX_PHRASE_LEN:
+            anchor_token = str(phrase_tokens[-1])
+            successors = successor_last_index_by_token.get(anchor_token, {})
+            if not successors:
+                break
+
+            selected_token: Optional[str] = None
+            selected_second_index = -1
+            selected_info = float("inf")
+
+            for candidate_token, second_index in successors.items():
+                if second_index <= 0 or second_index >= n:
+                    continue
+                if _contains_break_char(candidate_token):
+                    continue
+
+                pair = (anchor_token, str(candidate_token))
+                if pair in visited_pairs:
+                    continue
+
+                candidate_prob = float(token_probs[second_index])
+                if (not math.isfinite(candidate_prob)) or candidate_prob <= 0.0:
+                    continue
+
+                info_content = -math.log2(max(candidate_prob, 1e-300))
+                if info_content >= float(TRANSITION_MAX_NEG_LOG2_PROB):
+                    continue
+
+                if (
+                    info_content < selected_info
+                    or (
+                        math.isclose(info_content, selected_info)
+                        and int(second_index) > int(selected_second_index)
+                    )
+                ):
+                    selected_token = str(candidate_token)
+                    selected_second_index = int(second_index)
+                    selected_info = float(info_content)
+
+            if not selected_token:
+                break
+
+            visited_pairs.add((anchor_token, selected_token))
+            phrase_tokens.append(selected_token)
+
+        phrase_patterns.append(phrase_tokens)
+
+    phrase_pattern_set: Set[Tuple[str, ...]] = set()
+    dedup_patterns: List[List[str]] = []
+    for item in phrase_patterns + [[token] for token in unique_tokens if not _contains_break_char(token)]:
+        key = tuple(item)
+        if not key or key in phrase_pattern_set:
+            continue
+        phrase_pattern_set.add(key)
+        dedup_patterns.append(list(item))
+    return dedup_patterns
+
+
+def _harmonic_mean(values: List[float], floor: float = 1e-300) -> float:
+    valid = [max(float(value), floor) for value in values if isinstance(value, (int, float)) and math.isfinite(float(value))]
+    if not valid:
+        return floor
+    reciprocal_sum = sum(1.0 / value for value in valid)
+    if reciprocal_sum <= 0.0:
+        return floor
+    return max(len(valid) / reciprocal_sum, floor)
+
+
+@profile_if_enabled
+def _materialize_phrase_patterns(
+    context: DictionarySegmentationContext,
+    phrase_patterns: List[List[str]],
+    *,
+    probability_mode: str,
 ) -> Tuple[List[str], List[float], List[int]]:
+    # 将模板映射回 token 序列，生成短语、短语概率及 token 到短语索引映射。
+    token_texts = context.token_texts
+    token_probs = context.token_probs
+    n = min(len(token_texts), len(token_probs))
+    if n <= 0:
+        return [], [], []
+
+    patterns_by_first: Dict[str, List[List[str]]] = {}
+    for pattern in phrase_patterns:
+        first = str(pattern[0])
+        patterns_by_first.setdefault(first, []).append(pattern)
+    for first in patterns_by_first.keys():
+        patterns_by_first[first].sort(key=lambda item: len(item), reverse=True)
+
+    phrase_words: List[str] = []
+    phrase_probs: List[float] = []
+    token_to_phrase_idx = [-1] * n
+
+    cursor = 0
+    while cursor < n:
+        current = str(token_texts[cursor])
+        if _contains_break_char(current):
+            cursor += 1
+            continue
+
+        candidates = patterns_by_first.get(current, [])
+        matched: Optional[List[str]] = None
+
+        for pattern in candidates:
+            length = len(pattern)
+            if length <= 0 or cursor + length > n:
+                continue
+            ok = True
+            for offset, expected in enumerate(pattern):
+                if str(token_texts[cursor + offset]) != str(expected):
+                    ok = False
+                    break
+            if ok:
+                matched = pattern
+                break
+
+        if matched is None:
+            matched = [current]
+
+        seg_len = len(matched)
+        phrase_text = "".join(str(item) for item in matched).strip()
+        if not phrase_text:
+            phrase_text = str(current)
+
+        segment_probs = [max(float(token_probs[idx]), 1e-300) for idx in range(cursor, min(cursor + seg_len, n))]
+        if probability_mode == "harmonic":
+            phrase_prob = _harmonic_mean(segment_probs)
+        else:
+            log_sum = sum(math.log(prob) for prob in segment_probs)
+            phrase_prob = max(math.exp(log_sum), 1e-300)
+
+        phrase_idx = len(phrase_words)
+        phrase_words.append(phrase_text)
+        phrase_probs.append(float(phrase_prob))
+        for idx in range(cursor, min(cursor + seg_len, n)):
+            token_to_phrase_idx[idx] = phrase_idx
+
+        cursor += max(1, seg_len)
+
+    if phrase_words:
+        last_valid = -1
+        for idx in range(n):
+            if _contains_break_char(str(token_texts[idx])):
+                token_to_phrase_idx[idx] = -1
+                last_valid = -1
+                continue
+            mapped = token_to_phrase_idx[idx]
+            if 0 <= mapped < len(phrase_words):
+                last_valid = mapped
+            elif last_valid >= 0:
+                token_to_phrase_idx[idx] = last_valid
+
+        next_valid = -1
+        for idx in range(n - 1, -1, -1):
+            if _contains_break_char(str(token_texts[idx])):
+                token_to_phrase_idx[idx] = -1
+                next_valid = -1
+                continue
+            mapped = token_to_phrase_idx[idx]
+            if 0 <= mapped < len(phrase_words):
+                next_valid = mapped
+            elif next_valid >= 0:
+                token_to_phrase_idx[idx] = next_valid
+
+        for idx in range(n):
+            if _contains_break_char(str(token_texts[idx])):
+                token_to_phrase_idx[idx] = -1
+                continue
+            if token_to_phrase_idx[idx] < 0:
+                token_to_phrase_idx[idx] = 0
+
+    return phrase_words, phrase_probs, token_to_phrase_idx
+
+
+@profile_if_enabled
+def _segment_transition_chain(context: DictionarySegmentationContext) -> Tuple[List[str], List[float], List[int]]:
+    # 默认策略：按转移链拼接短语，概率使用连乘。
+    phrase_patterns = _build_transition_phrase_patterns(context)
+    return _materialize_phrase_patterns(context, phrase_patterns, probability_mode="product")
+
+
+@profile_if_enabled
+def _segment_transition(context: DictionarySegmentationContext) -> Tuple[List[str], List[float], List[int]]:
+    # 新策略：基于 AB 最后出现位置 + B 信息量阈值，按转移链拼接短语，概率使用连乘。
+    phrase_patterns = _build_transition_phrase_patterns(context)
+    return _materialize_phrase_patterns(context, phrase_patterns, probability_mode="product")
+
+
+@profile_if_enabled
+def _segment_transition_chain_hmean(context: DictionarySegmentationContext) -> Tuple[List[str], List[float], List[int]]:
+    # 备选策略：与默认策略相同，但短语概率改为调和平均。
+    phrase_patterns = _build_transition_phrase_patterns(context)
+    return _materialize_phrase_patterns(context, phrase_patterns, probability_mode="harmonic")
+
+
+@profile_if_enabled
+def _segment_with_jieba(context: DictionarySegmentationContext) -> Tuple[List[str], List[float], List[int]]:
+    # 兼容 jieba 分词：按字符区间对齐 token，并聚合为词级概率。
     _suppress_jieba_warnings()
     try:
         import jieba
+
         jieba.setLogLevel(logging.ERROR)
     except Exception as exc:
         raise ImportError(
             "缺少 jieba，无法执行 jieba 分词聚合。请先安装：pip install jieba"
         ) from exc
 
-    if not text:
-        return [], [], []
+    text = str(context.text or "")
+    token_offsets = context.token_offsets
+    token_texts = context.token_texts
+    token_probs = context.token_probs
     n = min(len(token_offsets), len(token_texts), len(token_probs))
-    if n <= 0:
-        return [], [], []
-
-    token_offsets = [
-        (int(item[0]), int(item[1]))
-        for item in token_offsets[:n]
-        if isinstance(item, (tuple, list)) and len(item) >= 2
-    ]
-    token_texts = [str(item) for item in token_texts[:n]]
-    token_probs = [
-        max(float(item), 1e-300)
-        for item in token_probs[:n]
-        if isinstance(item, (int, float)) and math.isfinite(float(item))
-    ]
-    n = min(len(token_offsets), len(token_texts), len(token_probs))
-    token_offsets = token_offsets[:n]
-    token_texts = token_texts[:n]
-    token_probs = token_probs[:n]
-    if n <= 0:
+    if not text or n <= 0:
         return [], [], []
 
     segments: List[Tuple[str, bool, int, int]] = []
     cursor_text = 0
-    source_text = str(text)
-    for chunk in re.findall(r"\s+|\S+", source_text):
+    for chunk in re.findall(r"\s+|\S+", text):
         if not chunk:
             continue
-        start = source_text.find(chunk, cursor_text)
+        start = text.find(chunk, cursor_text)
         if start < 0:
             start = cursor_text
         end = start + len(chunk)
@@ -472,26 +1080,24 @@ def _aggregate_jieba_word_probs(
 
         local_cursor = 0
         for word in jieba.cut(chunk):
-            if word:
-                word_text = str(word)
-                local_start = chunk.find(word_text, local_cursor)
-                if local_start < 0:
-                    local_start = local_cursor
-                local_end = local_start + len(word_text)
-                local_cursor = local_end
-                segments.append((word_text, True, start + local_start, start + local_end))
-
-    if not segments:
-        return [], [], []
+            if not word:
+                continue
+            word_text = str(word)
+            local_start = chunk.find(word_text, local_cursor)
+            if local_start < 0:
+                local_start = local_cursor
+            local_end = local_start + len(word_text)
+            local_cursor = local_end
+            segments.append((word_text, True, start + local_start, start + local_end))
 
     word_probs: List[float] = []
     words: List[str] = []
-    token_to_jieba_idx = [-1] * n
+    token_to_word_idx = [-1] * n
     token_cursor = 0
 
-    for segment_text, is_jieba_word, seg_start, seg_end in segments:
+    for segment_text, is_word, seg_start, seg_end in segments:
         if token_cursor >= n:
-            if is_jieba_word:
+            if is_word and not _contains_break_char(segment_text):
                 words.append(segment_text)
                 word_probs.append(1e-300)
             continue
@@ -507,17 +1113,16 @@ def _aggregate_jieba_word_probs(
                 matched_token_indices.append(probe)
             probe += 1
 
-        consumed = [max(float(token_probs[idx]), 1e-300) for idx in matched_token_indices]
-        if is_jieba_word:
-            jieba_idx = len(words)
+        if is_word and not _contains_break_char(segment_text):
+            word_idx = len(words)
             words.append(segment_text)
-            if consumed:
-                log_sum = sum(math.log(max(prob, 1e-300)) for prob in consumed)
+            if matched_token_indices:
+                log_sum = sum(math.log(max(float(token_probs[idx]), 1e-300)) for idx in matched_token_indices)
                 word_probs.append(max(math.exp(log_sum), 1e-300))
             else:
                 word_probs.append(1e-300)
             for tok_idx in matched_token_indices:
-                token_to_jieba_idx[tok_idx] = jieba_idx
+                token_to_word_idx[tok_idx] = word_idx
 
         while token_cursor < n and token_offsets[token_cursor][1] <= seg_end:
             token_cursor += 1
@@ -525,78 +1130,25 @@ def _aggregate_jieba_word_probs(
     if words:
         last_valid = -1
         for idx in range(n):
-            mapped = token_to_jieba_idx[idx]
+            mapped = token_to_word_idx[idx]
             if 0 <= mapped < len(words):
                 last_valid = mapped
             elif last_valid >= 0:
-                token_to_jieba_idx[idx] = last_valid
+                token_to_word_idx[idx] = last_valid
 
         next_valid = -1
         for idx in range(n - 1, -1, -1):
-            mapped = token_to_jieba_idx[idx]
+            mapped = token_to_word_idx[idx]
             if 0 <= mapped < len(words):
                 next_valid = mapped
             elif next_valid >= 0:
-                token_to_jieba_idx[idx] = next_valid
+                token_to_word_idx[idx] = next_valid
 
         for idx in range(n):
-            if token_to_jieba_idx[idx] < 0:
-                token_to_jieba_idx[idx] = 0
+            if token_to_word_idx[idx] < 0:
+                token_to_word_idx[idx] = 0
 
-        def _normalize_text(value: str) -> str:
-            text = str(value)
-            text = text.replace("▁", "").replace("Ġ", "")
-            text = re.sub(r"^##", "", text)
-            text = re.sub(r"\s+", "", text)
-            return text
-
-        jieba_norm = [_normalize_text(item) for item in words]
-        norm_to_indices: Dict[str, List[int]] = {}
-        for idx, norm in enumerate(jieba_norm):
-            if not norm:
-                continue
-            norm_to_indices.setdefault(norm, []).append(idx)
-
-        anchor = 0
-        for tok_idx, token_text in enumerate(token_texts[:n]):
-            token_norm = _normalize_text(token_text)
-            if not token_norm:
-                continue
-            if not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", token_norm):
-                continue
-
-            mapped = token_to_jieba_idx[tok_idx]
-            if 0 <= mapped < len(words):
-                mapped_norm = jieba_norm[mapped]
-                if (token_norm in mapped_norm) or (mapped_norm and mapped_norm in token_norm):
-                    anchor = mapped
-                    continue
-
-            candidates = norm_to_indices.get(token_norm, [])
-            if candidates:
-                best = min(candidates, key=lambda item: abs(item - anchor))
-                token_to_jieba_idx[tok_idx] = best
-                anchor = best
-                continue
-
-            best = -1
-            best_dist = 10**9
-            left = max(0, anchor - 128)
-            right = min(len(words), anchor + 129)
-            for jieba_idx in range(left, right):
-                norm = jieba_norm[jieba_idx]
-                if not norm:
-                    continue
-                if (token_norm in norm) or (norm in token_norm):
-                    dist = abs(jieba_idx - anchor)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best = jieba_idx
-            if best >= 0:
-                token_to_jieba_idx[tok_idx] = best
-                anchor = best
-
-    return words, word_probs, token_to_jieba_idx
+    return words, word_probs, token_to_word_idx
 
 
 def _get_or_create_logprob_backend(
@@ -722,6 +1274,19 @@ def _build_transformers_runtime(
     top_k = int(getattr(generation_config, "top_k", 0) or 0) if generation_config is not None else 0
     special_token_ids = {int(item) for item in list(getattr(tokenizer, "all_special_ids", []) or [])}
 
+    def _decode_token_id_span(token_id_span: List[int]) -> str:
+        if not token_id_span:
+            return ""
+        try:
+            text = tokenizer.decode(
+                [int(tid) for tid in token_id_span],
+                clean_up_tokenization_spaces=False,
+                skip_special_tokens=False,
+            )
+            return str(text)
+        except Exception:
+            return ""
+
     def _compute_token_offsets_for_text(text: str, target_token_ids: List[int]) -> List[Tuple[int, int]]:
         try:
             encoded = tokenizer(
@@ -762,7 +1327,9 @@ def _build_transformers_runtime(
         except Exception:
             return [(0, 0)] * len(target_token_ids)
 
+    @profile_if_enabled
     def _extract(text: str) -> Tuple[List[str], List[float], List[float], int, float, List[str], List[float], List[int], List[float]]:
+        # 核心提取流程：分块推理、计算 token 概率，再聚合到词典短语。
         token_ids = tokenizer.encode(text, add_special_tokens=True)
         if len(token_ids) < 2:
             return [], [], [], top_k, top_p, [], [], [], []
@@ -772,6 +1339,8 @@ def _build_transformers_runtime(
         all_sampled_probs: List[float] = []
         all_token_ids: List[int] = []
         all_softmax_denominators: List[float] = []
+        all_pred_top_tokens: List[str] = []
+        all_pred_top_probs: List[float] = []
         cursor = 0
         step = max(2, model_max_len - 1)
 
@@ -782,7 +1351,7 @@ def _build_transformers_runtime(
 
             input_tensor = torch.tensor([chunk_ids], dtype=torch.long, device=device)
             with torch.no_grad():
-                outputs = model(input_ids=input_tensor)
+                outputs = model(input_ids=input_tensor) # 33.4% Time
                 logits = outputs.logits[:, :-1, :]
                 target_tensor = input_tensor[:, 1:]
                 warpers = []
@@ -795,6 +1364,8 @@ def _build_transformers_runtime(
                 chunk_logprobs: List[float] = []
                 sampled_chunk: List[float] = []
                 chunk_softmax_denominators: List[float] = []
+                chunk_pred_top_ids: List[int] = []
+                chunk_pred_top_probs: List[float] = []
 
                 for pos in range(seq_len):
                     scores = logits[:, pos, :]
@@ -804,16 +1375,20 @@ def _build_transformers_runtime(
                     chosen_logit = scores.gather(-1, target_pos.unsqueeze(-1)).squeeze(-1)
                     norm_pos = torch.logsumexp(scores, dim=-1)
                     softmax_denominator_pos = torch.exp(norm_pos)
+                    top_logit, top_idx = torch.max(scores, dim=-1)
+                    top_prob = torch.exp(top_logit - norm_pos)
                     logprob_pos = chosen_logit - norm_pos
                     logprob_pos = torch.nan_to_num(logprob_pos, nan=LOGPROB_FLOOR, posinf=0.0, neginf=LOGPROB_FLOOR)
-                    logprob_value = float(logprob_pos[0].detach().cpu().item())
+                    logprob_value = float(logprob_pos[0].detach().cpu().item()) # 28.5% Time
                     chunk_logprobs.append(logprob_value)
                     chunk_softmax_denominators.append(float(softmax_denominator_pos[0].detach().cpu().item()))
+                    chunk_pred_top_ids.append(int(top_idx[0].detach().cpu().item()))
+                    chunk_pred_top_probs.append(float(top_prob[0].detach().cpu().item()))
 
                     if warpers:
                         warped_scores = scores
                         for warper in warpers:
-                            warped_scores = warper(input_tensor[:, : pos + 1], warped_scores)
+                            warped_scores = warper(input_tensor[:, : pos + 1], warped_scores) # 13.4% Time
                         probs_after_warp = torch.softmax(warped_scores, dim=-1)
                         chosen = probs_after_warp.gather(-1, target_pos.unsqueeze(-1)).squeeze(-1)
                         sampled_chunk.append(float(chosen[0].detach().cpu().item()))
@@ -829,8 +1404,20 @@ def _build_transformers_runtime(
                 tokenizer.decode([int(tid)], clean_up_tokenization_spaces=False)
                 for tid in chunk_target_ids
             ]
+            chunk_pred_top_tokens = [
+                tokenizer.decode([int(tid)], clean_up_tokenization_spaces=False)
+                for tid in chunk_pred_top_ids
+            ]
 
-            for tid, tok, lp, sp, denom in zip(chunk_target_ids, chunk_tokens, chunk_logprobs, sampled_chunk, chunk_softmax_denominators):
+            for tid, tok, lp, sp, denom, pred_tok, pred_prob in zip(
+                chunk_target_ids,
+                chunk_tokens,
+                chunk_logprobs,
+                sampled_chunk,
+                chunk_softmax_denominators,
+                chunk_pred_top_tokens,
+                chunk_pred_top_probs,
+            ):
                 tid_int = int(tid)
                 if tid_int in special_token_ids:
                     continue
@@ -839,17 +1426,45 @@ def _build_transformers_runtime(
                 all_logprobs.append(float(lp))
                 all_sampled_probs.append(float(sp))
                 all_softmax_denominators.append(max(float(denom), 1e-300))
+                all_pred_top_tokens.append(str(pred_tok))
+                all_pred_top_probs.append(max(float(pred_prob), 0.0))
             del input_tensor
             cursor += step
 
         probs_from_logprobs = [max(math.exp(item), 1e-300) for item in all_logprobs]
         token_offsets = _compute_token_offsets_for_text(text, all_token_ids)
-        jieba_words, jieba_probs, token_to_jieba_idx = _aggregate_jieba_word_probs(
+        _ = token_offsets
+
+        next_top_tokens = [""] * len(all_tokens)
+        next_top_probs = [0.0] * len(all_tokens)
+        for idx in range(0, len(all_tokens) - 1):
+            next_top_tokens[idx] = str(all_pred_top_tokens[idx + 1])
+            next_top_probs[idx] = max(float(all_pred_top_probs[idx + 1]), 0.0)
+
+        phrase_words, phrase_probs, token_to_phrase_idx = _segment_dictionary_tokens(
             text=text,
             token_offsets=token_offsets,
             token_texts=all_tokens,
             token_probs=probs_from_logprobs,
+            top_next_tokens=next_top_tokens,
+            top_next_probs=next_top_probs,
         )
+
+        # 避免 BPE 子词直接字符串拼接造成乱码：按每个词对应 token_id 序列统一解码。
+        if phrase_words and token_to_phrase_idx and all_token_ids:
+            phrase_token_ids: List[List[int]] = [[] for _ in range(len(phrase_words))]
+            for tok_pos, phrase_idx in enumerate(token_to_phrase_idx[: len(all_token_ids)]):
+                if not isinstance(phrase_idx, int):
+                    continue
+                if 0 <= phrase_idx < len(phrase_token_ids):
+                    phrase_token_ids[phrase_idx].append(int(all_token_ids[tok_pos]))
+
+            decoded_phrase_words: List[str] = []
+            for idx, original in enumerate(phrase_words):
+                merged = _decode_token_id_span(phrase_token_ids[idx]) if idx < len(phrase_token_ids) else ""
+                merged = str(merged or "").strip()
+                decoded_phrase_words.append(merged if merged else str(original))
+            phrase_words = decoded_phrase_words
 
         return (
             all_tokens,
@@ -857,9 +1472,9 @@ def _build_transformers_runtime(
             all_sampled_probs,
             top_k,
             top_p,
-            jieba_words,
-            jieba_probs,
-            token_to_jieba_idx,
+            phrase_words,
+            phrase_probs,
+            token_to_phrase_idx,
             all_softmax_denominators,
         )
 
@@ -888,6 +1503,27 @@ def _detect_model_device(model: Any) -> str:
         return str(device_obj)
     except Exception:
         return "cpu"
+
+
+def _initialize_dictionary_segmenters() -> None:
+    register_dictionary_segmenter("segment-transition", _segment_transition)
+    register_dictionary_segmenter("token-transition-chain", _segment_transition_chain)
+    register_dictionary_segmenter("token-transition-chain-hmean", _segment_transition_chain_hmean)
+    register_dictionary_segmenter("token-bpe-positive-pmi", _segment_bpe_positive_pmi)
+    register_dictionary_segmenter("jieba", _segment_with_jieba)
+    env_method = str(os.getenv("KEYWORD_SEGMENTER_METHOD") or "").strip().lower()
+    if env_method:
+        try:
+            set_active_dictionary_segmenter(env_method)
+        except ValueError:
+            logger.warning(
+                "环境变量 KEYWORD_SEGMENTER_METHOD=%s 无效，使用默认策略 %s",
+                env_method,
+                DEFAULT_DICTIONARY_SEGMENTER,
+            )
+
+
+_initialize_dictionary_segmenters()
 
 def _sanitize_filename(name: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff._-]+", "_", str(name).strip())

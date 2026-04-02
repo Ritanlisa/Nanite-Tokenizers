@@ -54,7 +54,7 @@ def profile_if_enabled(func: Callable) -> Callable:
         global profiler, _registered_func_ids
         if profiler is None:
             return func(*args, **kwargs)
-        # Ensure function is registered; runcall alone may not produce entries.
+        # Ensure function is registered; runcall alone may not produce any entries.
         func_id = id(func)
         if func_id not in _registered_func_ids:
             try:
@@ -62,7 +62,7 @@ def profile_if_enabled(func: Callable) -> Callable:
                 _registered_func_ids.add(func_id)
             except Exception:
                 pass
-        # use runcall so line_profiler collects line-level stats
+        # Use runcall to capture line-level stats during this call.
         try:
             return profiler.runcall(func, *args, **kwargs)
         except Exception:
