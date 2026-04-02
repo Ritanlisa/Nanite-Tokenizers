@@ -409,6 +409,16 @@ def _fmt_float_full(value: float) -> str:
     return format(float(value), ".17g")
 
 
+def _is_pure_numeric_token_for_debug(token: str) -> bool:
+    text = str(token or "").strip()
+    if not text:
+        return False
+    normalized = re.sub(r"[,._\-+:/\\，。．、：；]+", "", text)
+    if not normalized:
+        return False
+    return bool(re.fullmatch(r"\d+", normalized))
+
+
 def _map_token_to_jieba_indices(tokens: List[str], jieba_words: List[str]) -> List[int]:
     n_tokens = len(tokens)
     if n_tokens <= 0:
@@ -492,6 +502,53 @@ def _map_token_to_jieba_indices(tokens: List[str], jieba_words: List[str]) -> Li
     return corrected
 
 
+def _build_python_stopword_filter_for_debug(dictionary_words: List[str]) -> tuple[List[bool], bool]:
+    if not dictionary_words:
+        return [], False
+
+    noise_fn = None
+    load_stopwords_fn = None
+    try:
+        extractor_module = importlib.import_module("rag.logprob_keyword_extractor")
+        noise_fn = getattr(extractor_module, "_is_noise_token", None)
+        load_stopwords_fn = getattr(extractor_module, "_load_jieba_open_source_stop_words", None)
+    except Exception as exc:
+        print(f"警告：无法加载 Python 停用词规则，debug 前端将不启用该过滤：{exc}")
+        return [False for _ in dictionary_words], False
+
+    if not callable(noise_fn) or not callable(load_stopwords_fn):
+        fallback_stopwords = {
+            "的", "了", "和", "是", "在", "及", "与", "或", "为", "对", "将", "可", "而", "就",
+            "the", "and", "for", "with", "that", "this", "from", "are", "was", "were",
+        }
+        flags = []
+        for word in dictionary_words:
+            token = str(word).strip().lower()
+            flags.append(bool((not token) or token in fallback_stopwords or _is_pure_numeric_token_for_debug(token)))
+        return flags, True
+
+    try:
+        raw_stop_words = load_stopwords_fn()
+    except Exception as exc:
+        print(f"警告：加载 Python 停用词失败，debug 前端将不启用该过滤：{exc}")
+        return [False for _ in dictionary_words], False
+
+    stopword_items = raw_stop_words if isinstance(raw_stop_words, (list, tuple, set)) else []
+    stop_words = {
+        str(item).strip().lower()
+        for item in stopword_items
+        if str(item).strip()
+    }
+
+    flags: List[bool] = []
+    for word in dictionary_words:
+        token = str(word).strip()
+        filtered = bool(noise_fn(token)) or token.lower() in stop_words or _is_pure_numeric_token_for_debug(token)
+        flags.append(bool(filtered))
+
+    return flags, True
+
+
 def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
     raw_tokens = payload.get("tokens")
     if not isinstance(raw_tokens, list):
@@ -563,6 +620,10 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
     dictionary_n = min(len(dictionary_words), len(dictionary_probs))
     dictionary_words = dictionary_words[:dictionary_n]
     dictionary_probs = dictionary_probs[:dictionary_n]
+    dictionary_filtered_flags, python_stopword_filter_available = _build_python_stopword_filter_for_debug(dictionary_words)
+    if len(dictionary_filtered_flags) < dictionary_n:
+        dictionary_filtered_flags.extend([False] * (dictionary_n - len(dictionary_filtered_flags)))
+    dictionary_filtered_flags = dictionary_filtered_flags[:dictionary_n]
     raw_token_to_dictionary_idx = payload.get("token_to_dict_idx")
     if not isinstance(raw_token_to_dictionary_idx, list):
         raw_token_to_dictionary_idx = payload.get("token_to_jieba_idx")
@@ -611,7 +672,12 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
 
     dictionary_words_js_literal = json.dumps([str(v) for v in dictionary_words], ensure_ascii=False)
     dictionary_probs_js_literal = json.dumps([float(v) for v in dictionary_probs], ensure_ascii=False)
+    dictionary_filtered_flags_js_literal = json.dumps([bool(v) for v in dictionary_filtered_flags], ensure_ascii=False)
     initial_top_k = 500
+    default_min_length = 2
+    raw_minlength = payload.get("minlength")
+    if isinstance(raw_minlength, (int, float)) and int(raw_minlength) > 0:
+        default_min_length = int(raw_minlength)
 
     token_spans: List[str] = []
     for idx, token in enumerate(tokens):
@@ -693,6 +759,7 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
         <div class="meta">doc={_escape_html(doc_name)} | token_count={n} | dictionary_count={dictionary_n} | probs来源={prob_source} | 映射来源={mapping_source} | AB*=已禁用</div>
     <div class="hint">将鼠标悬停在 token 上查看 prob/logprob；已按词典分词进行彩色标注，列表按词典聚合概率排序。</div>
     <div class="controls">
+        <label class="ctrl"><input id="usePythonStopwords" type="checkbox" checked /> 使用 Python 停用词规则</label>
         <label class="ctrl">排序字段
             <select id="sortBy">
                 <option value="dict_idx">词典位置</option>
@@ -700,7 +767,12 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
                 <option value="dict_logit">词典-logits</option>
                 <option value="dict_sum_minus_log2_unique">Sum(-log2(dict probs), 去重token)</option>
                 <option value="dict_avg_minus_log2_unique">Aveg(-log2(dict probs), 去重token)</option>
-                <option value="dict_sum_minus_log2_unique_plus" selected>Sum(-log2(dict probs)/log2(cnt+1), 去重token)</option>
+                <option value="dict_sum_minus_log2_unique_plus">Sum(-log2(dict probs)/log2(cnt+1), 去重token)</option>
+                <option value="dict_square_surprise_unique" selected>平方惊喜度(Σ惊喜度², 去重token)</option>
+                <option value="dict_max_surprise_unique">最大惊喜度(max 惊喜度, 去重token)</option>
+                <option value="dict_geometric_surprise_unique">几何惊喜度(惊喜度之积, 去重token)</option>
+                <option value="dict_adjusted_geometric_surprise_unique">调整几何惊喜度((惊喜度+1)之积, 去重token)</option>
+                <option value="dict_harmonic_surprise_unique">调和惊喜度(词频*调和平均惊喜度, 去重token)</option>
             </select>
         </label>
         <label class="ctrl">顺序
@@ -710,7 +782,10 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
             </select>
         </label>
         <label class="ctrl">topk
-            <input id="topKInput" type="number" min="1" max="500" step="1" value="{initial_top_k}" style="width:80px;" />
+            <input id="topKInput" type="number" min="1" step="1" value="{initial_top_k}" style="width:120px;" />
+        </label>
+        <label class="ctrl">minlength
+            <input id="minLengthInput" type="number" min="1" step="1" value="{default_min_length}" style="width:120px;" />
         </label>
         <button id="resetBtn" class="btn" type="button">复位默认阈值</button>
     </div>
@@ -720,36 +795,96 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
 
     <script>
         const DEFAULT_TOP_K = {initial_top_k};
+        const DEFAULT_MIN_LENGTH = {default_min_length};
         const DICT_WORDS = {dictionary_words_js_literal};
         const DICT_PROBS = {dictionary_probs_js_literal};
+        const DICT_FILTERED_FLAGS = {dictionary_filtered_flags_js_literal};
+        const PYTHON_STOPWORD_FILTER_AVAILABLE = {str(bool(python_stopword_filter_available)).lower()};
 
+        const usePythonStopwords = document.getElementById('usePythonStopwords');
         const sortBy = document.getElementById('sortBy');
         const sortOrder = document.getElementById('sortOrder');
         const topKInput = document.getElementById('topKInput');
+        const minLengthInput = document.getElementById('minLengthInput');
         const stats = document.getElementById('stats');
         const phrasesEl = document.getElementById('phrases');
         const resetBtn = document.getElementById('resetBtn');
+
+        usePythonStopwords.disabled = !PYTHON_STOPWORD_FILTER_AVAILABLE;
+        if (!PYTHON_STOPWORD_FILTER_AVAILABLE) {{
+            usePythonStopwords.checked = false;
+            usePythonStopwords.title = 'Python 停用词规则不可用（导入失败）';
+        }}
 
         function escapeHtml(v) {{
             return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');
         }}
 
+        function isPureNumericToken(token) {{
+            const text = String(token || '').trim();
+            if (!text) return false;
+            const normalized = text.replace(/[,_.+:/\\，。．、：；-]+/g, '');
+            if (!normalized) return false;
+            return /^[0-9]+$/.test(normalized);
+        }}
+
         function recompute() {{
-            const sortField = String(sortBy.value || 'dict_sum_minus_log2_unique_plus');
+            const sortField = String(sortBy.value || 'dict_square_surprise_unique');
             const order = String(sortOrder.value || 'desc');
-            const topK = Math.max(1, Math.min(500, Number(topKInput.value) || DEFAULT_TOP_K));
+            const enablePythonStopwordFilter = Boolean(usePythonStopwords.checked) && PYTHON_STOPWORD_FILTER_AVAILABLE;
+            const topK = Math.max(1, Math.floor(Number(topKInput.value) || DEFAULT_TOP_K));
+            const minLength = Math.max(1, Math.floor(Number(minLengthInput.value) || DEFAULT_MIN_LENGTH));
             topKInput.value = String(topK);
+            minLengthInput.value = String(minLength);
             const n = Math.min(DICT_WORDS.length, DICT_PROBS.length);
             const phraseItems = [];
+            let filteredOutCount = 0;
             for (let i = 0; i < n; i++) {{
                 const prob = Number(DICT_PROBS[i]);
                 if (!Number.isFinite(prob)) continue;
+                const tokenText = String(DICT_WORDS[i] ?? '');
+                if (Array.from(tokenText).length < minLength) {{
+                    filteredOutCount += 1;
+                    continue;
+                }}
+                if (isPureNumericToken(tokenText)) {{
+                    filteredOutCount += 1;
+                    continue;
+                }}
+                if (enablePythonStopwordFilter && Boolean(DICT_FILTERED_FLAGS[i])) {{
+                    filteredOutCount += 1;
+                    continue;
+                }}
                 phraseItems.push({{
                     dict_idx: i,
                     dict_prob: prob,
                     dict_logit: Math.log(Math.max(prob, 1e-300)),
-                    text: String(DICT_WORDS[i] ?? ''),
+                    text: tokenText,
                 }});
+            }}
+
+            const higherTerms = new Set(
+                phraseItems
+                    .map(function(item) {{ return String(item.text || '').trim(); }})
+                    .filter(function(item) {{ return item.length >= 2; }})
+            );
+            const coveredSubword = new Array(phraseItems.length).fill(false);
+            if (higherTerms.size > 0) {{
+                const maxWindow = 24;
+                for (let start = 0; start < phraseItems.length; start++) {{
+                    const first = String(phraseItems[start].text || '').trim();
+                    if (!first) continue;
+                    let merged = first;
+                    const upper = Math.min(phraseItems.length, start + maxWindow);
+                    for (let end = start + 1; end < upper; end++) {{
+                        const part = String(phraseItems[end].text || '').trim();
+                        if (!part) break;
+                        merged = merged + part;
+                        if (higherTerms.has(merged) && merged.length > first.length) {{
+                            for (let k = start; k <= end; k++) coveredSubword[k] = true;
+                        }}
+                    }}
+                }}
             }}
 
             phraseItems.sort(function(x, y) {{
@@ -770,25 +905,44 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
             if (
                 sortField === 'dict_sum_minus_log2_unique' ||
                 sortField === 'dict_avg_minus_log2_unique' ||
-                sortField === 'dict_sum_minus_log2_unique_plus'
+                sortField === 'dict_sum_minus_log2_unique_plus' ||
+                sortField === 'dict_square_surprise_unique' ||
+                sortField === 'dict_max_surprise_unique' ||
+                sortField === 'dict_geometric_surprise_unique' ||
+                sortField === 'dict_adjusted_geometric_surprise_unique' ||
+                sortField === 'dict_harmonic_surprise_unique'
             ) {{
                 const grouped = new Map();
-                for (const item of phraseItems) {{
+                for (let i = 0; i < phraseItems.length; i++) {{
+                    if (coveredSubword[i]) continue;
+                    const item = phraseItems[i];
                     const token = String(item.text || '');
                     if (!token) continue;
                     const p = Number(item.dict_prob);
                     if (!Number.isFinite(p) || p <= 0) continue;
-                    const value = -Math.log2(Math.max(p, 1e-300));
+                    const surprise = -Math.log2(Math.max(p, 1e-300));
+                    const safeSurprise = Number.isFinite(surprise) ? surprise : 0;
                     if (!grouped.has(token)) {{
                         grouped.set(token, {{
                             text: token,
                             dict_idx: Number(item.dict_idx),
-                            sum_minus_log2: value,
+                            sum_minus_log2: safeSurprise,
+                            sum_square_surprise: safeSurprise * safeSurprise,
+                            max_surprise: safeSurprise,
+                            sum_log_surprise: Math.log(Math.max(safeSurprise, 1e-12)),
+                            sum_log_surprise_plus_one: Math.log(Math.max(safeSurprise + 1.0, 1e-12)),
+                            reciprocal_surprise_sum: 1.0 / Math.max(safeSurprise, 1e-12),
                             count: 1,
                         }});
                     }} else {{
                         const cur = grouped.get(token);
-                        cur.sum_minus_log2 += value;
+                        // 对同词汇继续做总量累加，但已移除“被高阶词覆盖子词”的贡献。
+                        cur.sum_minus_log2 += safeSurprise;
+                        cur.sum_square_surprise += safeSurprise * safeSurprise;
+                        cur.max_surprise = Math.max(Number(cur.max_surprise), safeSurprise);
+                        cur.sum_log_surprise += Math.log(Math.max(safeSurprise, 1e-12));
+                        cur.sum_log_surprise_plus_one += Math.log(Math.max(safeSurprise + 1.0, 1e-12));
+                        cur.reciprocal_surprise_sum += 1.0 / Math.max(safeSurprise, 1e-12);
                         cur.count += 1;
                         if (Number(item.dict_idx) < Number(cur.dict_idx)) {{
                             cur.dict_idx = Number(item.dict_idx);
@@ -802,6 +956,16 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
                     item.avg_minus_log2 = Number(item.sum_minus_log2) / cnt;
                     const denom = Math.log2(cnt + 1);
                     item.sum_minus_log2_plus = Number(item.sum_minus_log2) / Math.max(denom, 1e-12);
+                    item.square_surprise = Number(item.sum_square_surprise);
+                    item.max_surprise = Number(item.max_surprise);
+                    const logProd = Number(item.sum_log_surprise);
+                    const logProdPlusOne = Number(item.sum_log_surprise_plus_one);
+                    const expLimit = 709.782712893384;
+                    item.geometric_surprise = logProd > expLimit ? Infinity : Math.exp(logProd);
+                    item.adjusted_geometric_surprise = logProdPlusOne > expLimit ? Infinity : Math.exp(logProdPlusOne);
+                    const reciprocalSum = Math.max(Number(item.reciprocal_surprise_sum), 1e-12);
+                    const harmonicMeanSurprise = cnt / reciprocalSum;
+                    item.harmonic_surprise = cnt * harmonicMeanSurprise;
                 }}
                 groupedItems.sort(function(x, y) {{
                     const sign = order === 'desc' ? -1 : 1;
@@ -810,6 +974,16 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
                         field = 'avg_minus_log2';
                     }} else if (sortField === 'dict_sum_minus_log2_unique_plus') {{
                         field = 'sum_minus_log2_plus';
+                    }} else if (sortField === 'dict_square_surprise_unique') {{
+                        field = 'square_surprise';
+                    }} else if (sortField === 'dict_max_surprise_unique') {{
+                        field = 'max_surprise';
+                    }} else if (sortField === 'dict_geometric_surprise_unique') {{
+                        field = 'geometric_surprise';
+                    }} else if (sortField === 'dict_adjusted_geometric_surprise_unique') {{
+                        field = 'adjusted_geometric_surprise';
+                    }} else if (sortField === 'dict_harmonic_surprise_unique') {{
+                        field = 'harmonic_surprise';
                     }}
                     const vx = Number(x[field]);
                     const vy = Number(y[field]);
@@ -821,10 +995,34 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
                 }});
                 topItems = groupedItems.slice(0, topK);
 
-                stats.textContent = 'AB*=已禁用 | 词典词项总数: ' + phraseItems.length + ' | 去重词项数: ' + groupedItems.length + ' | 显示: top' + topItems.length + ' | 排序: ' + sortField + ' ' + order;
+                                stats.textContent = 'AB*=已禁用 | 词典词项总数: ' + phraseItems.length + ' | 过滤词项数: ' + filteredOutCount + ' | minlength: ' + minLength + ' | 去重词项数: ' + groupedItems.length + ' | 显示: top' + topItems.length + ' | 排序: ' + sortField + ' ' + order + ' | Python停用词规则: ' + (enablePythonStopwordFilter ? '开' : '关');
                 phrasesEl.innerHTML = topItems
                   .map(function(item, i) {{
-                                            const info = '[dict#' + item.dict_idx + ', sum(-log2(p))=' + Number(item.sum_minus_log2).toFixed(12) + ', aveg(-log2(p))=' + Number(item.avg_minus_log2).toFixed(12) + ', sum(-log2(p))/log2(cnt+1)=' + Number(item.sum_minus_log2_plus).toFixed(12) + ', count=' + String(item.count) + '] ';
+                                            const geomText = Number.isFinite(Number(item.geometric_surprise)) ? Number(item.geometric_surprise).toFixed(12) : 'Infinity';
+                                            const adjGeomText = Number.isFinite(Number(item.adjusted_geometric_surprise)) ? Number(item.adjusted_geometric_surprise).toFixed(12) : 'Infinity';
+                                            const infoBySortField = {{
+                                                dict_sum_minus_log2_unique: [['idx', item.dict_idx], ['sum(-log2(p))', Number(item.sum_minus_log2).toFixed(12)], ['count', String(item.count)]],
+                                                dict_avg_minus_log2_unique: [['idx', item.dict_idx], ['aveg(-log2(p))', Number(item.avg_minus_log2).toFixed(12)], ['count', String(item.count)]],
+                                                dict_sum_minus_log2_unique_plus: [['idx', item.dict_idx], ['sum(-log2(p))/log2(cnt+1)', Number(item.sum_minus_log2_plus).toFixed(12)], ['count', String(item.count)]],
+                                                dict_square_surprise_unique: [['idx', item.dict_idx], ['平方惊喜度', Number(item.square_surprise).toFixed(12)], ['count', String(item.count)]],
+                                                dict_max_surprise_unique: [['idx', item.dict_idx], ['最大惊喜度', Number(item.max_surprise).toFixed(12)], ['count', String(item.count)]],
+                                                dict_geometric_surprise_unique: [['idx', item.dict_idx], ['几何惊喜度', geomText], ['count', String(item.count)]],
+                                                dict_adjusted_geometric_surprise_unique: [['idx', item.dict_idx], ['调整几何惊喜度', adjGeomText], ['count', String(item.count)]],
+                                                dict_harmonic_surprise_unique: [['idx', item.dict_idx], ['调和惊喜度', Number(item.harmonic_surprise).toFixed(12)], ['count', String(item.count)]],
+                                            }};
+                                            const chosenInfo = infoBySortField[sortField] || [
+                                                ['idx', item.dict_idx],
+                                                ['sum(-log2(p))', Number(item.sum_minus_log2).toFixed(12)],
+                                                ['aveg(-log2(p))', Number(item.avg_minus_log2).toFixed(12)],
+                                                ['sum(-log2(p))/log2(cnt+1)', Number(item.sum_minus_log2_plus).toFixed(12)],
+                                                ['平方惊喜度', Number(item.square_surprise).toFixed(12)],
+                                                ['最大惊喜度', Number(item.max_surprise).toFixed(12)],
+                                                ['几何惊喜度', geomText],
+                                                ['调整几何惊喜度', adjGeomText],
+                                                ['调和惊喜度', Number(item.harmonic_surprise).toFixed(12)],
+                                                ['count', String(item.count)],
+                                            ];
+                                            const info = '[' + chosenInfo.map(function(pair) {{ return String(pair[0]) + '=' + String(pair[1]); }}).join(', ') + '] ';
                       return String(i + 1) + '. ' + escapeHtml(info + item.text);
                   }})
                   .join('<br/>');
@@ -832,7 +1030,7 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
             }}
 
             topItems = phraseItems.slice(0, topK);
-            stats.textContent = 'AB*=已禁用 | 词典词项总数: ' + phraseItems.length + ' | 显示: top' + topItems.length + ' | 排序: ' + sortField + ' ' + order;
+                        stats.textContent = 'AB*=已禁用 | 词典词项总数: ' + phraseItems.length + ' | 过滤词项数: ' + filteredOutCount + ' | minlength: ' + minLength + ' | 显示: top' + topItems.length + ' | 排序: ' + sortField + ' ' + order + ' | Python停用词规则: ' + (enablePythonStopwordFilter ? '开' : '关');
             phrasesEl.innerHTML = topItems
               .map(function(item, i) {{
                   const info = '[dict#' + item.dict_idx + ', p=' + item.dict_prob.toFixed(12) + ', logit=' + item.dict_logit.toFixed(12) + '] ';
@@ -841,13 +1039,17 @@ def show_debug_gui_from_payload(payload: Dict[str, object]) -> None:
               .join('<br/>');
         }}
 
+        usePythonStopwords.addEventListener('change', recompute);
         sortBy.addEventListener('change', recompute);
         sortOrder.addEventListener('change', recompute);
         topKInput.addEventListener('input', recompute);
+        minLengthInput.addEventListener('input', recompute);
         resetBtn.addEventListener('click', () => {{
-            sortBy.value = 'dict_sum_minus_log2_unique_plus';
+            sortBy.value = 'dict_square_surprise_unique';
             sortOrder.value = 'desc';
+            usePythonStopwords.checked = PYTHON_STOPWORD_FILTER_AVAILABLE;
             topKInput.value = String(DEFAULT_TOP_K);
+            minLengthInput.value = String(DEFAULT_MIN_LENGTH);
             recompute();
         }});
 
@@ -869,6 +1071,7 @@ def main() -> None:
     from rag.logprob_keyword_extractor import logprobs_extract
 
     top_k = 12
+    minlength = 2
     profile_enabled = str(os.getenv("ENABLE_KEYWORD_EXTRACTOR_LINE_PROFILER") or "1").strip().lower() not in {
         "0",
         "false",
@@ -905,7 +1108,7 @@ def main() -> None:
 
         texts_by_doc_name = build_texts_by_doc_name(str(source_file))
         run_start = time.perf_counter()
-        keyword_map = logprobs_extract(texts_by_doc_name, top_k=top_k)
+        keyword_map = logprobs_extract(texts_by_doc_name, top_k=top_k, minlength=minlength)
         run_elapsed = time.perf_counter() - run_start
         extractor_total_seconds += run_elapsed
         extractor_total_calls += 1
