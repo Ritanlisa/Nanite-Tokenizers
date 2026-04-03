@@ -1089,11 +1089,11 @@ def main() -> None:
     extractor_total_seconds = 0.0
     extractor_total_calls = 0
     files = [
-        "/home/ritanlisa/文档/LID.pdf",
-        "/home/ritanlisa/文档/TBP.pdf",
-        "/home/ritanlisa/文档/浪潮虚拟化InCloud Sphere 6.5.1运维手册.pdf",
         "/home/ritanlisa/文档/湖超-硬件维护手册20231225.doc",
         "/home/ritanlisa/文档/初步验收与试运行分册-6-硬件维护手册 - 1227.doc",
+        "/home/ritanlisa/文档/浪潮虚拟化InCloud Sphere 6.5.1运维手册.pdf",
+        "/home/ritanlisa/文档/LID.pdf",
+        # "/home/ritanlisa/文档/TBP.pdf",
         ]
     try:
         for file in files:

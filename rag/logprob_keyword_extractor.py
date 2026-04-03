@@ -900,7 +900,7 @@ def _segment_bpe_positive_pmi(context: DictionarySegmentationContext) -> Tuple[L
         best_pair = _select_best_positive_pmi_pair(
             segments,
             token_probs,
-            min_pair_count=2,
+            min_pair_count=10,
             debug=None,
             console_debug=True,
         )
