@@ -38,11 +38,9 @@ def _sanitize_filename(name: str) -> str:
 
 
 def build_texts_by_doc_name(file_path: str) -> Dict[str, List[str]]:
-    from rag.documents import load_rag_documents_from_paths
+    from rag.documents import load_rag_documents_from_paths, load_single_file_document
 
     rag_docs = load_rag_documents_from_paths([file_path], SUPPORTED_RAG_EXTENSIONS)
-    if not rag_docs:
-        raise RuntimeError(f"无法加载文档: {file_path}")
 
     texts_by_doc_name: Dict[str, List[str]] = {}
     for rag_doc in rag_docs:
@@ -61,6 +59,22 @@ def build_texts_by_doc_name(file_path: str) -> Dict[str, List[str]]:
 
         if parts:
             texts_by_doc_name.setdefault(doc_name, []).append("\n".join(parts))
+
+    if texts_by_doc_name:
+        return texts_by_doc_name
+
+    # Fallback for cases where RAG_DB_Document build fails (e.g. legacy .doc path).
+    raw_doc = load_single_file_document(file_path, SUPPORTED_RAG_EXTENSIONS)
+    if raw_doc is not None:
+        metadata = dict(getattr(raw_doc, "metadata", {}) or {})
+        fallback_doc_name = str(
+            metadata.get("file_name")
+            or getattr(raw_doc, "doc_id", "")
+            or file_path
+        ).strip()
+        fallback_text = str(getattr(raw_doc, "text", "") or "").strip()
+        if fallback_doc_name and fallback_text:
+            texts_by_doc_name.setdefault(fallback_doc_name, []).append(fallback_text)
 
     if not texts_by_doc_name:
         raise RuntimeError("文档已加载，但没有可用于关键词提取的文本")
