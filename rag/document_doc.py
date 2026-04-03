@@ -14,12 +14,6 @@ class DocRAGDocument(RAG_DB_Document):
         self.source_extension = ".doc"
 
     def __getattr__(self, name: str) -> Any:
-        descriptor = PDFRAGDocument.__dict__.get(name)
-        if isinstance(descriptor, staticmethod):
-            return descriptor.__get__(None, PDFRAGDocument)
-        if isinstance(descriptor, classmethod):
-            return descriptor.__get__(self.__class__, self.__class__)
-
         attr = getattr(PDFRAGDocument, name)
         if hasattr(attr, "__get__"):
             return attr.__get__(self, self.__class__)
