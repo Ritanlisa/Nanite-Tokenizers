@@ -1095,127 +1095,128 @@ def main() -> None:
         "/home/ritanlisa/文档/湖超-硬件维护手册20231225.doc",
         "/home/ritanlisa/文档/初步验收与试运行分册-6-硬件维护手册 - 1227.doc",
         ]
-    for file in files:
-        if not Path(file).exists():
-            print(f"文件不存在，跳过: {file}")
-            continue
-        # 清理CUDA缓存，确保显存充足
-        torch.cuda.empty_cache()
+    try:
+        for file in files:
+            if not Path(file).exists():
+                print(f"文件不存在，跳过: {file}")
+                continue
+            # 清理CUDA缓存，确保显存充足
+            torch.cuda.empty_cache()
 
-        source_file = Path(file).expanduser().resolve()
-        if not source_file.exists() or not source_file.is_file():
-            raise FileNotFoundError(f"文件不存在: {source_file}")
+            source_file = Path(file).expanduser().resolve()
+            if not source_file.exists() or not source_file.is_file():
+                raise FileNotFoundError(f"文件不存在: {source_file}")
 
-        texts_by_doc_name = build_texts_by_doc_name(str(source_file))
-        run_start = time.perf_counter()
-        keyword_map = logprobs_extract(texts_by_doc_name, top_k=top_k, minlength=minlength)
-        run_elapsed = time.perf_counter() - run_start
-        extractor_total_seconds += run_elapsed
-        extractor_total_calls += 1
-        print(
-            f"[keyword_extractor] doc={source_file.name} 调用耗时: {run_elapsed:.4f}s"
-        )
-
-        output_dir = Path("tmp") / "logprobs_extract"
-        print(f"关键词结果: {keyword_map}")
-        print(f"输出目录: {output_dir.resolve()}")
-
-        for doc_name in texts_by_doc_name.keys():
-            safe_name = _sanitize_filename(doc_name)
-            json_path = output_dir / f"{safe_name}.json"
-            png_path = output_dir / f"{safe_name}.png"
-            print(f"JSON: {json_path.resolve()}")
-            print(f"PNG:  {png_path.resolve()}")
-
-            if not json_path.exists():
-                raise FileNotFoundError(f"结果 JSON 未生成: {json_path}")
-
-            payload = _load_logprobs_payload(json_path)
-            raw_logprobs = payload.get("logprobs")
-            if not isinstance(raw_logprobs, list):
-                raw_logprobs = []
-            raw_probs = [
-                max(math.exp(float(item)), 1e-12)
-                for item in raw_logprobs
-                if isinstance(item, (int, float)) and math.isfinite(float(item))
-            ]
-            raw_sampled_probs = payload.get("sampled_probs")
-            if not isinstance(raw_sampled_probs, list):
-                raw_sampled_probs = []
-            sampled_probs = [
-                max(float(item), 1e-12)
-                for item in raw_sampled_probs
-                if isinstance(item, (int, float)) and math.isfinite(float(item))
-            ]
-            raw_top_p = payload.get("top_p")
-            top_p_value = float(raw_top_p) if isinstance(raw_top_p, (int, float)) else 1.0
-            raw_jieba_probs = payload.get("jieba_probs")
-            if not isinstance(raw_jieba_probs, list):
-                raw_jieba_probs = []
-            jieba_probs = [
-                max(float(item), 1e-300)
-                for item in raw_jieba_probs
-                if isinstance(item, (int, float)) and math.isfinite(float(item))
-            ]
-            raw_jieba_minus_log2 = payload.get("jieba_minus_log2_probs")
-            if not isinstance(raw_jieba_minus_log2, list):
-                raw_jieba_minus_log2 = []
-            jieba_minus_log2_probs = [
-                float(item)
-                for item in raw_jieba_minus_log2
-                if isinstance(item, (int, float)) and math.isfinite(float(item))
-            ]
-            raw_softmax_denominators = payload.get("softmax_denominators")
-            if not isinstance(raw_softmax_denominators, list):
-                raw_softmax_denominators = []
-            softmax_denominators = [
-                max(float(item), 1e-300)
-                for item in raw_softmax_denominators
-                if isinstance(item, (int, float)) and math.isfinite(float(item))
-            ]
-            raw_softmax_denominator_log2 = payload.get("softmax_denominator_log2")
-            if not isinstance(raw_softmax_denominator_log2, list):
-                raw_softmax_denominator_log2 = []
-            softmax_denominator_log2 = [
-                float(item)
-                for item in raw_softmax_denominator_log2
-                if isinstance(item, (int, float)) and math.isfinite(float(item))
-            ]
-            _plot_logprob_bars(
-                doc_name=str(payload.get("doc_name") or doc_name).split("/")[-1],
-                probs=raw_probs,
-                minus_log2_probs=[-math.log2(prob) for prob in raw_probs],
-                sampled_probs=sampled_probs,
-                sampled_minus_log2_probs=[-math.log2(prob) for prob in sampled_probs],
-                jieba_probs=jieba_probs,
-                jieba_minus_log2_probs=jieba_minus_log2_probs,
-                softmax_denominators=softmax_denominators,
-                softmax_denominator_log2=softmax_denominator_log2,
-                top_k=top_k,
-                top_p=top_p_value,
-                out_path=png_path,
+            texts_by_doc_name = build_texts_by_doc_name(str(source_file))
+            run_start = time.perf_counter()
+            keyword_map = logprobs_extract(texts_by_doc_name, top_k=top_k, minlength=minlength)
+            run_elapsed = time.perf_counter() - run_start
+            extractor_total_seconds += run_elapsed
+            extractor_total_calls += 1
+            print(
+                f"[keyword_extractor] doc={source_file.name} 调用耗时: {run_elapsed:.4f}s"
             )
 
-            if not png_path.exists():
-                raise FileNotFoundError(f"图像未生成: {png_path}")
-            show_chart(png_path)
-            show_debug_gui_from_payload(payload)
+            output_dir = Path("tmp") / "logprobs_extract"
+            print(f"关键词结果: {keyword_map}")
+            print(f"输出目录: {output_dir.resolve()}")
 
-    dumped_profile = stop_profiler() if profile_enabled else None
-    print("\n===== keyword_extractor 性能汇总 =====")
-    if extractor_total_calls > 0:
-        avg_seconds = extractor_total_seconds / float(extractor_total_calls)
-        print(f"调用次数: {extractor_total_calls}")
-        print(f"总耗时: {extractor_total_seconds:.4f}s")
-        print(f"平均耗时: {avg_seconds:.4f}s/次")
-    else:
-        print("未执行 logprobs_extract（可能所有输入文件都被跳过）。")
+            for doc_name in texts_by_doc_name.keys():
+                safe_name = _sanitize_filename(doc_name)
+                json_path = output_dir / f"{safe_name}.json"
+                png_path = output_dir / f"{safe_name}.png"
+                print(f"JSON: {json_path.resolve()}")
+                print(f"PNG:  {png_path.resolve()}")
 
-    final_profile_path = dumped_profile or profile_output_path
-    if final_profile_path:
-        print(f"line_profiler 统计文件: {final_profile_path}")
-    elif profile_enabled:
-        print("line_profiler 未生成统计文件（可能未安装 line_profiler）。")
+                if not json_path.exists():
+                    raise FileNotFoundError(f"结果 JSON 未生成: {json_path}")
+
+                payload = _load_logprobs_payload(json_path)
+                raw_logprobs = payload.get("logprobs")
+                if not isinstance(raw_logprobs, list):
+                    raw_logprobs = []
+                raw_probs = [
+                    max(math.exp(float(item)), 1e-12)
+                    for item in raw_logprobs
+                    if isinstance(item, (int, float)) and math.isfinite(float(item))
+                ]
+                raw_sampled_probs = payload.get("sampled_probs")
+                if not isinstance(raw_sampled_probs, list):
+                    raw_sampled_probs = []
+                sampled_probs = [
+                    max(float(item), 1e-12)
+                    for item in raw_sampled_probs
+                    if isinstance(item, (int, float)) and math.isfinite(float(item))
+                ]
+                raw_top_p = payload.get("top_p")
+                top_p_value = float(raw_top_p) if isinstance(raw_top_p, (int, float)) else 1.0
+                raw_jieba_probs = payload.get("jieba_probs")
+                if not isinstance(raw_jieba_probs, list):
+                    raw_jieba_probs = []
+                jieba_probs = [
+                    max(float(item), 1e-300)
+                    for item in raw_jieba_probs
+                    if isinstance(item, (int, float)) and math.isfinite(float(item))
+                ]
+                raw_jieba_minus_log2 = payload.get("jieba_minus_log2_probs")
+                if not isinstance(raw_jieba_minus_log2, list):
+                    raw_jieba_minus_log2 = []
+                jieba_minus_log2_probs = [
+                    float(item)
+                    for item in raw_jieba_minus_log2
+                    if isinstance(item, (int, float)) and math.isfinite(float(item))
+                ]
+                raw_softmax_denominators = payload.get("softmax_denominators")
+                if not isinstance(raw_softmax_denominators, list):
+                    raw_softmax_denominators = []
+                softmax_denominators = [
+                    max(float(item), 1e-300)
+                    for item in raw_softmax_denominators
+                    if isinstance(item, (int, float)) and math.isfinite(float(item))
+                ]
+                raw_softmax_denominator_log2 = payload.get("softmax_denominator_log2")
+                if not isinstance(raw_softmax_denominator_log2, list):
+                    raw_softmax_denominator_log2 = []
+                softmax_denominator_log2 = [
+                    float(item)
+                    for item in raw_softmax_denominator_log2
+                    if isinstance(item, (int, float)) and math.isfinite(float(item))
+                ]
+                _plot_logprob_bars(
+                    doc_name=str(payload.get("doc_name") or doc_name).split("/")[-1],
+                    probs=raw_probs,
+                    minus_log2_probs=[-math.log2(prob) for prob in raw_probs],
+                    sampled_probs=sampled_probs,
+                    sampled_minus_log2_probs=[-math.log2(prob) for prob in sampled_probs],
+                    jieba_probs=jieba_probs,
+                    jieba_minus_log2_probs=jieba_minus_log2_probs,
+                    softmax_denominators=softmax_denominators,
+                    softmax_denominator_log2=softmax_denominator_log2,
+                    top_k=top_k,
+                    top_p=top_p_value,
+                    out_path=png_path,
+                )
+
+                if not png_path.exists():
+                    raise FileNotFoundError(f"图像未生成: {png_path}")
+                show_chart(png_path)
+                show_debug_gui_from_payload(payload)
+    finally:
+        dumped_profile = stop_profiler() if profile_enabled else None
+        print("\n===== keyword_extractor 性能汇总 =====")
+        if extractor_total_calls > 0:
+            avg_seconds = extractor_total_seconds / float(extractor_total_calls)
+            print(f"调用次数: {extractor_total_calls}")
+            print(f"总耗时: {extractor_total_seconds:.4f}s")
+            print(f"平均耗时: {avg_seconds:.4f}s/次")
+        else:
+            print("未执行 logprobs_extract（可能所有输入文件都被跳过）。")
+
+        final_profile_path = dumped_profile or profile_output_path
+        if final_profile_path:
+            print(f"line_profiler 统计文件: {final_profile_path}")
+        elif profile_enabled:
+            print("line_profiler 未生成统计文件（可能未安装 line_profiler）。")
 
 
 if __name__ == "__main__":

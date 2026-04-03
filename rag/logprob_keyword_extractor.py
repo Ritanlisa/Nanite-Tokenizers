@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import TextIOWrapper
 import json
 import importlib
 import logging
@@ -623,7 +624,10 @@ def _contains_break_char(token: str) -> bool:
 @dataclass
 class _PhraseUnit:
     text: str
-    token_indices: List[int]
+    start_idx: int
+    end_idx: int
+    token_count: int
+    reciprocal_sum: float
 
 
 def _merge_phrase_units(
@@ -633,82 +637,182 @@ def _merge_phrase_units(
 ) -> _PhraseUnit:
     return _PhraseUnit(
         text=f"{left.text}{right.text}",
-        token_indices=[*left.token_indices, *right.token_indices],
+        start_idx=left.start_idx,
+        end_idx=right.end_idx,
+        token_count=int(left.token_count + right.token_count),
+        reciprocal_sum=float(left.reciprocal_sum + right.reciprocal_sum),
     )
 
-
-def _calc_positive_pmi_pairs(
+@profile_if_enabled
+def _select_best_positive_pmi_pair(
     segments: List[List[_PhraseUnit]],
     token_probs: List[float],
     *,
     min_pair_count: int,
-) -> Dict[Tuple[str, str], Tuple[float, int, float, float]]:
-    unigram_counts: Dict[str, int] = {}
-    bigram_counts: Dict[Tuple[str, str], int] = {}
-    bigram_prob_mass: Dict[Tuple[str, str], float] = {}
+    debug: Optional[TextIOWrapper] = None,
+    console_debug: bool = False,
+) -> Optional[Tuple[str, str]]:
+    _ = token_probs
+    prob_floor = 1e-300
+    token_to_id: Dict[str, int] = {}
+    id_to_token: List[str] = []
+    unigram_counts_by_id: List[int] = []
+    bigram_counts_by_id: Dict[Tuple[int, int], int] = {}
+    bigram_prob_mass_by_id: Dict[Tuple[int, int], float] = {}
     total_tokens = 0
     total_bigrams = 0
+    min_pair_count_int = int(min_pair_count)
+    bpe_min_new_term_freq_int = int(BPE_MIN_NEW_TERM_FREQ)
 
-    def _unit_prob(unit: _PhraseUnit) -> float:
-        values = [
-            max(float(token_probs[idx]), 1e-300)
-            for idx in unit.token_indices
-            if 0 <= idx < len(token_probs)
-        ]
-        if not values:
-            return 1e-300
-        return _harmonic_mean(values)
+    token_id_get = token_to_id.get
+    bigram_get = bigram_counts_by_id.get
+    mass_get = bigram_prob_mass_by_id.get
+    unigram_counts_append = unigram_counts_by_id.append
+    id_to_token_append = id_to_token.append
 
     for segment in segments:
         if not segment:
             continue
-        total_tokens += len(segment)
-        for unit in segment:
-            unigram_counts[unit.text] = int(unigram_counts.get(unit.text, 0) + 1)
+        segment_len = len(segment)
+        total_tokens += segment_len
 
-        for idx in range(0, len(segment) - 1):
-            left_unit = segment[idx]
-            right_unit = segment[idx + 1]
-            pair = (left_unit.text, right_unit.text)
-            bigram_counts[pair] = int(bigram_counts.get(pair, 0) + 1)
-            left_prob = _unit_prob(left_unit)
-            right_prob = _unit_prob(right_unit)
-            pair_confidence = math.sqrt(max(left_prob, 1e-300) * max(right_prob, 1e-300))
-            bigram_prob_mass[pair] = float(bigram_prob_mass.get(pair, 0.0) + pair_confidence)
-            total_bigrams += 1
+        # 单次遍历同时完成 unigram 与 bigram 统计，使用整数 ID 降低字符串哈希开销。
+        prev_token_id = -1
+        prev_prob = prob_floor
+        for unit in segment:
+            token_text = unit.text
+            token_id = token_id_get(token_text, -1)
+            if token_id < 0:
+                token_id = len(id_to_token)
+                token_to_id[token_text] = token_id
+                id_to_token_append(token_text)
+                unigram_counts_append(0)
+            unigram_counts_by_id[token_id] = unigram_counts_by_id[token_id] + 1
+
+            token_count = unit.token_count
+            reciprocal_sum = unit.reciprocal_sum
+            if token_count <= 0 or reciprocal_sum <= 0.0:
+                current_prob = prob_floor
+            else:
+                current_prob = token_count / reciprocal_sum
+                if current_prob < prob_floor:
+                    current_prob = prob_floor
+
+            if prev_token_id >= 0:
+                pair_ids = (prev_token_id, token_id)
+                bigram_counts_by_id[pair_ids] = bigram_get(pair_ids, 0) + 1
+                pair_confidence = math.sqrt(prev_prob * current_prob)
+                bigram_prob_mass_by_id[pair_ids] = mass_get(pair_ids, 0.0) + pair_confidence
+                total_bigrams += 1
+
+            prev_token_id = token_id
+            prev_prob = current_prob
 
     if total_tokens <= 0 or total_bigrams <= 0:
-        return {}
+        return None
 
-    positive_pairs: Dict[Tuple[str, str], Tuple[float, int, float, float]] = {}
-    for pair, pair_count in bigram_counts.items():
+    inv_total_tokens = 1.0 / float(total_tokens)
+    inv_total_bigrams = 1.0 / float(total_bigrams)
+
+    # 先收集候选，再用 NumPy 向量化批量计算 PMI 与 merge_score。
+    candidate_left_ids: List[int] = []
+    candidate_right_ids: List[int] = []
+    candidate_pair_counts: List[int] = []
+    candidate_left_counts: List[int] = []
+    candidate_right_counts: List[int] = []
+    candidate_avg_probs: List[float] = []
+    candidate_pair_lens: List[int] = []
+
+    mass_get = bigram_prob_mass_by_id.get
+    for pair_ids, pair_count in bigram_counts_by_id.items():
         # 硬性要求：BPE 新合并词在原文中的可观测出现次数至少为 2。
         # 对于相邻 pair 合并，新词出现次数等价于该 pair 的相邻出现次数。
-        if pair_count < int(BPE_MIN_NEW_TERM_FREQ):
+        if pair_count < bpe_min_new_term_freq_int:
             continue
-        if pair_count < int(min_pair_count):
+        if pair_count < min_pair_count_int:
             continue
-        left_count = int(unigram_counts.get(pair[0], 0))
-        right_count = int(unigram_counts.get(pair[1], 0))
+        left_id, right_id = pair_ids
+        if left_id < 0 or right_id < 0:
+            continue
+        if left_id >= len(unigram_counts_by_id) or right_id >= len(unigram_counts_by_id):
+            continue
+        left_count = unigram_counts_by_id[left_id]
+        right_count = unigram_counts_by_id[right_id]
         if pair_count <= 0 or left_count <= 0 or right_count <= 0:
             continue
 
-        p_ab = float(pair_count) / float(total_bigrams)
-        p_a = float(left_count) / float(total_tokens)
-        p_b = float(right_count) / float(total_tokens)
-        if p_ab <= 0.0 or p_a <= 0.0 or p_b <= 0.0:
-            continue
+        left_text = id_to_token[left_id]
+        right_text = id_to_token[right_id]
 
-        pmi = math.log(p_ab / (p_a * p_b))
-        if pmi > 0.0 and math.isfinite(pmi):
-            avg_pair_prob = float(bigram_prob_mass.get(pair, 0.0) / float(max(pair_count, 1)))
-            # 兼顾词频与 LLM 置信度：高频且高置信度 pair 更优先，低频链式扩展会被自然抑制。
-            freq_factor = math.log1p(float(pair_count))
-            prob_factor = 1.0 / (1.0 + max(-math.log2(max(avg_pair_prob, 1e-300)), 0.0))
-            merge_score = float(pmi * freq_factor * prob_factor)
-            positive_pairs[pair] = (float(pmi), int(pair_count), float(avg_pair_prob), merge_score)
+        candidate_left_ids.append(left_id)
+        candidate_right_ids.append(right_id)
+        candidate_pair_counts.append(pair_count)
+        candidate_left_counts.append(left_count)
+        candidate_right_counts.append(right_count)
+        candidate_avg_probs.append(mass_get(pair_ids, 0.0) / pair_count)
+        candidate_pair_lens.append(len(left_text) + len(right_text))
 
-    return positive_pairs
+    if not candidate_pair_counts:
+        return None
+
+    pair_counts_arr = np.asarray(candidate_pair_counts, dtype=np.float64)
+    left_counts_arr = np.asarray(candidate_left_counts, dtype=np.float64)
+    right_counts_arr = np.asarray(candidate_right_counts, dtype=np.float64)
+    avg_probs_arr = np.asarray(candidate_avg_probs, dtype=np.float64)
+
+    p_ab = pair_counts_arr * inv_total_bigrams
+    p_a = left_counts_arr * inv_total_tokens
+    p_b = right_counts_arr * inv_total_tokens
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pmi_arr = np.log(p_ab / (p_a * p_b))
+        freq_factor_arr = np.log1p(pair_counts_arr)
+        prob_factor_arr = 1.0 / (1.0 + np.maximum(-np.log2(np.maximum(avg_probs_arr, 1e-300)), 0.0))
+        merge_score_arr = pmi_arr * freq_factor_arr * prob_factor_arr
+
+    valid_mask = np.isfinite(pmi_arr) & (pmi_arr > 0.0) & np.isfinite(merge_score_arr)
+    if not bool(np.any(valid_mask)):
+        return None
+
+    candidate_pair_counts_arr = np.asarray(candidate_pair_counts, dtype=np.int64)
+    candidate_pair_lens_arr = np.asarray(candidate_pair_lens, dtype=np.int64)
+    candidate_left_ids_arr = np.asarray(candidate_left_ids, dtype=np.int64)
+    candidate_right_ids_arr = np.asarray(candidate_right_ids, dtype=np.int64)
+    id_to_token_arr = np.asarray(id_to_token, dtype=np.str_)
+    candidate_left_text_arr = id_to_token_arr[candidate_left_ids_arr]
+    candidate_right_text_arr = id_to_token_arr[candidate_right_ids_arr]
+
+    # 用 NumPy 词典序排序复现 key=(merge, pmi, count, len, (left, right))，取最大项。
+    selected_indices = np.flatnonzero(valid_mask)
+    if selected_indices.size <= 0:
+        return None
+    order = np.lexsort(
+        (
+            candidate_right_text_arr[selected_indices],
+            candidate_left_text_arr[selected_indices],
+            candidate_pair_lens_arr[selected_indices],
+            candidate_pair_counts_arr[selected_indices],
+            pmi_arr[selected_indices],
+            merge_score_arr[selected_indices],
+        )
+    )
+    best_idx = int(selected_indices[int(order[-1])])
+    best_pair = (str(candidate_left_text_arr[best_idx]), str(candidate_right_text_arr[best_idx]))
+
+    best_key = (
+        float(merge_score_arr[best_idx]),
+        float(pmi_arr[best_idx]),
+        int(candidate_pair_counts_arr[best_idx]),
+        int(candidate_pair_lens_arr[best_idx]),
+        best_pair,
+    )
+    if debug or console_debug:
+        debug_string = f"Current Best Pair: {best_pair}, Score Detail: {best_key}\n"
+        if debug:
+            debug.write(debug_string)
+        if console_debug:
+            print(debug_string)
+    return best_pair
 
 
 def _apply_pair_merge_once(
@@ -719,25 +823,36 @@ def _apply_pair_merge_once(
     left_target, right_target = target_pair
 
     for seg_idx, segment in enumerate(segments):
-        if len(segment) < 2:
+        segment_len = len(segment)
+        if segment_len < 2:
             continue
 
-        new_segment: List[_PhraseUnit] = []
-        cursor = 0
-        while cursor < len(segment):
+        # 快速跳过：该 segment 不含目标相邻 pair 时无需重建列表。
+        first_match = -1
+        for probe in range(0, segment_len - 1):
+            if segment[probe].text == left_target and segment[probe + 1].text == right_target:
+                first_match = probe
+                break
+        if first_match < 0:
+            continue
+
+        new_segment: List[_PhraseUnit] = segment[:first_match]
+        append_unit = new_segment.append
+        cursor = first_match
+        while cursor < segment_len:
             if (
-                cursor + 1 < len(segment)
+                cursor + 1 < segment_len
                 and segment[cursor].text == left_target
                 and segment[cursor + 1].text == right_target
             ):
-                new_segment.append(
+                append_unit(
                     _merge_phrase_units(left=segment[cursor], right=segment[cursor + 1])
                 )
                 merged_total += 1
                 cursor += 2
                 continue
 
-            new_segment.append(segment[cursor])
+            append_unit(segment[cursor])
             cursor += 1
 
         segments[seg_idx] = new_segment
@@ -763,24 +878,34 @@ def _segment_bpe_positive_pmi(context: DictionarySegmentationContext) -> Tuple[L
                 segments.append(current)
                 current = []
             continue
-        current.append(_PhraseUnit(text=token, token_indices=[idx]))
+        token_prob = max(float(token_probs[idx]), 1e-300)
+        current.append(
+            _PhraseUnit(
+                text=token,
+                start_idx=idx,
+                end_idx=idx,
+                token_count=1,
+                reciprocal_sum=1.0 / token_prob,
+            )
+        )
     if current:
         segments.append(current)
 
     if not segments:
         return [], [], [-1] * n
 
-    # 限制迭代预算并只合并重复 pair，避免 O(n^2) 级退化。
-    max_iter = max(16, min(256, int(math.sqrt(n) * 6)))
-    for _ in range(max_iter):
-        positive_pairs = _calc_positive_pmi_pairs(segments, token_probs, min_pair_count=2)
-        if not positive_pairs:
-            break
+    # 持续合并直到不存在可用正 PMI pair。
 
-        best_pair = max(
-            positive_pairs.items(),
-            key=lambda item: (item[1][3], item[1][0], item[1][1], len(item[0][0]) + len(item[0][1]), item[0]),
-        )[0]
+    while True:
+        best_pair = _select_best_positive_pmi_pair(
+            segments,
+            token_probs,
+            min_pair_count=2,
+            debug=None,
+            console_debug=True,
+        )
+        if best_pair is None:
+            break
         merged = _apply_pair_merge_once(segments, best_pair)
         if merged <= 0:
             break
@@ -788,29 +913,26 @@ def _segment_bpe_positive_pmi(context: DictionarySegmentationContext) -> Tuple[L
     phrase_words: List[str] = []
     phrase_probs: List[float] = []
     token_to_phrase_idx = [-1] * n
+    log_prefix = [0.0] * (n + 1)
+    for idx in range(n):
+        log_prefix[idx + 1] = log_prefix[idx] + math.log(max(float(token_probs[idx]), 1e-300))
 
     for segment in segments:
         for unit in segment:
             phrase_text = str(unit.text).strip()
             if not phrase_text:
                 continue
-            unit_probs = [
-                max(float(token_probs[idx]), 1e-300)
-                for idx in unit.token_indices
-                if 0 <= idx < n
-            ]
-            if not unit_probs:
+            if unit.start_idx < 0 or unit.end_idx >= n or unit.start_idx > unit.end_idx:
                 continue
 
-            log_sum = sum(math.log(prob) for prob in unit_probs)
+            log_sum = log_prefix[unit.end_idx + 1] - log_prefix[unit.start_idx]
             phrase_prob = max(math.exp(log_sum), 1e-300)
 
             phrase_idx = len(phrase_words)
             phrase_words.append(phrase_text)
             phrase_probs.append(float(phrase_prob))
-            for idx in unit.token_indices:
-                if 0 <= idx < n:
-                    token_to_phrase_idx[idx] = phrase_idx
+            for idx in range(unit.start_idx, unit.end_idx + 1):
+                token_to_phrase_idx[idx] = phrase_idx
 
     return phrase_words, phrase_probs, token_to_phrase_idx
 
