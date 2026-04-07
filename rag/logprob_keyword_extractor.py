@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from io import TextIOWrapper
 import json
 import importlib
 import logging
@@ -644,14 +643,13 @@ def _merge_phrase_units(
     )
 
 @profile_if_enabled
-def _select_best_positive_pmi_pair(
+def _collect_positive_pmi_pair_keys(
     segments: List[List[_PhraseUnit]],
     token_probs: List[float],
     *,
     min_pair_count: int,
-    debug: Optional[TextIOWrapper] = None,
     console_debug: bool = False,
-) -> Optional[Tuple[str, str]]:
+) -> Dict[Tuple[str, str], Tuple[float, float, int, int, str, str]]:
     _ = token_probs
     prob_floor = 1e-300
     token_to_id: Dict[str, int] = {}
@@ -709,7 +707,7 @@ def _select_best_positive_pmi_pair(
             prev_prob = current_prob
 
     if total_tokens <= 0 or total_bigrams <= 0:
-        return None
+        return {}
 
     inv_total_tokens = 1.0 / float(total_tokens)
     inv_total_bigrams = 1.0 / float(total_bigrams)
@@ -753,7 +751,7 @@ def _select_best_positive_pmi_pair(
         candidate_pair_lens.append(len(left_text) + len(right_text))
 
     if not candidate_pair_counts:
-        return None
+        return {}
 
     pair_counts_arr = np.asarray(candidate_pair_counts, dtype=np.float64)
     left_counts_arr = np.asarray(candidate_left_counts, dtype=np.float64)
@@ -772,7 +770,7 @@ def _select_best_positive_pmi_pair(
 
     valid_mask = np.isfinite(pmi_arr) & (pmi_arr > 0.0) & np.isfinite(merge_score_arr)
     if not bool(np.any(valid_mask)):
-        return None
+        return {}
 
     candidate_pair_counts_arr = np.asarray(candidate_pair_counts, dtype=np.int64)
     candidate_pair_lens_arr = np.asarray(candidate_pair_lens, dtype=np.int64)
@@ -782,55 +780,49 @@ def _select_best_positive_pmi_pair(
     candidate_left_text_arr = id_to_token_arr[candidate_left_ids_arr]
     candidate_right_text_arr = id_to_token_arr[candidate_right_ids_arr]
 
-    # 用 NumPy 词典序排序复现 key=(merge, pmi, count, len, (left, right))，取最大项。
     selected_indices = np.flatnonzero(valid_mask)
     if selected_indices.size <= 0:
-        return None
-    order = np.lexsort(
-        (
-            candidate_right_text_arr[selected_indices],
-            candidate_left_text_arr[selected_indices],
-            candidate_pair_lens_arr[selected_indices],
-            candidate_pair_counts_arr[selected_indices],
-            pmi_arr[selected_indices],
-            merge_score_arr[selected_indices],
+        return {}
+
+    pair_keys: Dict[Tuple[str, str], Tuple[float, float, int, int, str, str]] = {}
+    for idx in selected_indices.tolist():
+        left = str(candidate_left_text_arr[idx])
+        right = str(candidate_right_text_arr[idx])
+        pair_keys[(left, right)] = (
+            float(merge_score_arr[idx]),
+            float(pmi_arr[idx]),
+            int(candidate_pair_counts_arr[idx]),
+            int(candidate_pair_lens_arr[idx]),
+            left,
+            right,
         )
-    )
-    best_idx = int(selected_indices[int(order[-1])])
-    best_pair = (str(candidate_left_text_arr[best_idx]), str(candidate_right_text_arr[best_idx]))
 
-    best_key = (
-        float(merge_score_arr[best_idx]),
-        float(pmi_arr[best_idx]),
-        int(candidate_pair_counts_arr[best_idx]),
-        int(candidate_pair_lens_arr[best_idx]),
-        best_pair,
-    )
-    if debug or console_debug:
-        debug_string = f"Current Best Pair: {best_pair}, Score Detail: {best_key}\n"
-        if debug:
-            debug.write(debug_string)
-        if console_debug:
-            print(debug_string)
-    return best_pair
+    if console_debug and pair_keys:
+        best_pair, best_key = max(pair_keys.items(), key=lambda item: item[1])
+        print(
+            f"Current Batch Best Pair: {best_pair}, Score Detail: {best_key}, BatchSize={len(pair_keys)}\n"
+        )
+    return pair_keys
 
 
-def _apply_pair_merge_once(
+def _apply_batch_pair_merge_once(
     segments: List[List[_PhraseUnit]],
-    target_pair: Tuple[str, str],
+    pair_keys: Dict[Tuple[str, str], Tuple[float, float, int, int, str, str]],
 ) -> int:
     merged_total = 0
-    left_target, right_target = target_pair
+    if not pair_keys:
+        return merged_total
 
     for seg_idx, segment in enumerate(segments):
         segment_len = len(segment)
         if segment_len < 2:
             continue
 
-        # 快速跳过：该 segment 不含目标相邻 pair 时无需重建列表。
+        # 快速跳过：该 segment 不含可合并 pair 时无需重建列表。
         first_match = -1
         for probe in range(0, segment_len - 1):
-            if segment[probe].text == left_target and segment[probe + 1].text == right_target:
+            pair_probe = (segment[probe].text, segment[probe + 1].text)
+            if pair_probe in pair_keys:
                 first_match = probe
                 break
         if first_match < 0:
@@ -840,11 +832,28 @@ def _apply_pair_merge_once(
         append_unit = new_segment.append
         cursor = first_match
         while cursor < segment_len:
-            if (
-                cursor + 1 < segment_len
-                and segment[cursor].text == left_target
-                and segment[cursor + 1].text == right_target
-            ):
+            if cursor + 1 >= segment_len:
+                append_unit(segment[cursor])
+                cursor += 1
+                continue
+
+            pair_here = (segment[cursor].text, segment[cursor + 1].text)
+            key_here = pair_keys.get(pair_here)
+            if key_here is None:
+                append_unit(segment[cursor])
+                cursor += 1
+                continue
+
+            # 局部冲突消解：若与右侧重叠 pair 冲突，优先保留评分更高者。
+            if cursor + 2 < segment_len:
+                pair_next = (segment[cursor + 1].text, segment[cursor + 2].text)
+                key_next = pair_keys.get(pair_next)
+                if key_next is not None and key_next > key_here:
+                    append_unit(segment[cursor])
+                    cursor += 1
+                    continue
+
+            if cursor + 1 < segment_len:
                 append_unit(
                     _merge_phrase_units(left=segment[cursor], right=segment[cursor + 1])
                 )
@@ -862,7 +871,7 @@ def _apply_pair_merge_once(
 
 @profile_if_enabled
 def _segment_bpe_positive_pmi(context: DictionarySegmentationContext) -> Tuple[List[str], List[float], List[int]]:
-    # 在 BitNet token 序列上执行迭代 BPE：每轮全局合并 PMI>0 的最佳相邻 token 对。
+    # 在 BitNet token 序列上执行 BatchBPE：每轮收集所有正 PMI 候选并批量合并。
     token_texts = context.token_texts
     token_probs = context.token_probs
     n = min(len(token_texts), len(token_probs))
@@ -894,19 +903,17 @@ def _segment_bpe_positive_pmi(context: DictionarySegmentationContext) -> Tuple[L
     if not segments:
         return [], [], [-1] * n
 
-    # 持续合并直到不存在可用正 PMI pair。
-
+    # 持续批量合并，直到不存在可用正 PMI pair。
     while True:
-        best_pair = _select_best_positive_pmi_pair(
+        pair_keys = _collect_positive_pmi_pair_keys(
             segments,
             token_probs,
             min_pair_count=10,
-            debug=None,
             console_debug=True,
         )
-        if best_pair is None:
+        if not pair_keys:
             break
-        merged = _apply_pair_merge_once(segments, best_pair)
+        merged = _apply_batch_pair_merge_once(segments, pair_keys)
         if merged <= 0:
             break
 
