@@ -1107,7 +1107,7 @@ def main() -> None:
         "/home/ritanlisa/文档/初步验收与试运行分册-6-硬件维护手册 - 1227.doc",
         "/home/ritanlisa/文档/浪潮虚拟化InCloud Sphere 6.5.1运维手册.pdf",
         "/home/ritanlisa/文档/LID.pdf",
-        # "/home/ritanlisa/文档/TBP.pdf",
+        "/home/ritanlisa/文档/TBP.pdf",
         ]
     try:
         for file in files:

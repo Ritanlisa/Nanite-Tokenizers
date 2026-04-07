@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 LOGPROB_FLOOR = math.log(1e-12)
 TRANSITION_MAX_NEG_LOG2_PROB = 0.4
 TRANSITION_MAX_PHRASE_LEN = 24
-NAME_CONNECTOR_CHARS = {"·", "・", "･", "-", "'", "’"}
+NAME_CONNECTOR_CHARS = {"·", "・", "･", "-", "'", "’", "."}
 BPE_MIN_NEW_TERM_FREQ = 2
 
 
