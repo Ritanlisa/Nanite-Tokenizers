@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 LOGPROB_FLOOR = math.log(1e-12)
 TRANSITION_MAX_NEG_LOG2_PROB = 0.4
 TRANSITION_MAX_PHRASE_LEN = 24
-NAME_CONNECTOR_CHARS = {"·", "・", "･", "-", "'", "’", "."}
+CONNECT_INCLUDE_CHARS = {"·", "・", "･", "-", "'", "’", "."}
+CONNECT_EXCEPTION_CHARS = {" ", "\n", "\t", "\r", "<br>"}
 BPE_MIN_NEW_TERM_FREQ = 2
 
 
@@ -142,15 +143,15 @@ def _is_noise_token(token: str) -> bool:
     text = str(token or "").strip()
     if not text:
         return True
-    if text in NAME_CONNECTOR_CHARS:
+    if text in CONNECT_INCLUDE_CHARS:
         return False
     if _is_pure_numeric_token(text):
         return True
-    if len(text) <= 1 and not ("\u4e00" <= text <= "\u9fff") and text not in NAME_CONNECTOR_CHARS:
+    if len(text) <= 1 and not ("\u4e00" <= text <= "\u9fff") and text not in CONNECT_INCLUDE_CHARS:
         return True
     # 仅由标点/连接符组成的项视为噪声。
     non_space = [ch for ch in text if not ch.isspace()]
-    if non_space and all(unicodedata.category(ch).startswith("P") and ch not in NAME_CONNECTOR_CHARS for ch in non_space):
+    if non_space and all(unicodedata.category(ch).startswith("P") and ch not in CONNECT_INCLUDE_CHARS for ch in non_space):
         return True
     return False
 
@@ -189,6 +190,11 @@ def _is_stopword_filter_enabled() -> bool:
 def _utf8_char_length(text: str) -> int:
     # Python 字符串按 Unicode 码点计数，和 UTF-8 文本字符数语义一致。
     return len(str(text or ""))
+
+
+def _normalize_document_text_for_keyword_extraction(text: str) -> str:
+    # todo: 清洗文本
+    return text
 
 
 def _filter_keyword_terms(terms: List[str], *, top_k: int, minlength: int) -> List[str]:
@@ -234,8 +240,8 @@ def logprobs_extract(
     for doc_name, texts in texts_by_doc_name.items():
         merged_text = "".join(part for part in texts if part)
 
-        # TODO(step-1): 文档预处理：将输入转成更自然语言、上下文连贯的文档格式。
-        normalized_text = merged_text
+        # 文档预处理：修复词内换行，降低同一词被拆成多个词条的概率。
+        normalized_text = _normalize_document_text_for_keyword_extraction(merged_text)
 
         if not normalized_text.strip():
             keyword_map[doc_name] = []
@@ -599,7 +605,7 @@ def _normalize_segmentation_context(
 def _is_break_char(char: str) -> bool:
     if not char:
         return True
-    if char in NAME_CONNECTOR_CHARS:
+    if char in CONNECT_INCLUDE_CHARS:
         return False
     # 放过普通空格（含 Unicode Space_Separator），但换行/制表等控制空白仍作为断点。
     if char in {"\n", "\r", "\t", "\v", "\f"}:
@@ -625,6 +631,7 @@ class _PhraseUnit:
     text: str
     start_idx: int
     end_idx: int
+    token_indices: Tuple[int, ...]
     token_count: int
     reciprocal_sum: float
 
@@ -638,9 +645,93 @@ def _merge_phrase_units(
         text=f"{left.text}{right.text}",
         start_idx=left.start_idx,
         end_idx=right.end_idx,
+        token_indices=tuple([*left.token_indices, *right.token_indices]),
         token_count=int(left.token_count + right.token_count),
         reciprocal_sum=float(left.reciprocal_sum + right.reciprocal_sum),
     )
+
+
+def _is_exception_token_for_bpe(token: str) -> bool:
+    return _is_token_composed_by_markers(token, CONNECT_EXCEPTION_CHARS)
+
+
+def _is_include_token_for_bpe(token: str) -> bool:
+    return _is_token_composed_by_markers(token, CONNECT_INCLUDE_CHARS)
+
+
+def _is_token_composed_by_markers(token: str, markers: Set[str]) -> bool:
+    text = str(token or "")
+    marker_list = [str(item) for item in markers if str(item)]
+    if not text or not marker_list:
+        return False
+
+    # DP 判断 token 是否可完全由 marker 拼接而成，支持多字符 marker。
+    n = len(text)
+    reachable = [False] * (n + 1)
+    reachable[0] = True
+    for idx in range(n):
+        if not reachable[idx]:
+            continue
+        for marker in marker_list:
+            if text.startswith(marker, idx):
+                reachable[idx + len(marker)] = True
+    return bool(reachable[n])
+
+
+def _strip_known_connect_markers_for_bpe(token: str) -> str:
+    text = str(token or "")
+    if not text:
+        return ""
+
+    markers = sorted(
+        {*(str(item) for item in CONNECT_INCLUDE_CHARS if str(item)), *(str(item) for item in CONNECT_EXCEPTION_CHARS if str(item))},
+        key=len,
+        reverse=True,
+    )
+    if not markers:
+        return text
+
+    parts: List[str] = []
+    idx = 0
+    n = len(text)
+    while idx < n:
+        matched = False
+        for marker in markers:
+            if text.startswith(marker, idx):
+                idx += len(marker)
+                matched = True
+                break
+        if matched:
+            continue
+        parts.append(text[idx])
+        idx += 1
+    return "".join(parts)
+
+
+def _has_disallowed_punctuation_for_bpe(token: str) -> bool:
+    text = _strip_known_connect_markers_for_bpe(token)
+    if not text:
+        return False
+    for char in text:
+        if unicodedata.category(char).startswith("P"):
+            return True
+    return False
+
+
+def _classify_token_for_bpe(token: str) -> str:
+    # BPE 仅允许 CONNECT_INCLUDE_CHARS 参与组合；CONNECT_EXCEPTION_CHARS 视为空字符桥接。
+    text = str(token or "")
+    if not text:
+        return "break"
+    if _is_exception_token_for_bpe(text):
+        return "exception"
+    if _is_include_token_for_bpe(text):
+        return "content"
+    if _has_disallowed_punctuation_for_bpe(text):
+        return "break"
+    if _contains_break_char(text):
+        return "break"
+    return "content"
 
 @profile_if_enabled
 def _collect_positive_pmi_pair_keys(
@@ -882,10 +973,14 @@ def _segment_bpe_positive_pmi(context: DictionarySegmentationContext) -> Tuple[L
     current: List[_PhraseUnit] = []
     for idx in range(n):
         token = str(token_texts[idx])
-        if _contains_break_char(token):
+        token_kind = _classify_token_for_bpe(token)
+        if token_kind == "break":
             if current:
                 segments.append(current)
                 current = []
+            continue
+        if token_kind == "exception":
+            # 例外字符视为空字符：不入词组，但允许跨越它统计/合并相邻内容 token。
             continue
         token_prob = max(float(token_probs[idx]), 1e-300)
         current.append(
@@ -893,6 +988,7 @@ def _segment_bpe_positive_pmi(context: DictionarySegmentationContext) -> Tuple[L
                 text=token,
                 start_idx=idx,
                 end_idx=idx,
+                token_indices=(idx,),
                 token_count=1,
                 reciprocal_sum=1.0 / token_prob,
             )
@@ -920,9 +1016,6 @@ def _segment_bpe_positive_pmi(context: DictionarySegmentationContext) -> Tuple[L
     phrase_words: List[str] = []
     phrase_probs: List[float] = []
     token_to_phrase_idx = [-1] * n
-    log_prefix = [0.0] * (n + 1)
-    for idx in range(n):
-        log_prefix[idx + 1] = log_prefix[idx] + math.log(max(float(token_probs[idx]), 1e-300))
 
     for segment in segments:
         for unit in segment:
@@ -932,14 +1025,20 @@ def _segment_bpe_positive_pmi(context: DictionarySegmentationContext) -> Tuple[L
             if unit.start_idx < 0 or unit.end_idx >= n or unit.start_idx > unit.end_idx:
                 continue
 
-            log_sum = log_prefix[unit.end_idx + 1] - log_prefix[unit.start_idx]
+            if not unit.token_indices:
+                continue
+            log_sum = 0.0
+            for token_idx in unit.token_indices:
+                if 0 <= int(token_idx) < n:
+                    log_sum += math.log(max(float(token_probs[token_idx]), 1e-300))
             phrase_prob = max(math.exp(log_sum), 1e-300)
 
             phrase_idx = len(phrase_words)
             phrase_words.append(phrase_text)
             phrase_probs.append(float(phrase_prob))
-            for idx in range(unit.start_idx, unit.end_idx + 1):
-                token_to_phrase_idx[idx] = phrase_idx
+            for token_idx in unit.token_indices:
+                if 0 <= int(token_idx) < n:
+                    token_to_phrase_idx[int(token_idx)] = phrase_idx
 
     return phrase_words, phrase_probs, token_to_phrase_idx
 
