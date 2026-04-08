@@ -43,6 +43,51 @@ def _extract_doc_with_command(command: List[str]) -> str:
     return (process.stdout or "").strip()
 
 
+def _extract_docx_markdown_with_mammoth(file_path: str) -> str:
+    try:
+        import mammoth  # type: ignore
+
+        with open(file_path, "rb") as handle:
+            result = mammoth.convert_to_markdown(handle)
+        markdown = str(getattr(result, "value", "") or "").strip()
+        return markdown
+    except Exception:
+        return ""
+
+
+def _convert_office_to_docx(file_path: str) -> str:
+    office = shutil.which("soffice") or shutil.which("libreoffice")
+    if not office:
+        return ""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        command = [
+            office,
+            "--headless",
+            "--convert-to",
+            "docx",
+            "--outdir",
+            tmp_dir,
+            file_path,
+        ]
+        try:
+            subprocess.run(command, capture_output=True, timeout=120, check=False)
+            docx_path = os.path.join(tmp_dir, f"{os.path.splitext(os.path.basename(file_path))[0]}.docx")
+            if not os.path.isfile(docx_path):
+                candidates = [
+                    os.path.join(tmp_dir, name)
+                    for name in os.listdir(tmp_dir)
+                    if name.lower().endswith(".docx")
+                ]
+                if not candidates:
+                    return ""
+                docx_path = sorted(candidates)[0]
+            markdown = _extract_docx_markdown_with_mammoth(docx_path)
+            return markdown
+        except Exception as exc:
+            logger.warning("libreoffice doc->docx conversion failed for %s: %s", file_path, exc)
+            return ""
+
+
 def _extract_office_text_with_page_breaks(file_path: str) -> tuple[str, bool]:
     office = shutil.which("soffice") or shutil.which("libreoffice")
     if not office:
@@ -220,6 +265,19 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
             )
 
         if ext == ".doc":
+            markdown = _convert_office_to_docx(file_path)
+            if markdown:
+                return Document(
+                    text=markdown,
+                    metadata={
+                        "file_name": file_path,
+                        "source_extension": ".doc",
+                        "doc_parser": "libreoffice+mammoth-markdown",
+                        "text_format": "markdown",
+                    },
+                    doc_id=file_path,
+                )
+
             text = _extract_legacy_doc_text(file_path)
             if not text:
                 logger.warning("Skipping .doc file with unsupported parser: %s", file_path)
@@ -235,8 +293,24 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
             )
 
         if ext == ".docx":
+            markdown = _extract_docx_markdown_with_mammoth(file_path)
             office_text, has_native_breaks = _extract_office_text_with_page_breaks(file_path)
             docx_catalogs = _extract_docx_catalog_metadata(file_path)
+            if markdown:
+                return Document(
+                    text=markdown,
+                    metadata={
+                        "file_name": file_path,
+                        "source_extension": ".docx",
+                        "native_pagination": has_native_breaks,
+                        "docx_parser": "mammoth-markdown",
+                        "text_format": "markdown",
+                        "native_catalog": docx_catalogs.get("native_catalog") or [],
+                        "style_catalog": docx_catalogs.get("style_catalog") or [],
+                    },
+                    doc_id=file_path,
+                )
+
             if office_text:
                 return Document(
                     text=office_text,
@@ -293,8 +367,12 @@ def build_rag_db_documents(loaded_docs: Sequence[Document]) -> List[RAG_DB_Docum
             logger.warning("Failed to build RAG_DB_Document for %s: %s", loaded_doc.doc_id, exc)
             continue
         chunk_docs = list(getattr(rag_doc, "chunk_documents", []) or [])
-        cleaned_text = str(getattr(rag_doc, "cleaned_text", "") or "")
-        if not chunk_docs and not cleaned_text:
+        tree_markdown = ""
+        try:
+            tree_markdown = str(rag_doc.export_markdown_from_tree() or "")
+        except Exception:
+            tree_markdown = ""
+        if not chunk_docs and not tree_markdown.strip():
             continue
         rag_docs.append(rag_doc)
     return rag_docs
