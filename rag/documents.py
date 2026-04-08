@@ -119,6 +119,172 @@ def _extract_office_text_with_page_breaks(file_path: str) -> tuple[str, bool]:
             return "", False
 
 
+def _extract_office_text_by_pdf_pages(file_path: str) -> tuple[str, int, List[Dict[str, Any]], List[Dict[str, Any]]]:
+    office = shutil.which("soffice") or shutil.which("libreoffice")
+    if not office:
+        return "", 0, [], []
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        command = [
+            office,
+            "--headless",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            tmp_dir,
+            file_path,
+        ]
+        try:
+            subprocess.run(command, capture_output=True, timeout=120, check=False)
+            expected_pdf = os.path.join(tmp_dir, f"{os.path.splitext(os.path.basename(file_path))[0]}.pdf")
+            pdf_path = expected_pdf
+            if not os.path.isfile(pdf_path):
+                candidates = [
+                    os.path.join(tmp_dir, name)
+                    for name in os.listdir(tmp_dir)
+                    if name.lower().endswith(".pdf")
+                ]
+                if not candidates:
+                    return "", 0, [], []
+                pdf_path = sorted(candidates)[0]
+
+            try:
+                import fitz  # type: ignore
+
+                page_texts: List[str] = []
+                page_layouts: List[Dict[str, Any]] = []
+                native_catalog: List[Dict[str, Any]] = []
+
+                def _clean_text(value: str) -> str:
+                    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+                def _looks_like_page_number(value: str) -> bool:
+                    text = _clean_text(value)
+                    if not text:
+                        return False
+                    return bool(
+                        re.fullmatch(
+                            r"(?:第\s*\d{1,4}\s*页(?:\s*/\s*共\s*\d{1,4}\s*页)?|\d{1,4}|\d{1,4}\s*/\s*\d{1,4}|[IVXLCDM]{1,8})",
+                            text,
+                            flags=re.IGNORECASE,
+                        )
+                    )
+
+                with fitz.open(pdf_path) as pdf_doc:
+                    try:
+                        toc_rows = list(pdf_doc.get_toc(simple=True) or [])
+                    except Exception:
+                        toc_rows = []
+                    for row in toc_rows:
+                        if not isinstance(row, (list, tuple)) or len(row) < 3:
+                            continue
+                        try:
+                            level = int(row[0])
+                            title = str(row[1] or "").strip()
+                            page_no = int(row[2])
+                        except Exception:
+                            continue
+                        if not title or page_no <= 0:
+                            continue
+                        native_catalog.append({"title": title[:160], "page": page_no, "level": max(1, min(level, 6))})
+
+                    for page_idx in range(int(pdf_doc.page_count or 0)):
+                        page = pdf_doc.load_page(page_idx)
+                        page_dict_raw = page.get_text("dict")
+                        page_dict = page_dict_raw if isinstance(page_dict_raw, dict) else {}
+                        page_height = float(getattr(page.rect, "height", 0.0) or 0.0)
+                        header_cut = page_height * 0.12 if page_height > 0 else 0.0
+                        footer_cut = page_height * 0.88 if page_height > 0 else 0.0
+
+                        headers: List[str] = []
+                        footers: List[str] = []
+                        body_lines: List[str] = []
+                        images: List[str] = []
+                        page_number = ""
+
+                        for block in list(page_dict.get("blocks") or []):
+                            block_type = int(block.get("type", 0) or 0)
+                            bbox = block.get("bbox") or [0, 0, 0, 0]
+                            y0 = float(bbox[1] if len(bbox) > 1 else 0.0)
+                            y1 = float(bbox[3] if len(bbox) > 3 else 0.0)
+
+                            if block_type == 1:
+                                width = int(block.get("width") or 0)
+                                height = int(block.get("height") or 0)
+                                images.append(f"image[{len(images) + 1}] {width}x{height} @ ({int(y0)}-{int(y1)})")
+                                continue
+
+                            if block_type != 0:
+                                continue
+
+                            spans: List[str] = []
+                            for line in list(block.get("lines") or []):
+                                line_parts: List[str] = []
+                                for span in list(line.get("spans") or []):
+                                    text = _clean_text(span.get("text") or "")
+                                    if text:
+                                        line_parts.append(text)
+                                if line_parts:
+                                    spans.append(" ".join(line_parts))
+                            block_text = _clean_text("\n".join(spans))
+                            if not block_text:
+                                continue
+
+                            if y1 <= header_cut:
+                                headers.append(block_text)
+                                continue
+                            if y0 >= footer_cut:
+                                footers.append(block_text)
+                                if (not page_number) and _looks_like_page_number(block_text):
+                                    page_number = block_text
+                                continue
+
+                            body_lines.append(block_text)
+
+                        body_text = "\n".join(line for line in body_lines if line).strip()
+                        page_texts.append(body_text)
+                        page_layouts.append(
+                            {
+                                "page": page_idx + 1,
+                                "headers": headers,
+                                "footers": footers,
+                                "page_number": page_number,
+                                "images": images,
+                            }
+                        )
+                if page_texts:
+                    return "\n\f\n".join(page_texts).strip(), len(page_texts), page_layouts, native_catalog
+            except Exception:
+                pass
+
+            try:
+                import pymupdf4llm  # type: ignore
+            except Exception:
+                return "", 0, [], []
+
+            chunks = pymupdf4llm.to_markdown(
+                pdf_path,
+                page_chunks=True,
+                extract_words=True,
+                show_progress=False,
+            )
+            if not isinstance(chunks, list):
+                return "", 0, [], []
+            page_texts = []
+            page_layouts: List[Dict[str, Any]] = []
+            for item in chunks:
+                if isinstance(item, dict):
+                    page_texts.append(str(item.get("text") or ""))
+                else:
+                    page_texts.append(str(item or ""))
+                page_layouts.append({"page": len(page_layouts) + 1, "headers": [], "footers": [], "page_number": "", "images": []})
+            if not page_texts:
+                return "", 0, [], []
+            return "\n\f\n".join(page_texts).strip(), len(page_texts), page_layouts, []
+        except Exception as exc:
+            logger.warning("libreoffice pdf-page extraction failed for %s: %s", file_path, exc)
+            return "", 0, [], []
+
+
 def _extract_legacy_doc_text(file_path: str) -> str:
     office_text, _ = _extract_office_text_with_page_breaks(file_path)
     if office_text:
@@ -265,6 +431,35 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
             )
 
         if ext == ".doc":
+            office_text, has_native_breaks = _extract_office_text_with_page_breaks(file_path)
+            if office_text and has_native_breaks:
+                return Document(
+                    text=office_text,
+                    metadata={
+                        "file_name": file_path,
+                        "source_extension": ".doc",
+                        "doc_parser": "libreoffice-txt",
+                        "native_pagination": True,
+                    },
+                    doc_id=file_path,
+                )
+
+            paged_text, page_count, page_layout, native_catalog = _extract_office_text_by_pdf_pages(file_path)
+            if paged_text:
+                return Document(
+                    text=paged_text,
+                    metadata={
+                        "file_name": file_path,
+                        "source_extension": ".doc",
+                        "doc_parser": "libreoffice+pdf-page-chunks",
+                        "native_pagination": True,
+                        "native_page_count": int(page_count),
+                        "page_layout": page_layout,
+                        "native_catalog": native_catalog,
+                    },
+                    doc_id=file_path,
+                )
+
             markdown = _convert_office_to_docx(file_path)
             if markdown:
                 return Document(
@@ -274,6 +469,7 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "source_extension": ".doc",
                         "doc_parser": "libreoffice+mammoth-markdown",
                         "text_format": "markdown",
+                        "native_pagination": False,
                     },
                     doc_id=file_path,
                 )
@@ -293,9 +489,40 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
             )
 
         if ext == ".docx":
-            markdown = _extract_docx_markdown_with_mammoth(file_path)
             office_text, has_native_breaks = _extract_office_text_with_page_breaks(file_path)
             docx_catalogs = _extract_docx_catalog_metadata(file_path)
+            if office_text and has_native_breaks:
+                return Document(
+                    text=office_text,
+                    metadata={
+                        "file_name": file_path,
+                        "source_extension": ".docx",
+                        "native_pagination": True,
+                        "docx_parser": "libreoffice-txt",
+                        "native_catalog": docx_catalogs.get("native_catalog") or [],
+                        "style_catalog": docx_catalogs.get("style_catalog") or [],
+                    },
+                    doc_id=file_path,
+                )
+
+            paged_text, page_count, page_layout, native_catalog = _extract_office_text_by_pdf_pages(file_path)
+            if paged_text:
+                return Document(
+                    text=paged_text,
+                    metadata={
+                        "file_name": file_path,
+                        "source_extension": ".docx",
+                        "native_pagination": True,
+                        "native_page_count": int(page_count),
+                        "docx_parser": "libreoffice+pdf-page-chunks",
+                        "native_catalog": (docx_catalogs.get("native_catalog") or []) + list(native_catalog or []),
+                        "style_catalog": docx_catalogs.get("style_catalog") or [],
+                        "page_layout": page_layout,
+                    },
+                    doc_id=file_path,
+                )
+
+            markdown = _extract_docx_markdown_with_mammoth(file_path)
             if markdown:
                 return Document(
                     text=markdown,

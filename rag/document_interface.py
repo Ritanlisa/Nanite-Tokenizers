@@ -593,8 +593,17 @@ class RAG_DB_Document(Chapter, ABC):
         if not ranges:
             return list(pages)
 
+        normalized_ranges = sorted(
+            list(ranges),
+            key=lambda item: (
+                int(self._coerce_positive_int(item.get("start")) or 10**9),
+                int(self._coerce_positive_int(item.get("level")) or 1),
+                str(item.get("title") or ""),
+            ),
+        )
+
         chapters: List[Chapter] = []
-        for idx, item in enumerate(ranges, start=1):
+        for idx, item in enumerate(normalized_ranges, start=1):
             chapter_meta = {
                 "section_id": f"chapter-{idx}",
                 "section_title": item["title"],
@@ -620,23 +629,56 @@ class RAG_DB_Document(Chapter, ABC):
             stack.append((level, chapter))
 
         page_assigned = [False for _ in pages]
-        for chapter in chapters:
-            start = self._coerce_positive_int(chapter.metadata.get("section_start_page")) or 1
-            end = self._coerce_positive_int(chapter.metadata.get("section_end_page")) or start
-            for pidx, page in enumerate(pages, start=1):
+        for pidx, page in enumerate(pages, start=1):
+            candidates: List[tuple[int, int, int, Chapter]] = []
+            for chapter in chapters:
+                start = self._coerce_positive_int(chapter.metadata.get("section_start_page")) or 1
+                end = self._coerce_positive_int(chapter.metadata.get("section_end_page")) or start
                 if not (start <= pidx <= end):
                     continue
-                page_assigned[pidx - 1] = True
-                if not chapter.metadata.get("section_path"):
-                    chapter.metadata["section_path"] = chapter.title
-                page_path = str(chapter.metadata.get("section_path"))
+                level = self._coerce_positive_int(chapter.metadata.get("level")) or 1
+                span = max(1, end - start + 1)
+                # Prefer deeper and narrower chapter ranges for deterministic single attachment.
+                candidates.append((int(level), -int(span), -start, chapter))
+
+            if not candidates:
+                continue
+
+            candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+            selected = candidates[0][3]
+            page_assigned[pidx - 1] = True
+            if not selected.metadata.get("section_path"):
+                selected.metadata["section_path"] = selected.title
+            page_path = str(selected.metadata.get("section_path"))
+            if not str(page.metadata.get("section_path") or "").strip():
                 page.metadata["section_path"] = page_path
-                page.metadata["section_title"] = chapter.title
-                chapter.add_child(page)
+            if not str(page.metadata.get("section_title") or "").strip():
+                page.metadata["section_title"] = selected.title
+            selected.add_child(page)
 
         for idx, page in enumerate(pages):
             if not page_assigned[idx]:
                 roots.append(page)
+
+        def _node_start_page(node: Page) -> int:
+            if isinstance(node, MonoPage):
+                metadata = dict(getattr(node, "metadata", {}) or {})
+                value = self.coerce_page_number(metadata.get("page"))
+                if value is None:
+                    value = self.coerce_page_number(metadata.get("section_start_page"))
+                return int(value or 10**9)
+            leaves = node.flatten_mono_pages()
+            best = 10**9
+            for leaf in leaves:
+                metadata = dict(getattr(leaf, "metadata", {}) or {})
+                value = self.coerce_page_number(metadata.get("page"))
+                if value is None:
+                    value = self.coerce_page_number(metadata.get("section_start_page"))
+                if value is not None:
+                    best = min(best, int(value))
+            return best
+
+        roots.sort(key=_node_start_page)
         return roots
 
     def _build_from_cleaned_text(self) -> "RAG_DB_Document":

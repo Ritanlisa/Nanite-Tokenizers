@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import re
 import sys
 import uuid
@@ -31,6 +32,9 @@ SUPPORTED_RAG_EXTENSIONS: Set[str] = {
 
 UPLOAD_DIR = Path("tmp") / "doc_tree_debug_uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+DEBUG_JSON_DIR = Path("tmp") / "doc_tree_debug_json"
+DEBUG_JSON_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _sanitize_filename(name: str) -> str:
@@ -99,6 +103,21 @@ def _serialize_page_node(page: Any, node_id_prefix: str = "node") -> Dict[str, A
     return node
 
 
+def _catalog_tree_lines(nodes: list[Dict[str, Any]], *, indent: int = 0) -> list[str]:
+    lines: list[str] = []
+    for node in nodes:
+        meta = dict(node.get("metadata") or {})
+        start = meta.get("section_start_page") or meta.get("page") or "?"
+        end = meta.get("section_end_page") or start
+        cls = str(node.get("class_name") or "Page")
+        title = str(node.get("title") or "Untitled")
+        lines.append(f"{'  ' * indent}- [{cls}] {title} ({start}-{end})")
+        children = node.get("children") or []
+        if isinstance(children, list) and children:
+            lines.extend(_catalog_tree_lines(children, indent=indent + 1))
+    return lines
+
+
 def _build_payload_from_file(file_path: str) -> Dict[str, Any]:
     from rag.documents import load_rag_documents_from_paths
 
@@ -116,18 +135,29 @@ def _build_payload_from_file(file_path: str) -> Dict[str, Any]:
 
     rag_doc = rag_docs[0]
     tree = [_serialize_page_node(node, node_id_prefix="root") for node in rag_doc.get_page_nodes()]
+    print(f"\n[DocTreeDebug] Structured catalog for: {source_file.name}")
+    for line in _catalog_tree_lines(tree):
+      print(line)
 
-    return {
-        "status": "ok",
-        "document": source_file.name,
-        "doc_name": str(getattr(rag_doc, "doc_name", "") or source_file.name),
-        "title": str(getattr(rag_doc, "title", "") or source_file.name),
-        "pagination_mode": str(getattr(rag_doc, "pagination_mode", "") or ""),
-        "page_count": int(getattr(rag_doc, "page_count", 0) or 0),
-        "catalog": _json_safe(getattr(rag_doc, "catalog", []) or []),
-        "variables": _page_variable_snapshot(rag_doc),
-        "tree": tree,
+    payload = {
+      "status": "ok",
+      "document": source_file.name,
+      "doc_name": str(getattr(rag_doc, "doc_name", "") or source_file.name),
+      "title": str(getattr(rag_doc, "title", "") or source_file.name),
+      "pagination_mode": str(getattr(rag_doc, "pagination_mode", "") or ""),
+      "page_count": int(getattr(rag_doc, "page_count", 0) or 0),
+      "catalog": _json_safe(getattr(rag_doc, "catalog", []) or []),
+      "variables": _page_variable_snapshot(rag_doc),
+      "tree": tree,
     }
+
+    safe_name = _sanitize_filename(source_file.stem)
+    out_path = DEBUG_JSON_DIR / f"{safe_name}_{uuid.uuid4().hex[:8]}.json"
+    out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    payload["debug_json_path"] = str(out_path)
+    print(f"[DocTreeDebug] JSON sidecar: {out_path}")
+
+    return payload
 
 
 def _save_upload(upload: UploadFile) -> Path:
@@ -217,6 +247,21 @@ def _build_page_html() -> str:
     .body { padding: 10px; max-height: calc(72vh - 44px); overflow: auto; }
     .tree, .tree ul { list-style: none; margin: 0; padding-left: 16px; }
     .tree li { margin: 6px 0; }
+    .node-row { display: flex; align-items: center; gap: 6px; }
+    .toggle {
+      width: 24px;
+      height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.08);
+      color: var(--text);
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .toggle.placeholder {
+      visibility: hidden;
+      cursor: default;
+    }
     .node {
       width: 100%; text-align: left;
       border: 1px solid transparent;
@@ -228,7 +273,56 @@ def _build_page_html() -> str:
     }
     .node.active { border-color: rgba(76, 201, 166, 0.9); }
     .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .badge {
+      display: inline-block;
+      margin-left: 8px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-size: 11px;
+      border: 1px solid var(--line);
+      color: var(--muted);
+    }
+    .badge.chapter { color: #8bd3ff; }
+    .badge.mono { color: #ffd166; }
     .vars { display: grid; grid-template-columns: 1fr; gap: 10px; }
+    .assets { display: grid; grid-template-columns: 1fr; gap: 8px; margin-bottom: 10px; }
+    .asset-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px;
+      background: rgba(10, 16, 13, 0.55);
+    }
+    .asset-title {
+      font-size: 12px;
+      color: var(--accent2);
+      margin-bottom: 6px;
+      font-weight: 700;
+    }
+    .asset-empty {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .asset-list {
+      margin: 0;
+      padding-left: 16px;
+      color: var(--text);
+      font-size: 12px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .asset-kv {
+      display: grid;
+      grid-template-columns: 96px 1fr;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .asset-k {
+      color: var(--muted);
+    }
     .card { border: 1px solid var(--line); border-radius: 10px; padding: 8px; background: rgba(10, 16, 13, 0.55); }
     .name { font-size: 12px; color: var(--accent); margin-bottom: 6px; }
     textarea {
@@ -255,14 +349,17 @@ def _build_page_html() -> str:
 
     <div class=\"meta\" id=\"meta\">尚未构建文档树</div>
 
-    <div class=\"layout\">
-      <section class=\"panel\">
-        <div class=\"head\">文档树结构</div>
-        <div class=\"body\"><ul class=\"tree\" id=\"treeRoot\"></ul></div>
+    <div class="layout">
+      <section class="panel">
+        <div class="head">文档树结构</div>
+        <div class="body"><ul class="tree" id="treeRoot"></ul></div>
       </section>
-      <section class=\"panel\">
-        <div class=\"head\">Page 子页详情</div>
-        <div class=\"body\"><div class=\"vars\" id=\"vars\"></div></div>
+      <section class="panel">
+        <div class="head">Page 子页详情（含资产）</div>
+        <div class="body">
+          <div class="assets" id="assets"></div>
+          <div class="vars" id="vars"></div>
+        </div>
       </section>
     </div>
   </div>
@@ -272,6 +369,7 @@ def _build_page_html() -> str:
     const buildBtn = document.getElementById('buildBtn');
     const statusEl = document.getElementById('status');
     const treeRoot = document.getElementById('treeRoot');
+    const assetsEl = document.getElementById('assets');
     const varsEl = document.getElementById('vars');
     const meta = document.getElementById('meta');
 
@@ -279,6 +377,7 @@ def _build_page_html() -> str:
     let selectedNodeId = '';
     let buildTimer = null;
     let buildStartTs = 0;
+    const collapsedChapterIds = new Set();
 
     function setStatus(text, isError = false) {
       statusEl.textContent = text;
@@ -316,7 +415,106 @@ def _build_page_html() -> str:
       return out;
     }
 
+    function isMonoPageNode(node) {
+      if (!node || typeof node !== 'object') return false;
+      const cls = String(node.class_name || '');
+      if (['MonoPage', 'Cover', 'Catalogue', 'Introduction', 'Content', 'Appendix'].includes(cls)) {
+        return true;
+      }
+      const category = String(node.category || '').toLowerCase();
+      const children = Array.isArray(node.children) ? node.children : [];
+      return category !== 'chapter' && children.length === 0;
+    }
+
+    function toList(value) {
+      if (Array.isArray(value)) return value.filter(v => String(v || '').trim() !== '');
+      if (value === null || value === undefined) return [];
+      const text = String(value).trim();
+      return text ? [text] : [];
+    }
+
+    function renderAssetList(title, items) {
+      const card = document.createElement('div');
+      card.className = 'asset-card';
+      const head = document.createElement('div');
+      head.className = 'asset-title';
+      head.textContent = title;
+      card.appendChild(head);
+
+      const list = toList(items);
+      if (list.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'asset-empty';
+        empty.textContent = '无';
+        card.appendChild(empty);
+        return card;
+      }
+
+      const ul = document.createElement('ul');
+      ul.className = 'asset-list';
+      for (const item of list) {
+        const li = document.createElement('li');
+        li.textContent = String(item);
+        ul.appendChild(li);
+      }
+      card.appendChild(ul);
+      return card;
+    }
+
+    function renderAssets(node) {
+      if (!assetsEl) {
+        return;
+      }
+      assetsEl.innerHTML = '';
+      if (!node || typeof node !== 'object') {
+        return;
+      }
+
+      const vars = node.variables && typeof node.variables === 'object' ? node.variables : {};
+      const payload = vars.to_payload && typeof vars.to_payload === 'object' ? vars.to_payload : {};
+      const metadata = node.metadata && typeof node.metadata === 'object' ? node.metadata : {};
+
+      const headers = toList(payload.headers || metadata.headers || metadata.header_text);
+      const footers = toList(payload.footers || metadata.footers || metadata.footer_text);
+      const pageNumbers = toList(payload.page_numbers || metadata.page_number_hint || metadata.page);
+      const images = toList(payload.images || metadata.images);
+
+      const summary = document.createElement('div');
+      summary.className = 'asset-card';
+      const summaryTitle = document.createElement('div');
+      summaryTitle.className = 'asset-title';
+      summaryTitle.textContent = '资产统计';
+      summary.appendChild(summaryTitle);
+      const kv = document.createElement('div');
+      kv.className = 'asset-kv';
+      const rows = [
+        ['Headers', String(headers.length)],
+        ['Footers', String(footers.length)],
+        ['Page No.', String(pageNumbers.length)],
+        ['Images', String(images.length || Number(metadata.image_count || 0))],
+      ];
+      for (const [k, v] of rows) {
+        const kEl = document.createElement('div');
+        kEl.className = 'asset-k';
+        kEl.textContent = k;
+        const vEl = document.createElement('div');
+        vEl.textContent = v;
+        kv.appendChild(kEl);
+        kv.appendChild(vEl);
+      }
+      summary.appendChild(kv);
+
+      assetsEl.appendChild(summary);
+      assetsEl.appendChild(renderAssetList('页眉 Header', headers));
+      assetsEl.appendChild(renderAssetList('页脚 Footer', footers));
+      assetsEl.appendChild(renderAssetList('页码 Page Number', pageNumbers));
+      assetsEl.appendChild(renderAssetList('图片 Images', images));
+    }
+
     function renderVars(node) {
+      if (!varsEl) {
+        return;
+      }
       varsEl.innerHTML = '';
       const vars = node && node.variables && typeof node.variables === 'object' ? node.variables : {};
       for (const [k, v] of Object.entries(vars)) {
@@ -335,27 +533,67 @@ def _build_page_html() -> str:
     }
 
     function renderTree(nodes) {
+      if (!treeRoot) {
+        return;
+      }
       treeRoot.innerHTML = '';
       function build(items) {
         const ul = document.createElement('ul');
         ul.className = 'tree';
         for (const n of items || []) {
           const li = document.createElement('li');
+          const row = document.createElement('div');
+          row.className = 'node-row';
+          const children = Array.isArray(n.children) ? n.children : [];
+          const isChapter = String(n.category || '').toLowerCase() === 'chapter';
+
+          const toggle = document.createElement('button');
+          toggle.type = 'button';
+          toggle.className = 'toggle';
+          if (!isChapter || children.length === 0) {
+            toggle.classList.add('placeholder');
+            toggle.textContent = '·';
+            toggle.disabled = true;
+          } else {
+            const collapsed = collapsedChapterIds.has(String(n.id || ''));
+            toggle.textContent = collapsed ? '▸' : '▾';
+            toggle.title = collapsed ? '展开 Chapter' : '折叠 Chapter';
+            toggle.onclick = (event) => {
+              event.stopPropagation();
+              const nodeId = String(n.id || '');
+              if (collapsedChapterIds.has(nodeId)) {
+                collapsedChapterIds.delete(nodeId);
+              } else {
+                collapsedChapterIds.add(nodeId);
+              }
+              renderTree(payload ? (payload.tree || []) : []);
+            };
+          }
+
           const btn = document.createElement('button');
           btn.className = 'node' + (selectedNodeId === n.id ? ' active' : '');
           const sub = document.createElement('div');
           sub.className = 'sub';
-          btn.innerHTML = `<div>${n.title || 'Untitled'}</div>`;
+          const badge = isChapter
+            ? '<span class="badge chapter">Chapter</span>'
+            : (isMonoPageNode(n) ? '<span class="badge mono">MonoPage</span>' : '');
+          btn.innerHTML = `<div>${n.title || 'Untitled'} ${badge}</div>`;
           sub.textContent = `${n.class_name || 'Page'} | ${n.category || 'unknown'}`;
           btn.appendChild(sub);
           btn.onclick = () => {
             selectedNodeId = n.id;
             renderTree(payload.tree || []);
+            renderAssets(n);
             renderVars(n);
           };
-          li.appendChild(btn);
-          const children = Array.isArray(n.children) ? n.children : [];
-          if (children.length > 0) li.appendChild(build(children));
+
+          row.appendChild(toggle);
+          row.appendChild(btn);
+          li.appendChild(row);
+
+          if (children.length > 0 && !collapsedChapterIds.has(String(n.id || ''))) {
+            li.appendChild(build(children));
+          }
           ul.appendChild(li);
         }
         return ul;
@@ -412,6 +650,7 @@ def _build_page_html() -> str:
 
       payload = data;
       const nodes = collect(payload.tree || []);
+      collapsedChapterIds.clear();
       meta.textContent = [
         `doc=${payload.document || ''}`,
         `title=${payload.title || ''}`,
@@ -426,9 +665,11 @@ def _build_page_html() -> str:
       if (nodes.length > 0) {
         selectedNodeId = nodes[0].id;
         renderTree(payload.tree || []);
+        renderAssets(nodes[0]);
         renderVars(nodes[0]);
       } else {
-        varsEl.innerHTML = '';
+        if (assetsEl) assetsEl.innerHTML = '';
+        if (varsEl) varsEl.innerHTML = '';
       }
       setStatus(`构建完成，节点数: ${nodes.length}`);
     }

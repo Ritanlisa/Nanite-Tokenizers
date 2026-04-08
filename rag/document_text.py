@@ -24,19 +24,15 @@ class TextRAGDocument(RAG_DB_Document):
             return self
 
         raw_pages = [part.strip() for part in self.cleaned_text.split("\f")]
-        page_texts = [part for part in raw_pages if part]
+        page_texts = [part for part in raw_pages]
         if not page_texts:
             page_texts = [self.cleaned_text.strip()]
-
-        markers = self.extract_multilevel_catalog_markers(page_texts)
-        ranges = self.derive_catalog_ranges(markers, len(page_texts))
 
         page_nodes: List[Content] = []
         chunks: List[Document] = []
         for page_idx, page_text in enumerate(page_texts, start=1):
-            section = self._pick_catalog_section(page_idx, ranges)
-            section_title = str(section.get("title")) if section else f"Text Page {page_idx}"
-            section_path = section_title if not section else f"L{section['level']}/{section_title}"
+            section_title = "Document"
+            section_path = "Document"
             page_meta: Dict[str, Any] = {
                 "doc_name": self.doc_name,
                 "file_name": self.doc_name,
@@ -63,7 +59,7 @@ class TextRAGDocument(RAG_DB_Document):
                     )
                 )
 
-        self.set_page_nodes(self.build_catalog_tree(page_nodes, ranges))
+        self.set_page_nodes(page_nodes)
         self.chunk_documents = chunks
         self.page_count = len(page_nodes)
         self.pagination_mode = "text-page-tree"
