@@ -1046,7 +1046,8 @@ class RAG_DB_Document(Chapter, ABC):
                 node.SubContent = [_build_synthetic_monopage_from_chapter(node)]
                 return node
 
-            return None
+            # Keep empty catalog nodes so each TOC item is represented as a Chapter instance.
+            return node
 
         normalized_roots: List[Page] = []
         for root in roots:

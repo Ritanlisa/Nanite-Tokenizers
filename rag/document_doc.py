@@ -123,23 +123,25 @@ class DocRAGDocument(RAG_DB_Document):
         pages: List[Content],
         source_ranges: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        buckets: Dict[int, List[int]] = {}
+        source_to_pages: Dict[int, List[int]] = {}
         for page in pages:
             meta = dict(getattr(page, "metadata", {}) or {})
             page_no = int(self.coerce_page_number(meta.get("page")) or 0)
             source_no = int(self.coerce_page_number(meta.get("source_page")) or page_no)
             if page_no <= 0:
                 continue
-            section = self._pick_catalog_section(source_no, source_ranges)
-            if not section:
-                continue
-            order = int(section.get("order", 0))
-            buckets.setdefault(order, []).append(page_no)
+            source_to_pages.setdefault(source_no, []).append(page_no)
 
         projected: List[Dict[str, Any]] = []
         for item in source_ranges:
-            order = int(item.get("order", 0))
-            pages_in = sorted(set(buckets.get(order, [])))
+            start_src = int(self.coerce_page_number(item.get("start")) or 0)
+            end_src = int(self.coerce_page_number(item.get("end")) or start_src)
+            if start_src <= 0 or end_src <= 0:
+                continue
+            pages_in: List[int] = []
+            for src in range(min(start_src, end_src), max(start_src, end_src) + 1):
+                pages_in.extend(source_to_pages.get(src, []))
+            pages_in = sorted(set(pages_in))
             if not pages_in:
                 continue
             projected.append(
@@ -148,7 +150,7 @@ class DocRAGDocument(RAG_DB_Document):
                     "start": int(min(pages_in)),
                     "end": int(max(pages_in)),
                     "level": int(item.get("level") or 1),
-                    "order": order,
+                    "order": int(item.get("order", 0)),
                 }
             )
         return projected
@@ -197,17 +199,131 @@ class DocRAGDocument(RAG_DB_Document):
             markers = self._extract_markers_from_metadata(keys)
             if not markers:
                 continue
-
-            top_ranges = self._build_top_level_ranges_from_first_line_hits(markers, page_texts, total_pages)
-            if top_ranges:
-                return top_ranges
-
             markers = self._rescale_marker_pages_if_needed(markers, source_page_count, total_pages)
-            markers = self._align_marker_pages_with_top_title_hits(markers, page_texts, total_pages)
+            markers = self._remap_markers_with_top_level_anchors(markers, page_texts, total_pages)
             ranges = self._ranges_from_raw_markers(markers, total_pages)
             if ranges and self._has_informative_page_span(ranges, total_pages):
                 return ranges
         return []
+
+    def _remap_markers_with_top_level_anchors(
+        self,
+        markers: List[Dict[str, Any]],
+        page_texts: List[str],
+        total_pages: int,
+    ) -> List[Dict[str, Any]]:
+        if not markers or not page_texts:
+            return markers
+
+        first_lines: List[str] = []
+        for text in page_texts:
+            first = ""
+            for raw in str(text or "").splitlines():
+                raw = raw.strip()
+                if raw:
+                    first = raw
+                    break
+            first_lines.append(self._normalize_title(first))
+
+        anchors: List[tuple[int, int]] = []
+        for marker in markers:
+            level = int(self.coerce_page_number(marker.get("level")) or 1)
+            if level != 1:
+                continue
+            title = str(marker.get("title") or "").strip()
+            if not title or self._is_noise_heading_line(title):
+                continue
+            old_page = int(self.coerce_page_number(marker.get("page")) or 0)
+            if old_page <= 0:
+                continue
+            key = self._normalize_title(title)
+            if len(key) < 4:
+                continue
+            hit = None
+            for idx, line in enumerate(first_lines, start=1):
+                if line.startswith(key):
+                    hit = idx
+                    break
+            if hit is not None:
+                anchors.append((old_page, int(hit)))
+
+        if len(anchors) < 2:
+            return markers
+        anchors = sorted(set(anchors), key=lambda item: item[0])
+
+        def map_page(old_page: int) -> int:
+            if old_page <= anchors[0][0]:
+                x1, y1 = anchors[0]
+                x2, y2 = anchors[1]
+            elif old_page >= anchors[-1][0]:
+                x1, y1 = anchors[-2]
+                x2, y2 = anchors[-1]
+            else:
+                x1 = y1 = x2 = y2 = 0
+                for idx in range(len(anchors) - 1):
+                    a1 = anchors[idx]
+                    a2 = anchors[idx + 1]
+                    if a1[0] <= old_page <= a2[0]:
+                        x1, y1 = a1
+                        x2, y2 = a2
+                        break
+            if x2 == x1:
+                mapped = y1
+            else:
+                ratio = float(old_page - x1) / float(x2 - x1)
+                mapped = int(round(y1 + ratio * float(y2 - y1)))
+            return max(1, min(int(total_pages), mapped))
+
+        aligned: List[Dict[str, Any]] = []
+        for item in markers:
+            row = dict(item)
+            old_page = int(self.coerce_page_number(row.get("page")) or 0)
+            if old_page > 0:
+                mapped = map_page(old_page)
+                row["page"] = mapped
+            aligned.append(row)
+
+        non_toc_top_pages: List[int] = []
+        for row in aligned:
+            level = int(self.coerce_page_number(row.get("level")) or 1)
+            if level != 1:
+                continue
+            title_key = self._normalize_title(str(row.get("title") or ""))
+            if "目录" in title_key or "toc" in title_key or "mulu" in title_key:
+                continue
+            page = int(self.coerce_page_number(row.get("page")) or 0)
+            if page > 0:
+                non_toc_top_pages.append(page)
+
+        upper_bound = min(non_toc_top_pages) - 1 if non_toc_top_pages else int(total_pages)
+        toc_start = self._detect_toc_start_page(page_texts, upper_bound)
+        if toc_start is not None:
+            for row in aligned:
+                title_key = self._normalize_title(str(row.get("title") or ""))
+                if "目录" in title_key or "toc" in title_key or "mulu" in title_key:
+                    row["page"] = int(toc_start)
+        return aligned
+
+    def _detect_toc_start_page(self, page_texts: List[str], upper_bound: int) -> int | None:
+        if not page_texts:
+            return None
+        limit = max(1, min(len(page_texts), int(upper_bound or len(page_texts))))
+        toc_row = re.compile(r"^(?:第[一二三四五六七八九十百千万0-9]+章|附录|\d+(?:\.\d+)+).{0,100}?\d{1,4}\s*$")
+        for idx in range(1, limit + 1):
+            lines = [line.strip() for line in str(page_texts[idx - 1] or "").splitlines() if line.strip()]
+            if not lines:
+                continue
+            first_key = self._normalize_title(lines[0])
+            if "目录" in first_key or "toc" in first_key or "mulu" in first_key:
+                return idx
+            score = 0
+            for line in lines[:32]:
+                compact = re.sub(r"[·•.\s]+", " ", line).strip()
+                if toc_row.match(compact):
+                    score += 1
+            if score >= 4:
+                return idx
+        return None
 
     def _build_top_level_ranges_from_first_line_hits(
         self,
