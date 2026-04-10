@@ -5,10 +5,12 @@ import re
 import logging
 import shutil
 import subprocess
+import site
+import sys
 import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from llama_index.core import Document
 
@@ -21,6 +23,279 @@ from rag.document_text import TextRAGDocument
 from rag.pdf_reader import get_pdf_reader
 
 logger = logging.getLogger(__name__)
+_UNO_BRIDGE_READY = False
+_NATIVE_PAGE_COUNT_ERROR_PREFIX = "NATIVE_PAGE_COUNT_ERROR:"
+
+
+def _enable_python3_uno_bridge() -> bool:
+    global _UNO_BRIDGE_READY
+    if _UNO_BRIDGE_READY:
+        return True
+
+    try:
+        import uno  # type: ignore # noqa: F401
+
+        _UNO_BRIDGE_READY = True
+        return True
+    except Exception:
+        pass
+
+    bridge_paths = [
+        "/usr/lib/python3/dist-packages",
+        "/usr/lib/libreoffice/program",
+    ]
+    existing_paths = [path for path in bridge_paths if os.path.isdir(path)]
+    if not existing_paths:
+        return False
+
+    in_venv = bool(getattr(sys, "prefix", "") != getattr(sys, "base_prefix", ""))
+    if in_venv:
+        pth_written = False
+        for sp in list(site.getsitepackages() or []):
+            if not os.path.isdir(sp):
+                continue
+            pth_path = os.path.join(sp, "uno_bridge.pth")
+            try:
+                with open(pth_path, "w", encoding="utf-8") as fout:
+                    fout.write("\n".join(existing_paths) + "\n")
+                pth_written = True
+            except Exception as exc:
+                logger.debug("Failed to write uno bridge pth %s: %s", pth_path, exc)
+        if not pth_written:
+            logger.debug("No writable site-packages for uno bridge in current venv")
+
+    for path in existing_paths:
+        if path not in sys.path:
+            sys.path.append(path)
+
+    try:
+        import uno  # type: ignore # noqa: F401
+
+        _UNO_BRIDGE_READY = True
+        return True
+    except Exception as exc:
+        logger.debug("Failed to import uno after bridge setup: %s", exc)
+        return False
+
+
+def _probe_libreoffice_physical_page_count(file_path: str) -> int:
+    office = shutil.which("soffice") or shutil.which("libreoffice")
+    if not office:
+        return 0
+    if not _enable_python3_uno_bridge():
+        logger.debug("python3-uno bridge is unavailable for %s", file_path)
+        return 0
+
+    script = """
+import os
+import sys
+import time
+import random
+import subprocess
+import tempfile
+
+path = sys.argv[1]
+port = str(random.randint(20020, 22999))
+with tempfile.TemporaryDirectory(prefix="lo_uno_profile_") as profile_dir:
+    profile_url = "file://" + os.path.abspath(profile_dir).replace("\\\\", "/")
+    cmd = [
+        "soffice",
+        "--headless",
+        "--invisible",
+        "--norestore",
+        "--nodefault",
+        "--nofirststartwizard",
+        "--nolockcheck",
+        "--nologo",
+        f"-env:UserInstallation={profile_url}",
+        f"--accept=socket,host=127.0.0.1,port={port};urp;",
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        import uno
+        from com.sun.star.beans import PropertyValue
+
+        local = uno.getComponentContext()
+        smgr = local.ServiceManager
+        resolver = smgr.createInstanceWithContext("com.sun.star.bridge.UnoUrlResolver", local)
+
+        ctx = None
+        deadline = time.time() + 30.0
+        while time.time() < deadline:
+            try:
+                ctx = resolver.resolve(f"uno:socket,host=127.0.0.1,port={port};urp;StarOffice.ComponentContext")
+                break
+            except Exception:
+                time.sleep(0.2)
+
+        if ctx is None:
+            print(0)
+            raise SystemExit(0)
+
+        desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
+        props = (PropertyValue("Hidden", 0, True, 0),)
+        doc = desktop.loadComponentFromURL(uno.systemPathToFileUrl(os.path.abspath(path)), "_blank", 0, props)
+        try:
+            cursor = doc.getCurrentController().getViewCursor()
+            cursor.jumpToLastPage()
+            page_count = int(cursor.getPage() or 0)
+        except Exception:
+            page_count = 0
+        print(page_count if page_count > 0 else 0)
+        try:
+            doc.close(True)
+        except Exception:
+            pass
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+""".strip()
+
+    try:
+        proc = subprocess.run(
+            [str(sys.executable), "-c", script, file_path],
+            capture_output=True,
+            text=True,
+            timeout=40,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logger.debug("LibreOffice page probe subprocess failed for %s: rc=%s stderr=%s", file_path, proc.returncode, str(proc.stderr or "").strip())
+            return 0
+        text = str(proc.stdout or "").strip()
+        value = int(float(text)) if text else 0
+        return value if value > 0 else 0
+    except Exception as exc:
+        logger.debug("Failed to probe LibreOffice page count for %s: %s", file_path, exc)
+        return 0
+
+
+def _require_libreoffice_physical_page_count(file_path: str, *, ext: str) -> int:
+    value = int(_probe_libreoffice_physical_page_count(file_path) or 0)
+    if value > 0:
+        return value
+    raise RuntimeError(
+        f"{_NATIVE_PAGE_COUNT_ERROR_PREFIX} "
+        f"无法获取 {ext} 文档的 LibreOffice 物理页数。"
+        "请确认系统已安装 python3-uno 且 soffice 可用；"
+        "当前已禁用该场景下的自动回退，以避免错误分类。"
+    )
+
+
+def _extract_office_text_by_uno_pages(file_path: str) -> tuple[str, bool]:
+    office = shutil.which("soffice") or shutil.which("libreoffice")
+    if not office:
+        return "", False
+    if not _enable_python3_uno_bridge():
+        return "", False
+
+    script = """
+import os
+import sys
+import time
+import random
+import subprocess
+import tempfile
+
+path = sys.argv[1]
+port = str(random.randint(23000, 25999))
+with tempfile.TemporaryDirectory(prefix="lo_uno_pages_") as profile_dir:
+    profile_url = "file://" + os.path.abspath(profile_dir).replace("\\\\", "/")
+    cmd = [
+        "soffice",
+        "--headless",
+        "--invisible",
+        "--norestore",
+        "--nodefault",
+        "--nofirststartwizard",
+        "--nolockcheck",
+        "--nologo",
+        f"-env:UserInstallation={profile_url}",
+        f"--accept=socket,host=127.0.0.1,port={port};urp;",
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        import uno
+        from com.sun.star.beans import PropertyValue
+
+        local = uno.getComponentContext()
+        resolver = local.ServiceManager.createInstanceWithContext("com.sun.star.bridge.UnoUrlResolver", local)
+
+        ctx = None
+        deadline = time.time() + 30.0
+        while time.time() < deadline:
+            try:
+                ctx = resolver.resolve(f"uno:socket,host=127.0.0.1,port={port};urp;StarOffice.ComponentContext")
+                break
+            except Exception:
+                time.sleep(0.2)
+
+        if ctx is None:
+            print("")
+            raise SystemExit(0)
+
+        desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
+        props = (PropertyValue("Hidden", 0, True, 0),)
+        doc = desktop.loadComponentFromURL(uno.systemPathToFileUrl(os.path.abspath(path)), "_blank", 0, props)
+        try:
+            vc = doc.getCurrentController().getViewCursor()
+            vc.jumpToLastPage()
+            page_count = int(vc.getPage() or 0)
+            page_texts = []
+            for page_no in range(1, max(1, page_count) + 1):
+                text = ""
+                try:
+                    vc.jumpToPage(page_no)
+                    vc.jumpToStartOfPage()
+                    start = vc.getStart()
+                    vc.jumpToEndOfPage()
+                    end = vc.getEnd()
+                    cursor = doc.Text.createTextCursorByRange(start)
+                    cursor.gotoRange(end, True)
+                    text = str(cursor.getString() or "")
+                except Exception:
+                    text = ""
+                page_texts.append(text.strip())
+            print("\\n\\f\\n".join(page_texts).strip())
+        finally:
+            try:
+                doc.close(True)
+            except Exception:
+                pass
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+""".strip()
+
+    try:
+        proc = subprocess.run(
+            [str(sys.executable), "-c", script, file_path],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logger.debug(
+                "UNO page text extraction failed for %s: rc=%s stderr=%s",
+                file_path,
+                proc.returncode,
+                str(proc.stderr or "").strip(),
+            )
+            return "", False
+        text = str(proc.stdout or "").strip()
+        if not text:
+            return "", False
+        return text, ("\f" in text)
+    except Exception as exc:
+        logger.debug("UNO page text extraction exception for %s: %s", file_path, exc)
+        return "", False
 
 
 def stable_doc_id(doc: Document) -> str:
@@ -321,13 +596,76 @@ def _docx_heading_level_from_style(style_id: str, style_name: str) -> Optional[i
     return None
 
 
-def _extract_docx_catalog_metadata(file_path: str) -> Dict[str, List[Dict[str, Any]]]:
+def _docx_paragraph_has_rendered_page_break(paragraph: ET.Element, ns: Dict[str, str]) -> bool:
+    for br in paragraph.findall(".//w:br", ns):
+        br_type = str(br.attrib.get(f"{{{ns['w']}}}type") or "").strip().lower()
+        if br_type == "page":
+            return True
+    if paragraph.find(".//w:lastRenderedPageBreak", ns) is not None:
+        return True
+    return False
+
+
+def _docx_paragraph_has_section_page_break(paragraph: ET.Element, ns: Dict[str, str]) -> bool:
+    sect = paragraph.find("w:pPr/w:sectPr", ns)
+    if sect is None:
+        return False
+    type_node = sect.find("w:type", ns)
+    if type_node is None:
+        return False
+    val = str(type_node.attrib.get(f"{{{ns['w']}}}val") or "").strip().lower()
+    return val in {"nextpage", "oddpage", "evenpage"}
+
+
+def _extract_docx_structure_from_xml(file_path: str) -> Tuple[str, bool, Dict[str, List[Dict[str, Any]]]]:
     native_catalog: List[Dict[str, Any]] = []
     style_catalog: List[Dict[str, Any]] = []
+    font_catalog: List[Dict[str, Any]] = []
+
+    def _normalize_title(value: str) -> str:
+        text = str(value or "").strip().lower()
+        text = re.sub(r"\s+", "", text)
+        text = re.sub(r"[^\w\u4e00-\u9fff]", "", text)
+        return text
+
+    def _roman_to_int(token: str) -> int:
+        mapping = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+        value = 0
+        prev = 0
+        for ch in reversed(str(token or "").upper()):
+            cur = mapping.get(ch, 0)
+            if cur < prev:
+                value -= cur
+            else:
+                value += cur
+                prev = cur
+        return value
+
+    def _parse_catalog_tail_page(text: str) -> tuple[str, Optional[int]]:
+        raw = str(text or "").strip()
+        if not raw:
+            return "", None
+        match = re.match(r"^(.{1,200}?)(?:\t+|[·•.]{2,}|\s{2,})(\d{1,4}|[IVXLCDM]{1,8})\s*$", raw, flags=re.IGNORECASE)
+        if not match:
+            match = re.match(r"^(.{1,200}?)\s+(\d{1,4}|[IVXLCDM]{1,8})\s*$", raw, flags=re.IGNORECASE)
+        if not match:
+            return raw[:160], None
+        title = str(match.group(1) or "").strip()[:160]
+        page_token = str(match.group(2) or "").strip()
+        if re.fullmatch(r"\d{1,4}", page_token):
+            return title, int(page_token)
+        if re.fullmatch(r"[IVXLCDM]{1,8}", page_token, flags=re.IGNORECASE):
+            roman_page = _roman_to_int(page_token)
+            return title, roman_page if roman_page > 0 else None
+        return title, None
+
+    paragraph_rows: List[Dict[str, Any]] = []
+    pages: List[List[str]] = [[]]
+
     try:
         with zipfile.ZipFile(file_path, "r") as archive:
             document_xml = archive.read("word/document.xml")
-            styles_xml: Optional[bytes] = None
+            styles_xml: Optional[bytes]
             try:
                 styles_xml = archive.read("word/styles.xml")
             except Exception:
@@ -337,54 +675,122 @@ def _extract_docx_catalog_metadata(file_path: str) -> Dict[str, List[Dict[str, A
         style_name_by_id: Dict[str, str] = {}
         if styles_xml:
             styles_root = ET.fromstring(styles_xml)
-            for style in styles_root.findall('.//w:style', ns):
+            for style in styles_root.findall(".//w:style", ns):
                 style_id = str(style.attrib.get(f"{{{ns['w']}}}styleId") or "").strip()
                 if not style_id:
                     continue
-                name_node = style.find('w:name', ns)
+                name_node = style.find("w:name", ns)
                 if name_node is not None:
                     style_name = str(name_node.attrib.get(f"{{{ns['w']}}}val") or "").strip()
                     if style_name:
                         style_name_by_id[style_id] = style_name
 
         doc_root = ET.fromstring(document_xml)
-        for paragraph in doc_root.findall('.//w:body/w:p', ns):
+        paragraphs = list(doc_root.findall(".//w:body/w:p", ns))
+
+        page_idx = 1
+        for paragraph in paragraphs:
             text = _extract_docx_text_from_paragraph(paragraph, ns)
-            if not text:
-                continue
-            p_style = paragraph.find('w:pPr/w:pStyle', ns)
+            if text:
+                pages[-1].append(text)
+
+            p_style = paragraph.find("w:pPr/w:pStyle", ns)
             style_id = ""
             if p_style is not None:
                 style_id = str(p_style.attrib.get(f"{{{ns['w']}}}val") or "").strip()
+            run_sizes: List[int] = []
+            for run in paragraph.findall(".//w:r", ns):
+                sz_node = run.find("w:rPr/w:sz", ns)
+                if sz_node is None:
+                    continue
+                raw = str(sz_node.attrib.get(f"{{{ns['w']}}}val") or "").strip()
+                if raw.isdigit():
+                    run_sizes.append(int(raw))
+            if text:
+                paragraph_rows.append(
+                    {
+                        "text": text,
+                        "style_id": style_id,
+                        "style_name": style_name_by_id.get(style_id, ""),
+                        "max_sz": max(run_sizes) if run_sizes else 0,
+                        "page": page_idx,
+                    }
+                )
+
+            has_page_break = _docx_paragraph_has_rendered_page_break(paragraph, ns) or _docx_paragraph_has_section_page_break(paragraph, ns)
+            if has_page_break:
+                page_idx += 1
+                pages.append([])
+
+        while pages and not pages[-1]:
+            pages.pop()
+        if not pages:
+            pages = [[]]
+
+        for row in paragraph_rows:
+            style_id = str(row.get("style_id") or "")
             if not style_id:
                 continue
+            text = str(row.get("text") or "")
             style_name = style_name_by_id.get(style_id, "")
             lower_style = f"{style_id} {style_name}".lower()
 
-            toc_match = re.match(r"^(.{1,160}?)(?:\t+|[·•.\s]{2,})(\d{1,4})\s*$", text)
-            if ("toc" in lower_style or "目录" in lower_style) and toc_match:
-                page = int(toc_match.group(2))
-                if page > 0:
+            if "toc" in lower_style or "目录" in lower_style:
+                title, page = _parse_catalog_tail_page(text)
+                if title and page and page > 0:
                     native_catalog.append(
                         {
-                            "title": toc_match.group(1).strip()[:160],
+                            "title": title,
                             "page": page,
                             "level": _docx_heading_level_from_style(style_id, style_name) or 1,
                         }
                     )
+
+        page_by_title: Dict[str, int] = {}
+        for row in native_catalog:
+            key = _normalize_title(str(row.get("title") or ""))
+            page = int(row.get("page") or 0)
+            if not key or page <= 0:
+                continue
+            old = page_by_title.get(key)
+            if old is None or page < old:
+                page_by_title[key] = page
+
+        for row in paragraph_rows:
+            style_id = str(row.get("style_id") or "")
+            if not style_id:
+                continue
+            text = str(row.get("text") or "")
+            style_name = str(row.get("style_name") or "")
+            lower_style = f"{style_id} {style_name}".lower()
+            if "toc" in lower_style or "目录" in lower_style:
                 continue
 
+            normalized = _normalize_title(text)
+            mapped_page = page_by_title.get(normalized) or int(row.get("page") or 1)
             heading_level = _docx_heading_level_from_style(style_id, style_name)
             if heading_level is not None:
                 style_catalog.append(
                     {
                         "title": text[:160],
-                        "page": 1,
+                        "page": mapped_page,
                         "level": heading_level,
                     }
                 )
+
+            max_sz = int(row.get("max_sz") or 0)
+            if max_sz >= 28 and len(text.strip()) <= 120:
+                inferred_level = 1 if max_sz >= 40 else (2 if max_sz >= 32 else 3)
+                font_catalog.append(
+                    {
+                        "title": text[:160],
+                        "page": mapped_page,
+                        "level": inferred_level,
+                    }
+                )
+
     except Exception as exc:
-        logger.debug("Failed to extract DOCX structured catalog for %s: %s", file_path, exc)
+        logger.debug("Failed to extract DOCX structured payload for %s: %s", file_path, exc)
 
     def _dedupe(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen: Set[tuple[str, int, int]] = set()
@@ -402,10 +808,87 @@ def _extract_docx_catalog_metadata(file_path: str) -> Dict[str, List[Dict[str, A
             deduped.append({"title": title, "page": page, "level": level})
         return deduped
 
-    return {
+    page_texts = ["\n".join(lines).strip() for lines in pages]
+    text_with_breaks = "\n\f\n".join(page_texts).strip()
+    has_breaks = len(page_texts) > 1
+    catalogs = {
         "native_catalog": _dedupe(native_catalog),
         "style_catalog": _dedupe(style_catalog),
+        "font_catalog": _dedupe(font_catalog),
     }
+    return text_with_breaks, has_breaks, catalogs
+
+
+def _extract_docx_catalog_metadata(file_path: str) -> Dict[str, List[Dict[str, Any]]]:
+    _, _, catalogs = _extract_docx_structure_from_xml(file_path)
+    return catalogs
+
+
+def _extract_doc_catalog_metadata(file_path: str) -> Dict[str, List[Dict[str, Any]]]:
+    office = shutil.which("soffice") or shutil.which("libreoffice")
+    if not office:
+        return {"native_catalog": [], "style_catalog": [], "font_catalog": []}
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        command = [
+            office,
+            "--headless",
+            "--convert-to",
+            "docx",
+            "--outdir",
+            tmp_dir,
+            file_path,
+        ]
+        try:
+            subprocess.run(command, capture_output=True, timeout=120, check=False)
+            expected_docx = os.path.join(tmp_dir, f"{os.path.splitext(os.path.basename(file_path))[0]}.docx")
+            docx_path = expected_docx
+            if not os.path.isfile(docx_path):
+                candidates = [
+                    os.path.join(tmp_dir, name)
+                    for name in os.listdir(tmp_dir)
+                    if name.lower().endswith(".docx")
+                ]
+                if not candidates:
+                    return {"native_catalog": [], "style_catalog": [], "font_catalog": []}
+                docx_path = sorted(candidates)[0]
+            return _extract_docx_catalog_metadata(docx_path)
+        except Exception:
+            return {"native_catalog": [], "style_catalog": [], "font_catalog": []}
+
+
+def _extract_doc_text_via_converted_docx(file_path: str) -> Tuple[str, bool, Dict[str, List[Dict[str, Any]]]]:
+    office = shutil.which("soffice") or shutil.which("libreoffice")
+    if not office:
+        return "", False, {"native_catalog": [], "style_catalog": [], "font_catalog": []}
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        command = [
+            office,
+            "--headless",
+            "--convert-to",
+            "docx",
+            "--outdir",
+            tmp_dir,
+            file_path,
+        ]
+        try:
+            subprocess.run(command, capture_output=True, timeout=120, check=False)
+            expected_docx = os.path.join(tmp_dir, f"{os.path.splitext(os.path.basename(file_path))[0]}.docx")
+            docx_path = expected_docx
+            if not os.path.isfile(docx_path):
+                candidates = [
+                    os.path.join(tmp_dir, name)
+                    for name in os.listdir(tmp_dir)
+                    if name.lower().endswith(".docx")
+                ]
+                if not candidates:
+                    return "", False, {"native_catalog": [], "style_catalog": [], "font_catalog": []}
+                docx_path = sorted(candidates)[0]
+
+            return _extract_docx_structure_from_xml(docx_path)
+        except Exception:
+            return "", False, {"native_catalog": [], "style_catalog": [], "font_catalog": []}
 
 
 def load_single_file_document(file_path: str, supported_extensions: Set[str]) -> Optional[Document]:
@@ -431,31 +914,69 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
             )
 
         if ext == ".doc":
+            xml_text, xml_has_breaks, doc_catalogs = _extract_doc_text_via_converted_docx(file_path)
+            uno_text, uno_has_breaks = _extract_office_text_by_uno_pages(file_path)
             office_text, has_native_breaks = _extract_office_text_with_page_breaks(file_path)
-            if office_text and has_native_breaks:
+            native_page_count = _require_libreoffice_physical_page_count(file_path, ext=".doc")
+            if uno_text and uno_has_breaks:
+                return Document(
+                    text=uno_text,
+                    metadata={
+                        "file_name": file_path,
+                        "source_extension": ".doc",
+                        "doc_parser": "libreoffice-uno-pages",
+                        "native_pagination": True,
+                        "native_page_count": int(native_page_count or 0),
+                        "native_catalog": doc_catalogs.get("native_catalog") or [],
+                        "style_catalog": doc_catalogs.get("style_catalog") or [],
+                        "font_catalog": doc_catalogs.get("font_catalog") or [],
+                    },
+                    doc_id=file_path,
+                )
+            if xml_text and xml_has_breaks:
+                return Document(
+                    text=xml_text,
+                    metadata={
+                        "file_name": file_path,
+                        "source_extension": ".doc",
+                        "doc_parser": "libreoffice-docx-xml",
+                        "native_pagination": True,
+                        "native_page_count": int(native_page_count or 0),
+                        "native_catalog": doc_catalogs.get("native_catalog") or [],
+                        "style_catalog": doc_catalogs.get("style_catalog") or [],
+                        "font_catalog": doc_catalogs.get("font_catalog") or [],
+                    },
+                    doc_id=file_path,
+                )
+
+            if office_text:
                 return Document(
                     text=office_text,
                     metadata={
                         "file_name": file_path,
                         "source_extension": ".doc",
                         "doc_parser": "libreoffice-txt",
-                        "native_pagination": True,
+                        "native_pagination": bool(has_native_breaks),
+                        "native_page_count": int(native_page_count or 0),
+                        "native_catalog": doc_catalogs.get("native_catalog") or [],
+                        "style_catalog": doc_catalogs.get("style_catalog") or [],
+                        "font_catalog": doc_catalogs.get("font_catalog") or [],
                     },
                     doc_id=file_path,
                 )
 
-            paged_text, page_count, page_layout, native_catalog = _extract_office_text_by_pdf_pages(file_path)
-            if paged_text:
+            if xml_text:
                 return Document(
-                    text=paged_text,
+                    text=xml_text,
                     metadata={
                         "file_name": file_path,
                         "source_extension": ".doc",
-                        "doc_parser": "libreoffice+pdf-page-chunks",
-                        "native_pagination": True,
-                        "native_page_count": int(page_count),
-                        "page_layout": page_layout,
-                        "native_catalog": native_catalog,
+                        "doc_parser": "libreoffice-docx-xml",
+                        "native_pagination": bool(xml_has_breaks),
+                        "native_page_count": int(native_page_count or 0),
+                        "native_catalog": doc_catalogs.get("native_catalog") or [],
+                        "style_catalog": doc_catalogs.get("style_catalog") or [],
+                        "font_catalog": doc_catalogs.get("font_catalog") or [],
                     },
                     doc_id=file_path,
                 )
@@ -470,6 +991,10 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "doc_parser": "libreoffice+mammoth-markdown",
                         "text_format": "markdown",
                         "native_pagination": False,
+                        "native_page_count": int(native_page_count or 0),
+                        "native_catalog": doc_catalogs.get("native_catalog") or [],
+                        "style_catalog": doc_catalogs.get("style_catalog") or [],
+                        "font_catalog": doc_catalogs.get("font_catalog") or [],
                     },
                     doc_id=file_path,
                 )
@@ -484,40 +1009,78 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                     "file_name": file_path,
                     "source_extension": ".doc",
                     "native_pagination": ("\f" in text),
+                    "native_page_count": int(native_page_count or 0),
+                    "native_catalog": doc_catalogs.get("native_catalog") or [],
+                    "style_catalog": doc_catalogs.get("style_catalog") or [],
+                    "font_catalog": doc_catalogs.get("font_catalog") or [],
                 },
                 doc_id=file_path,
             )
 
         if ext == ".docx":
+            xml_text, xml_has_breaks, docx_catalogs = _extract_docx_structure_from_xml(file_path)
+            uno_text, uno_has_breaks = _extract_office_text_by_uno_pages(file_path)
+            native_page_count = _require_libreoffice_physical_page_count(file_path, ext=".docx")
+            if uno_text and uno_has_breaks:
+                return Document(
+                    text=uno_text,
+                    metadata={
+                        "file_name": file_path,
+                        "source_extension": ".docx",
+                        "native_pagination": True,
+                        "native_page_count": int(native_page_count or 0),
+                        "docx_parser": "libreoffice-uno-pages",
+                        "native_catalog": docx_catalogs.get("native_catalog") or [],
+                        "style_catalog": docx_catalogs.get("style_catalog") or [],
+                        "font_catalog": docx_catalogs.get("font_catalog") or [],
+                    },
+                    doc_id=file_path,
+                )
+            if xml_text and xml_has_breaks:
+                return Document(
+                    text=xml_text,
+                    metadata={
+                        "file_name": file_path,
+                        "source_extension": ".docx",
+                        "native_pagination": True,
+                        "native_page_count": int(native_page_count or 0),
+                        "docx_parser": "docx-xml",
+                        "native_catalog": docx_catalogs.get("native_catalog") or [],
+                        "style_catalog": docx_catalogs.get("style_catalog") or [],
+                        "font_catalog": docx_catalogs.get("font_catalog") or [],
+                    },
+                    doc_id=file_path,
+                )
+
             office_text, has_native_breaks = _extract_office_text_with_page_breaks(file_path)
-            docx_catalogs = _extract_docx_catalog_metadata(file_path)
-            if office_text and has_native_breaks:
+            if office_text:
                 return Document(
                     text=office_text,
                     metadata={
                         "file_name": file_path,
                         "source_extension": ".docx",
-                        "native_pagination": True,
+                        "native_pagination": bool(has_native_breaks),
+                        "native_page_count": int(native_page_count or 0),
                         "docx_parser": "libreoffice-txt",
                         "native_catalog": docx_catalogs.get("native_catalog") or [],
                         "style_catalog": docx_catalogs.get("style_catalog") or [],
+                        "font_catalog": docx_catalogs.get("font_catalog") or [],
                     },
                     doc_id=file_path,
                 )
 
-            paged_text, page_count, page_layout, native_catalog = _extract_office_text_by_pdf_pages(file_path)
-            if paged_text:
+            if xml_text:
                 return Document(
-                    text=paged_text,
+                    text=xml_text,
                     metadata={
                         "file_name": file_path,
                         "source_extension": ".docx",
-                        "native_pagination": True,
-                        "native_page_count": int(page_count),
-                        "docx_parser": "libreoffice+pdf-page-chunks",
-                        "native_catalog": (docx_catalogs.get("native_catalog") or []) + list(native_catalog or []),
+                        "native_pagination": bool(xml_has_breaks),
+                        "native_page_count": int(native_page_count or 0),
+                        "docx_parser": "docx-xml",
+                        "native_catalog": docx_catalogs.get("native_catalog") or [],
                         "style_catalog": docx_catalogs.get("style_catalog") or [],
-                        "page_layout": page_layout,
+                        "font_catalog": docx_catalogs.get("font_catalog") or [],
                     },
                     doc_id=file_path,
                 )
@@ -532,8 +1095,10 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "native_pagination": has_native_breaks,
                         "docx_parser": "mammoth-markdown",
                         "text_format": "markdown",
+                        "native_page_count": int(native_page_count or 0),
                         "native_catalog": docx_catalogs.get("native_catalog") or [],
                         "style_catalog": docx_catalogs.get("style_catalog") or [],
+                        "font_catalog": docx_catalogs.get("font_catalog") or [],
                     },
                     doc_id=file_path,
                 )
@@ -545,9 +1110,11 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "file_name": file_path,
                         "source_extension": ".docx",
                         "native_pagination": has_native_breaks,
+                        "native_page_count": int(native_page_count or 0),
                         "docx_parser": "libreoffice-txt",
                         "native_catalog": docx_catalogs.get("native_catalog") or [],
                         "style_catalog": docx_catalogs.get("style_catalog") or [],
+                        "font_catalog": docx_catalogs.get("font_catalog") or [],
                     },
                     doc_id=file_path,
                 )
@@ -574,12 +1141,15 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
             docx_catalogs = _extract_docx_catalog_metadata(file_path)
             metadata.setdefault("native_catalog", docx_catalogs.get("native_catalog") or [])
             metadata.setdefault("style_catalog", docx_catalogs.get("style_catalog") or [])
+            metadata.setdefault("font_catalog", docx_catalogs.get("font_catalog") or [])
         return Document(
             text=first.text,
             metadata=metadata,
             doc_id=first.doc_id or file_path,
         )
     except Exception as exc:
+        if _NATIVE_PAGE_COUNT_ERROR_PREFIX in str(exc):
+            raise
         logger.warning("Failed to load document %s: %s", file_path, exc)
         return None
 

@@ -118,8 +118,86 @@ def _catalog_tree_lines(nodes: list[Dict[str, Any]], *, indent: int = 0) -> list
     return lines
 
 
+def _first_nonempty_line(text: Any) -> str:
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped[:180]
+    return ""
+
+
+def _last_nonempty_line(text: Any) -> str:
+    lines = str(text or "").splitlines()
+    for line in reversed(lines):
+        stripped = line.strip()
+        if stripped:
+            return stripped[:180]
+    return ""
+
+
+def _display_page_value(node: Dict[str, Any]) -> str:
+    metadata = dict(node.get("metadata") or {})
+    hint = str(metadata.get("page_number_hint") or "").strip()
+    if hint:
+        return hint
+    logical = metadata.get("logical_page")
+    if logical not in (None, ""):
+        return str(logical)
+    page = metadata.get("page")
+    return str(page) if page not in (None, "") else ""
+
+
+def _collect_content_nodes(node: Dict[str, Any], out: list[Dict[str, Any]]) -> None:
+    if str(node.get("category") or "") == "content":
+        out.append(node)
+    for child in list(node.get("children") or []):
+        _collect_content_nodes(child, out)
+
+
+def _collect_chapter_boundary_debug(tree: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    chapter_rows: list[Dict[str, Any]] = []
+
+    def _walk(nodes: list[Dict[str, Any]]) -> None:
+        for node in nodes:
+            if str(node.get("category") or "") == "chapter":
+                content_nodes: list[Dict[str, Any]] = []
+                _collect_content_nodes(node, content_nodes)
+                if content_nodes:
+                    content_nodes.sort(
+                        key=lambda item: int((item.get("metadata") or {}).get("page") or 10**9)
+                    )
+                    first_node = content_nodes[0]
+                    last_node = content_nodes[-1]
+                    first_vars = dict(first_node.get("variables") or {})
+                    last_vars = dict(last_node.get("variables") or {})
+                    first_text = str(first_vars.get("markdown_text") or "")
+                    last_text = str(last_vars.get("markdown_text") or "")
+
+                    chapter_meta = dict(node.get("metadata") or {})
+                    first_meta = dict(first_node.get("metadata") or {})
+                    last_meta = dict(last_node.get("metadata") or {})
+
+                    chapter_rows.append(
+                        {
+                            "chapter_title": str(node.get("title") or ""),
+                            "chapter_start": chapter_meta.get("section_start_page"),
+                            "chapter_end": chapter_meta.get("section_end_page"),
+                            "first_actual_page": first_meta.get("page"),
+                            "first_display_page": _display_page_value(first_node),
+                            "first_line": _first_nonempty_line(first_text),
+                            "last_actual_page": last_meta.get("page"),
+                            "last_display_page": _display_page_value(last_node),
+                            "last_line": _last_nonempty_line(last_text),
+                        }
+                    )
+            _walk(list(node.get("children") or []))
+
+    _walk(list(tree or []))
+    return chapter_rows
+
+
 def _build_payload_from_file(file_path: str) -> Dict[str, Any]:
-    from rag.documents import load_rag_documents_from_paths
+    from rag.documents import load_rag_documents_from_paths, _probe_libreoffice_physical_page_count
 
     source_file = Path(file_path).expanduser().resolve()
     if not source_file.exists() or not source_file.is_file():
@@ -134,10 +212,33 @@ def _build_payload_from_file(file_path: str) -> Dict[str, Any]:
         raise RuntimeError("文档树构建失败：未返回 RAG 文档对象")
 
     rag_doc = rag_docs[0]
-    tree = [_serialize_page_node(node, node_id_prefix="root") for node in rag_doc.get_page_nodes()]
+    page_nodes = list(rag_doc.get_page_nodes() or [])
+    tree = [_serialize_page_node(node, node_id_prefix="root") for node in page_nodes]
+    mono_pages = list(getattr(rag_doc, "get_mono_pages")() or []) if hasattr(rag_doc, "get_mono_pages") else []
+    mono_page_count = len(mono_pages)
+    native_page_count_raw = getattr(rag_doc, "metadata", {}).get("native_page_count") if hasattr(rag_doc, "metadata") else None
+    native_page_count = int(native_page_count_raw or 0) if str(native_page_count_raw or "").strip() else 0
+    runtime_native_page_count = int(_probe_libreoffice_physical_page_count(str(source_file)) or 0)
+    page_count = int(getattr(rag_doc, "page_count", 0) or 0)
+    expected_pages = runtime_native_page_count or native_page_count
+    is_aligned = bool(expected_pages > 0 and mono_page_count == expected_pages and page_count == expected_pages)
     print(f"\n[DocTreeDebug] Structured catalog for: {source_file.name}")
     for line in _catalog_tree_lines(tree):
       print(line)
+
+    chapter_boundary_debug = _collect_chapter_boundary_debug(tree)
+    if chapter_boundary_debug:
+      print("\n[DocTreeDebug] Chapter Boundary Diagnostics")
+      for row in chapter_boundary_debug:
+        print(
+          "- "
+          f"{row.get('chapter_title')} "
+          f"({row.get('chapter_start')}-{row.get('chapter_end')}) | "
+          f"first: actual={row.get('first_actual_page')} display={row.get('first_display_page')} "
+          f"line={row.get('first_line')} | "
+          f"last: actual={row.get('last_actual_page')} display={row.get('last_display_page')} "
+          f"line={row.get('last_line')}"
+        )
 
     payload = {
       "status": "ok",
@@ -145,10 +246,16 @@ def _build_payload_from_file(file_path: str) -> Dict[str, Any]:
       "doc_name": str(getattr(rag_doc, "doc_name", "") or source_file.name),
       "title": str(getattr(rag_doc, "title", "") or source_file.name),
       "pagination_mode": str(getattr(rag_doc, "pagination_mode", "") or ""),
-      "page_count": int(getattr(rag_doc, "page_count", 0) or 0),
+      "page_count": page_count,
+      "mono_page_count": mono_page_count,
+      "native_page_count": native_page_count,
+      "runtime_native_page_count": runtime_native_page_count,
+      "expected_page_count": expected_pages,
+      "is_page_aligned": is_aligned,
       "catalog": _json_safe(getattr(rag_doc, "catalog", []) or []),
       "variables": _page_variable_snapshot(rag_doc),
       "tree": tree,
+      "chapter_boundary_debug": chapter_boundary_debug,
     }
 
     safe_name = _sanitize_filename(source_file.stem)
@@ -156,6 +263,12 @@ def _build_payload_from_file(file_path: str) -> Dict[str, Any]:
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     payload["debug_json_path"] = str(out_path)
     print(f"[DocTreeDebug] JSON sidecar: {out_path}")
+    print(
+      "[DocTreeDebug] Alignment: "
+      f"page_count={page_count}, mono_page_count={mono_page_count}, "
+      f"native_page_count={native_page_count}, runtime_native_page_count={runtime_native_page_count}, "
+      f"expected_page_count={expected_pages}, aligned={is_aligned}"
+    )
 
     return payload
 
@@ -651,14 +764,23 @@ def _build_page_html() -> str:
       payload = data;
       const nodes = collect(payload.tree || []);
       collapsedChapterIds.clear();
+      const aligned = Boolean(payload.is_page_aligned);
       meta.textContent = [
         `doc=${payload.document || ''}`,
         `title=${payload.title || ''}`,
         `doc_name=${payload.doc_name || ''}`,
         `page_count=${payload.page_count || 0}`,
+        `mono_pages=${payload.mono_page_count || 0}`,
+        `native_pages=${payload.native_page_count || 0}`,
+        `runtime_native_pages=${payload.runtime_native_page_count || 0}`,
+        `expected_pages=${payload.expected_page_count || 0}`,
+        `aligned=${aligned ? 'yes' : 'no'}`,
         `pagination=${payload.pagination_mode || ''}`,
         `nodes=${nodes.length}`
       ].join(' | ');
+      if (!aligned && Number(payload.native_page_count || 0) > 0) {
+        setStatus(`页数未对齐: mono=${payload.mono_page_count || 0}, expected=${payload.expected_page_count || payload.native_page_count || 0}`, true);
+      }
 
       selectedNodeId = '';
       renderTree(payload.tree || []);
@@ -671,7 +793,11 @@ def _build_page_html() -> str:
         if (assetsEl) assetsEl.innerHTML = '';
         if (varsEl) varsEl.innerHTML = '';
       }
-      setStatus(`构建完成，节点数: ${nodes.length}`);
+      if (aligned) {
+        setStatus(`构建完成，页数已对齐（mono=${payload.mono_page_count || 0}）`);
+      } else if (Number(payload.native_page_count || 0) <= 0) {
+        setStatus(`构建完成，节点数: ${nodes.length}（未获取物理页数）`);
+      }
     }
 
     fileInput.addEventListener('change', () => {
@@ -724,7 +850,25 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7869)
     parser.add_argument("--no-open", action="store_true", help="启动后不自动打开浏览器")
+    parser.add_argument("--input-file", default="", help="直接构建指定文件并输出结果，不启动 Web")
+    parser.add_argument("--output-json", default="", help="配合 --input-file 使用：将 payload 写入指定 JSON 文件")
+    parser.add_argument("--print-tree", action="store_true", help="配合 --input-file 使用：在终端打印 catalog 树")
     args = parser.parse_args()
+
+    input_file = str(args.input_file or "").strip()
+    if input_file:
+        payload = _build_payload_from_file(input_file)
+        output_json = str(args.output_json or "").strip()
+        if output_json:
+            out_path = Path(output_json).expanduser().resolve()
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"[DocTreeDebug] Payload JSON: {out_path}")
+        if args.print_tree:
+            print("\n[DocTreeDebug] Tree Lines")
+            for line in _catalog_tree_lines(payload.get("tree") or []):
+                print(line)
+        return
 
     if not args.no_open:
         url = f"http://{args.host}:{args.port}"

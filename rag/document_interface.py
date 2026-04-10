@@ -363,6 +363,211 @@ class RAG_DB_Document(Chapter, ABC):
     def allow_heading_detection(self) -> bool:
         return False
 
+    @staticmethod
+    def _cn_numeral_to_int(token: str) -> Optional[int]:
+        text = str(token or "").strip()
+        if not text:
+            return None
+        if text.isdigit():
+            return int(text)
+
+        digits = {
+            "零": 0,
+            "一": 1,
+            "二": 2,
+            "两": 2,
+            "三": 3,
+            "四": 4,
+            "五": 5,
+            "六": 6,
+            "七": 7,
+            "八": 8,
+            "九": 9,
+        }
+        units = {"十": 10, "百": 100, "千": 1000, "万": 10000}
+
+        total = 0
+        section = 0
+        number = 0
+        has_token = False
+        for ch in text:
+            if ch in digits:
+                number = digits[ch]
+                has_token = True
+                continue
+            unit = units.get(ch)
+            if unit is None:
+                return None
+            has_token = True
+            if unit == 10000:
+                section = (section + number) * unit
+                total += section
+                section = 0
+                number = 0
+            else:
+                if number == 0:
+                    number = 1
+                section += number * unit
+                number = 0
+        value = total + section + number
+        if not has_token:
+            return None
+        return value if value > 0 else None
+
+    @classmethod
+    def _top_level_key_from_title(cls, title: str) -> Optional[tuple[str, str]]:
+        text = str(title or "").strip()
+        if not text:
+            return None
+
+        chapter = re.search(r"第\s*([一二三四五六七八九十百千万两0-9]+)\s*章", text)
+        if chapter:
+            number = cls._cn_numeral_to_int(chapter.group(1))
+            if number is not None:
+                return ("chapter", str(number))
+
+        appendix = re.search(r"附录\s*([一二三四五六七八九十百千万两A-Za-z0-9]+)", text)
+        if appendix:
+            token = str(appendix.group(1) or "").strip()
+            number = cls._cn_numeral_to_int(token)
+            if number is not None:
+                return ("appendix", str(number))
+            return ("appendix", token.lower())
+
+        return None
+
+    @classmethod
+    def _top_level_key_from_page_text(cls, page_text: str) -> Optional[tuple[str, str]]:
+        lines = [line.strip() for line in str(page_text or "").splitlines() if line.strip()]
+        for line in lines[:12]:
+            chapter = re.search(r"第\s*([一二三四五六七八九十百千万两0-9]+)\s*章", line)
+            if chapter:
+                number = cls._cn_numeral_to_int(chapter.group(1))
+                if number is not None:
+                    return ("chapter", str(number))
+
+            appendix = re.search(r"附录\s*([一二三四五六七八九十百千万两A-Za-z0-9]+)", line)
+            if appendix:
+                token = str(appendix.group(1) or "").strip()
+                number = cls._cn_numeral_to_int(token)
+                if number is not None:
+                    return ("appendix", str(number))
+                return ("appendix", token.lower())
+
+            sec = re.match(r"^(\d{1,2})\s*[\.、．]\s*", line)
+            if sec:
+                num = int(sec.group(1))
+                if 1 <= num <= 50:
+                    return ("chapter", str(num))
+        return None
+
+    def extend_top_level_ranges_with_page_signals(
+        self,
+        page_texts: Sequence[str],
+        ranges: Sequence[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        base_ranges = [dict(item) for item in list(ranges or [])]
+        if not base_ranges or not page_texts:
+            return base_ranges
+
+        top_level = [item for item in base_ranges if int(self._coerce_positive_int(item.get("level")) or 1) == 1]
+        if not top_level:
+            return base_ranges
+
+        title_by_key: Dict[tuple[str, str], str] = {}
+        for item in top_level:
+            title = str(item.get("title") or "").strip()
+            key = self._top_level_key_from_title(title)
+            if key is not None and key not in title_by_key:
+                title_by_key[key] = title
+
+        if not title_by_key:
+            return base_ranges
+
+        page_to_title: Dict[int, str] = {}
+        current_title = ""
+        for idx, page_text in enumerate(page_texts, start=1):
+            key = self._top_level_key_from_page_text(page_text)
+            if key is not None and key in title_by_key:
+                current_title = title_by_key[key]
+            if current_title:
+                page_to_title[idx] = current_title
+
+        if not page_to_title:
+            return base_ranges
+
+        spans: Dict[str, tuple[int, int]] = {}
+        for page_idx in sorted(page_to_title.keys()):
+            title = page_to_title[page_idx]
+            old = spans.get(title)
+            if old is None:
+                spans[title] = (page_idx, page_idx)
+            else:
+                spans[title] = (min(old[0], page_idx), max(old[1], page_idx))
+
+        for item in base_ranges:
+            level = int(self._coerce_positive_int(item.get("level")) or 1)
+            if level != 1:
+                continue
+            title = str(item.get("title") or "").strip()
+            span = spans.get(title)
+            if span is None:
+                continue
+            start, end = span
+            old_start = int(self._coerce_positive_int(item.get("start")) or start)
+            old_end = int(self._coerce_positive_int(item.get("end")) or old_start)
+            item["start"] = min(old_start, start)
+            item["end"] = max(old_end, end)
+
+        return base_ranges
+
+    def enforce_native_page_count(self, page_texts: Sequence[str]) -> List[str]:
+        pages = [str(item or "").strip() for item in list(page_texts)]
+        if not pages:
+            pages = [""]
+
+        target = self.coerce_page_number(self.metadata.get("native_page_count"))
+        if target is None or target <= 0:
+            return pages
+
+        target = int(target)
+        if len(pages) == target:
+            return pages
+
+        if target == 1:
+            merged = "\n".join(part for part in pages if part).strip()
+            return [merged]
+
+        merged_lines: List[str] = []
+        for part in pages:
+            text = str(part or "").strip()
+            if not text:
+                merged_lines.append("")
+                continue
+            lines = text.splitlines()
+            if lines:
+                merged_lines.extend(lines)
+            else:
+                merged_lines.append(text)
+
+        if not merged_lines:
+            return [""] * target
+
+        total = len(merged_lines)
+        normalized_pages: List[str] = []
+        for idx in range(target):
+            start = int(round(idx * total / target))
+            end = int(round((idx + 1) * total / target))
+            if start >= total:
+                chunk = ""
+            else:
+                chunk = "\n".join(merged_lines[start:end]).strip()
+            normalized_pages.append(chunk)
+
+        if normalized_pages and not normalized_pages[0].strip():
+            normalized_pages[0] = "\n".join(line for line in merged_lines[: max(1, total // target)]).strip()
+        return normalized_pages
+
     def _split_text_chunks(self, text: str) -> List[str]:
         normalized = str(text or "").strip()
         if not normalized:
@@ -400,6 +605,126 @@ class RAG_DB_Document(Chapter, ABC):
             start = next_start
 
         return chunks
+
+    @staticmethod
+    def _parse_page_number_hint(line: str) -> Optional[int]:
+        text = str(line or "").strip()
+        if not text:
+            return None
+
+        explicit_patterns = [
+            r"(?:第\s*)(\d{1,4})(?:\s*页)",
+            r"(?:page\s*)(\d{1,4})",
+            r"(?:p\.?\s*)(\d{1,4})",
+        ]
+        for pat in explicit_patterns:
+            match = re.search(pat, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            value = int(match.group(1))
+            if 1 <= value <= 5000:
+                return value
+
+        compact = re.sub(r"\s+", "", text)
+        if len(compact) <= 6 and re.fullmatch(r"\d{1,4}", compact):
+            value = int(compact)
+            if 1 <= value <= 5000:
+                return value
+        return None
+
+    @staticmethod
+    def _median_int(values: Sequence[int]) -> int:
+        seq = sorted(int(v) for v in values)
+        if not seq:
+            return 0
+        mid = len(seq) // 2
+        if len(seq) % 2 == 1:
+            return seq[mid]
+        return int(round((seq[mid - 1] + seq[mid]) / 2.0))
+
+    def build_page_signals(self, page_texts: Sequence[str], ranges: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        pages = [str(text or "") for text in list(page_texts)]
+        if not pages:
+            return []
+
+        line_sets: List[List[str]] = []
+        first_lines: List[str] = []
+        last_lines: List[str] = []
+        for text in pages:
+            lines = [line.strip() for line in str(text).splitlines() if line.strip()]
+            line_sets.append(lines)
+            first_lines.append(lines[0] if lines else "")
+            last_lines.append(lines[-1] if lines else "")
+
+        head_freq: Dict[str, int] = {}
+        tail_freq: Dict[str, int] = {}
+        for value in first_lines:
+            if value and len(value) <= 120:
+                head_freq[value] = head_freq.get(value, 0) + 1
+        for value in last_lines:
+            if value and len(value) <= 120:
+                tail_freq[value] = tail_freq.get(value, 0) + 1
+
+        signals: List[Dict[str, Any]] = []
+        hint_anchors: List[tuple[int, int]] = []
+        for idx, lines in enumerate(line_sets, start=1):
+            header_text = ""
+            footer_text = ""
+            first_line = lines[0] if lines else ""
+            last_line = lines[-1] if lines else ""
+            if lines:
+                if head_freq.get(first_line, 0) >= 2:
+                    header_text = first_line
+                if tail_freq.get(last_line, 0) >= 2:
+                    footer_text = last_line
+
+            candidates: List[str] = []
+            if footer_text:
+                candidates.append(footer_text)
+            if header_text:
+                candidates.append(header_text)
+            # Strict policy: only inspect likely header/footer lines, never正文区间。
+            if not footer_text and last_line and len(last_line) <= 24:
+                candidates.append(last_line)
+            if not header_text and first_line and len(first_line) <= 24:
+                candidates.append(first_line)
+
+            hint_value: Optional[int] = None
+            for candidate in candidates:
+                hint = self._parse_page_number_hint(candidate)
+                if hint is not None:
+                    hint_value = hint
+                    break
+
+            if hint_value is not None:
+                hint_anchors.append((idx, int(hint_value)))
+
+            signals.append(
+                {
+                    "header_text": header_text,
+                    "footer_text": footer_text,
+                    "page_number_hint": str(hint_value) if hint_value is not None else "",
+                    "hint_page_number": hint_value,
+                    "logical_page_number": idx,
+                }
+            )
+
+        offsets: List[int] = [hint - physical for physical, hint in hint_anchors]
+        offset = 0
+        if offsets and len(offsets) >= 5:
+            min_off = min(offsets)
+            max_off = max(offsets)
+            if max_off - min_off <= 6:
+                offset = self._median_int(offsets)
+
+        for idx, item in enumerate(signals, start=1):
+            hint = item.get("hint_page_number")
+            logical = int(hint) if hint is not None else int(idx + offset)
+            if logical <= 0:
+                logical = idx
+            item["logical_page_number"] = logical
+
+        return signals
 
     @staticmethod
     def _clean_heading_title(line: str) -> str:
@@ -467,9 +792,9 @@ class RAG_DB_Document(Chapter, ABC):
                         "page": page,
                         "level": max(1, min(level, 6)),
                         "kind": key,
+                        "order": len(markers),
                     }
                 )
-        markers.sort(key=lambda item: (int(item["page"]), int(item["level"])))
         return markers
 
     def _extract_markers_from_manual_toc(self, page_texts: Sequence[str]) -> List[Dict[str, Any]]:
@@ -593,14 +918,15 @@ class RAG_DB_Document(Chapter, ABC):
         if not ranges:
             return list(pages)
 
-        normalized_ranges = sorted(
-            list(ranges),
-            key=lambda item: (
-                int(self._coerce_positive_int(item.get("start")) or 10**9),
-                int(self._coerce_positive_int(item.get("level")) or 1),
-                str(item.get("title") or ""),
-            ),
+        indexed_ranges = list(enumerate(list(ranges)))
+        indexed_ranges.sort(
+            key=lambda pair: (
+                int(self._coerce_positive_int(pair[1].get("start")) or 10**9),
+                int(pair[1].get("order", pair[0])),
+                int(self._coerce_positive_int(pair[1].get("level")) or 1),
+            )
         )
+        normalized_ranges = [item for _, item in indexed_ranges]
 
         chapters: List[Chapter] = []
         for idx, item in enumerate(normalized_ranges, start=1):
@@ -611,6 +937,7 @@ class RAG_DB_Document(Chapter, ABC):
                 "section_start_page": item["start"],
                 "section_end_page": item["end"],
                 "level": item["level"],
+                "order": item.get("order", idx - 1),
             }
             chapters.append(Chapter(title=item["title"], metadata=chapter_meta, SubContent=[]))
 
@@ -630,7 +957,7 @@ class RAG_DB_Document(Chapter, ABC):
 
         page_assigned = [False for _ in pages]
         for pidx, page in enumerate(pages, start=1):
-            candidates: List[tuple[int, int, int, Chapter]] = []
+            candidates: List[tuple[int, int, int, int, Chapter]] = []
             for chapter in chapters:
                 start = self._coerce_positive_int(chapter.metadata.get("section_start_page")) or 1
                 end = self._coerce_positive_int(chapter.metadata.get("section_end_page")) or start
@@ -638,14 +965,15 @@ class RAG_DB_Document(Chapter, ABC):
                     continue
                 level = self._coerce_positive_int(chapter.metadata.get("level")) or 1
                 span = max(1, end - start + 1)
-                # Prefer deeper and narrower chapter ranges for deterministic single attachment.
-                candidates.append((int(level), -int(span), -start, chapter))
+                order = self._coerce_positive_int(chapter.metadata.get("order")) or 0
+                # Deterministic policy: deeper level, narrower span, earlier range start, then catalog order.
+                candidates.append((-int(level), int(span), int(start), int(order), chapter))
 
             if not candidates:
                 continue
 
-            candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-            selected = candidates[0][3]
+            candidates.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
+            selected = candidates[0][4]
             page_assigned[pidx - 1] = True
             if not selected.metadata.get("section_path"):
                 selected.metadata["section_path"] = selected.title
@@ -660,6 +988,73 @@ class RAG_DB_Document(Chapter, ABC):
             if not page_assigned[idx]:
                 roots.append(page)
 
+        def _chapter_has_local_assets(chapter: Chapter) -> bool:
+            return bool(
+                chapter.assets.headers
+                or chapter.assets.footers
+                or chapter.assets.annotations
+                or chapter.assets.citations
+                or chapter.assets.page_numbers
+                or chapter.assets.images
+            )
+
+        def _build_synthetic_monopage_from_chapter(chapter: Chapter) -> Content:
+            meta = dict(chapter.metadata or {})
+            section_title = str(meta.get("section_title") or chapter.title or "Untitled")
+            section_path = str(meta.get("section_path") or section_title)
+            start_page = self.coerce_page_number(meta.get("section_start_page"))
+            end_page = self.coerce_page_number(meta.get("section_end_page"))
+            page_no = start_page or end_page or 1
+            mono_meta = {
+                **meta,
+                "section_title": section_title,
+                "section_path": section_path,
+                "section_start_page": start_page or page_no,
+                "section_end_page": end_page or page_no,
+                "page": page_no,
+            }
+            mono = Content(title=section_title, markdown_text=str(chapter.markdown_text or ""), metadata=mono_meta)
+            for item in chapter.assets.headers:
+                mono.add_header(item)
+            for item in chapter.assets.footers:
+                mono.add_footer(item)
+            for item in chapter.assets.annotations:
+                mono.add_annotation(item)
+            for item in chapter.assets.citations:
+                mono.add_citation(item)
+            for item in chapter.assets.page_numbers:
+                mono.add_page_number(item)
+            for item in chapter.assets.images:
+                mono.add_image(item)
+            return mono
+
+        def _prune_empty_chapter_nodes(node: Page) -> Optional[Page]:
+            if not isinstance(node, Chapter):
+                return node
+
+            pruned_children: List[Page] = []
+            for child in list(node.SubContent or []):
+                pruned = _prune_empty_chapter_nodes(child)
+                if pruned is not None:
+                    pruned_children.append(pruned)
+            node.SubContent = pruned_children
+
+            if node.SubContent:
+                return node
+
+            if str(node.markdown_text or "").strip() or _chapter_has_local_assets(node):
+                node.SubContent = [_build_synthetic_monopage_from_chapter(node)]
+                return node
+
+            return None
+
+        normalized_roots: List[Page] = []
+        for root in roots:
+            pruned_root = _prune_empty_chapter_nodes(root)
+            if pruned_root is not None:
+                normalized_roots.append(pruned_root)
+        roots = normalized_roots
+
         def _node_start_page(node: Page) -> int:
             if isinstance(node, MonoPage):
                 metadata = dict(getattr(node, "metadata", {}) or {})
@@ -667,6 +1062,11 @@ class RAG_DB_Document(Chapter, ABC):
                 if value is None:
                     value = self.coerce_page_number(metadata.get("section_start_page"))
                 return int(value or 10**9)
+            if isinstance(node, Chapter):
+                metadata = dict(getattr(node, "metadata", {}) or {})
+                value = self.coerce_page_number(metadata.get("section_start_page"))
+                if value is not None:
+                    return int(value)
             leaves = node.flatten_mono_pages()
             best = 10**9
             for leaf in leaves:
@@ -895,6 +1295,30 @@ class RAG_DB_Document(Chapter, ABC):
     def set_page_nodes(self, page_nodes: Sequence[Page]) -> None:
         self.page_nodes = list(page_nodes)
         self.SubContent = list(page_nodes)
+        self._hydrate_chapter_markdown()
+
+    def _hydrate_chapter_markdown(self) -> None:
+        for node in self.page_nodes:
+            if isinstance(node, Chapter):
+                self._hydrate_chapter_markdown_recursive(node)
+
+    def _hydrate_chapter_markdown_recursive(self, chapter: Chapter) -> str:
+        parts: List[str] = []
+        own_text = str(chapter.markdown_text or "").strip()
+        if own_text:
+            parts.append(own_text)
+
+        for child in chapter.SubContent:
+            if isinstance(child, Chapter):
+                child_text = self._hydrate_chapter_markdown_recursive(child)
+            else:
+                child_text = str(child.markdown_text or "").strip()
+            if child_text:
+                parts.append(child_text)
+
+        merged = "\n\n".join(parts).strip()
+        chapter.markdown_text = merged
+        return merged
 
     def get_page_nodes(self) -> List[Page]:
         if hasattr(self, "page_nodes"):
