@@ -218,7 +218,7 @@ class PDFRAGDocument(RAG_DB_Document):
                     "page": page_idx,
                 }
 
-                node = Content(title=section_title, markdown_text=page_text, metadata=page_meta)
+                node = Content(title="", markdown_text=page_text, metadata=page_meta)
                 node.add_page_number(page_idx)
                 for image_item in item.get("images") or []:
                     node.add_image(str(image_item))
@@ -289,7 +289,7 @@ class PDFRAGDocument(RAG_DB_Document):
                 "page": page_idx,
             }
 
-            node = Content(title=section_title, markdown_text=page_text, metadata=page_meta)
+            node = Content(title="", markdown_text=page_text, metadata=page_meta)
             node.add_page_number(page_idx)
             page_nodes.append(node)
 

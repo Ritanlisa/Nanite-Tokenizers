@@ -34,27 +34,49 @@ class DocRAGDocument(RAG_DB_Document):
             page_texts = [self.cleaned_text.strip()]
         source_page_count = max(1, len(page_texts))
         source_page_texts = list(page_texts)
-        page_texts = self.enforce_native_page_count(page_texts)
+        native_page_count = int(self.coerce_page_number(self.metadata.get("native_page_count")) or 0)
+        if bool(self.metadata.get("native_pagination")) and native_page_count > source_page_count:
+            page_texts = list(source_page_texts) + [""] * (native_page_count - source_page_count)
+            source_page_map = list(range(1, source_page_count + 1)) + list(range(source_page_count + 1, native_page_count + 1))
+        else:
+            page_texts = self.enforce_native_page_count(page_texts)
+            source_page_map = self._map_target_to_source_pages(source_page_count, len(page_texts))
 
         source_ranges = self._extract_structured_catalog_ranges(source_page_texts, source_page_count, source_page_count)
+        main_markers = self._extract_main_compatible_markers(page_texts)
+        main_ranges = self._ranges_from_main_markers(main_markers, len(page_texts))
+        main_section_map = self._extract_main_page_section_map(page_texts)
         page_signals = self.build_page_signals(page_texts, source_ranges)
-        source_page_map = self._map_target_to_source_pages(source_page_count, len(page_texts))
+        start_markers_by_page = self._build_target_page_start_marker_map(source_ranges, source_page_map)
 
         page_nodes: List[Content] = []
         chunks: List[Document] = []
         page_layouts = list(self.metadata.get("page_layout") or [])
         for page_idx, page_text in enumerate(page_texts, start=1):
-            page_markdown = self._render_tabular_lines_to_markdown(page_text)
+            page_markdown = self._render_plaintext_page_to_markdown(
+                page_text,
+                start_markers=start_markers_by_page.get(page_idx, []),
+            )
             signal = page_signals[page_idx - 1] if page_idx - 1 < len(page_signals) else {}
             logical_page = int(signal.get("logical_page_number") or page_idx)
             source_page = source_page_map[page_idx - 1] if page_idx - 1 < len(source_page_map) else page_idx
-            section = self._pick_catalog_section(source_page, source_ranges)
-            if section:
-                section_title = str(section.get("title"))
-                section_path = f"L{section['level']}/{section_title}"
+            source_section = self._pick_catalog_section(source_page, source_ranges)
+            mapped_path = str(main_section_map.get(int(page_idx)) or "").strip()
+            if re.match(r"^(?:document|chunk\s+\d+)$", mapped_path, flags=re.IGNORECASE):
+                mapped_path = ""
+            if mapped_path:
+                mapped_parts = [part.strip() for part in mapped_path.split(" > ") if part.strip()]
+                section_title = mapped_parts[-1] if mapped_parts else mapped_path
+                section_path = mapped_path
+                section_resolver = "main_section_map"
+            elif source_section:
+                section_title = str(source_section.get("title"))
+                section_path = f"L{source_section['level']}/{section_title}"
+                section_resolver = "catalog_range"
             else:
                 section_title = self._guess_page_title(page_text, page_idx)
                 section_path = section_title
+                section_resolver = "guessed"
 
             page_layout = page_layouts[page_idx - 1] if page_idx - 1 < len(page_layouts) and isinstance(page_layouts[page_idx - 1], dict) else {}
             headers = [str(x).strip() for x in list(page_layout.get("headers") or []) if str(x).strip()]
@@ -80,12 +102,16 @@ class DocRAGDocument(RAG_DB_Document):
                 "page": page_idx,
                 "logical_page": logical_page,
                 "source_page": source_page,
+                "source_section_title": str(source_section.get("title") or "") if source_section else "",
+                "source_section_level": int(source_section.get("level") or 0) if source_section else 0,
+                "resolved_section_path": section_path,
+                "section_resolver": section_resolver,
                 "header_text": "\n".join(headers),
                 "footer_text": "\n".join(footers),
                 "page_number_hint": page_number_hint,
                 "image_count": len(images),
             }
-            node = Content(title=section_title, markdown_text=page_markdown, assets=assets, metadata=page_meta)
+            node = Content(title="", markdown_text=page_markdown, assets=assets, metadata=page_meta)
             node.add_page_number(page_idx)
             page_nodes.append(node)
 
@@ -101,7 +127,12 @@ class DocRAGDocument(RAG_DB_Document):
                 )
 
         physical_ranges = self._materialize_physical_ranges_from_pages(page_nodes, source_ranges)
-        self.set_page_nodes(self.build_catalog_tree(page_nodes, physical_ranges))
+        tree_ranges = list(physical_ranges)
+        if not tree_ranges and main_section_map:
+            tree_ranges = self._ranges_from_page_section_map(main_section_map, len(page_texts))
+        if not tree_ranges and main_ranges:
+            tree_ranges = list(main_ranges)
+        self.set_page_nodes(self.build_catalog_tree(page_nodes, tree_ranges))
         self.chunk_documents = chunks
         self.page_count = len(page_nodes)
         self.pagination_mode = "doc-page-tree"
@@ -194,13 +225,29 @@ class DocRAGDocument(RAG_DB_Document):
         total_pages: int,
         source_page_count: int,
     ) -> List[Dict[str, Any]]:
-        priority_keys: List[List[str]] = [["native_catalog"], ["style_catalog"], ["font_catalog"]]
-        for keys in priority_keys:
-            markers = self._extract_markers_from_metadata(keys)
+        should_rescale = int(total_pages or 0) != int(source_page_count or 0)
+        manual_markers = self._extract_markers_from_manual_toc(page_texts)
+        if not manual_markers and self.cleaned_text.strip():
+            manual_markers = self._extract_markers_from_manual_toc([self.cleaned_text])
+
+        candidate_sets: List[tuple[str, List[Dict[str, Any]]]] = [
+            ("native_catalog", self._extract_markers_from_metadata(["native_catalog"])),
+            ("manual_toc", manual_markers),
+            ("style_catalog", self._extract_markers_from_metadata(["style_catalog"])),
+            ("font_catalog", self._extract_markers_from_metadata(["font_catalog"])),
+        ]
+        for source_name, raw_markers in candidate_sets:
+            markers = [dict(item) for item in list(raw_markers or [])]
             if not markers:
                 continue
-            markers = self._rescale_marker_pages_if_needed(markers, source_page_count, total_pages)
+            for idx, item in enumerate(markers):
+                item.setdefault("order", idx)
+            if should_rescale and source_name in {"style_catalog", "font_catalog"}:
+                markers = self._rescale_marker_pages_if_needed(markers, source_page_count, total_pages)
+            # DOC/DOCX 的目录页码通常来自目录区显示页码或样式页码，始终需要映射回正文物理页。
             markers = self._remap_markers_with_top_level_anchors(markers, page_texts, total_pages)
+            markers = self._remap_markers_with_text_hits(markers, page_texts, total_pages)
+            markers = self._prune_unmatched_tail_markers(markers, page_texts)
             ranges = self._ranges_from_raw_markers(markers, total_pages)
             if ranges and self._has_informative_page_span(ranges, total_pages):
                 return ranges
@@ -633,7 +680,7 @@ class DocRAGDocument(RAG_DB_Document):
 
             ranges: List[Dict[str, Any]] = []
             for idx, row in enumerate(catalog_rows):
-                title = self._clean_range_title(row["title"])
+                title = str(row["title"] or "").strip()
                 if not title:
                     continue
                 start = int(row["start"])
@@ -653,7 +700,7 @@ class DocRAGDocument(RAG_DB_Document):
         try:
             repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
             proc = subprocess.run(
-                ["git", "-C", repo_root, "show", "main:rag/document_pdf.py"],
+                ["git", "-C", repo_root, "show", "main:rag/document_doc.py"],
                 check=True,
                 capture_output=True,
                 text=True,
@@ -663,10 +710,10 @@ class DocRAGDocument(RAG_DB_Document):
                 return None
             module_name = "_main_branch_rag_document_pdf_runtime_for_doc"
             module = types.ModuleType(module_name)
-            module.__file__ = "main:rag/document_pdf.py"
+            module.__file__ = "main:rag/document_doc.py"
             sys.modules[module_name] = module
             exec(compile(source, module.__file__, "exec"), module.__dict__)
-            return getattr(module, "PDFRAGDocument", None)
+            return getattr(module, "DocRAGDocument", None)
         except Exception:
             return None
 
@@ -781,11 +828,11 @@ class DocRAGDocument(RAG_DB_Document):
 
     @staticmethod
     def _guess_page_title(page_text: str, page_number: int) -> str:
+        if page_number == 1:
+            return "封面"
         lines = [line.strip() for line in str(page_text or "").splitlines() if line and line.strip()]
         if not lines:
-            if page_number <= 2:
-                return "封面"
-            return f"Page {page_number}"
+            return ""
         first = re.sub(r"[·•.]{6,}.*$", "", lines[0]).strip()
         if "目录" in first or first.lower().startswith("contents"):
             return "目录"

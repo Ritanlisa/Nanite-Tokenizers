@@ -44,7 +44,7 @@ class TextRAGDocument(RAG_DB_Document):
                 "section_end_page": page_idx,
                 "page": page_idx,
             }
-            node = Content(title=section_title, markdown_text=page_text, metadata=page_meta)
+            node = Content(title="", markdown_text=page_text, metadata=page_meta)
             node.add_page_number(page_idx)
             page_nodes.append(node)
 

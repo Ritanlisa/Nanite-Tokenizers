@@ -137,8 +137,23 @@ with tempfile.TemporaryDirectory(prefix="lo_uno_profile_") as profile_dir:
         doc = desktop.loadComponentFromURL(uno.systemPathToFileUrl(os.path.abspath(path)), "_blank", 0, props)
         try:
             cursor = doc.getCurrentController().getViewCursor()
-            cursor.jumpToLastPage()
-            page_count = int(cursor.getPage() or 0)
+            if not cursor.jumpToPage(1):
+                print(0)
+                raise SystemExit(0)
+            page_count = 0
+            seen = set()
+            while True:
+                current = int(cursor.getPage() or 0)
+                if current <= 0 or current in seen:
+                    break
+                seen.add(current)
+                page_count += 1
+                try:
+                    moved = bool(cursor.jumpToNextPage())
+                except Exception:
+                    moved = False
+                if not moved:
+                    break
         except Exception:
             page_count = 0
         print(page_count if page_count > 0 else 0)
@@ -242,13 +257,18 @@ with tempfile.TemporaryDirectory(prefix="lo_uno_pages_") as profile_dir:
         doc = desktop.loadComponentFromURL(uno.systemPathToFileUrl(os.path.abspath(path)), "_blank", 0, props)
         try:
             vc = doc.getCurrentController().getViewCursor()
-            vc.jumpToLastPage()
-            page_count = int(vc.getPage() or 0)
             page_texts = []
-            for page_no in range(1, max(1, page_count) + 1):
+            if not vc.jumpToPage(1):
+                print("")
+                raise SystemExit(0)
+            seen = set()
+            while True:
+                current_page = int(vc.getPage() or 0)
+                if current_page <= 0 or current_page in seen:
+                    break
+                seen.add(current_page)
                 text = ""
                 try:
-                    vc.jumpToPage(page_no)
                     vc.jumpToStartOfPage()
                     start = vc.getStart()
                     vc.jumpToEndOfPage()
@@ -259,6 +279,12 @@ with tempfile.TemporaryDirectory(prefix="lo_uno_pages_") as profile_dir:
                 except Exception:
                     text = ""
                 page_texts.append(text.strip())
+                try:
+                    moved = bool(vc.jumpToNextPage())
+                except Exception:
+                    moved = False
+                if not moved:
+                    break
             print("\\n\\f\\n".join(page_texts).strip())
         finally:
             try:

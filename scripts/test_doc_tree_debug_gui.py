@@ -85,7 +85,7 @@ def _page_variable_snapshot(page: Any) -> Dict[str, Any]:
 
 
 def _serialize_page_node(page: Any, node_id_prefix: str = "node") -> Dict[str, Any]:
-    title = str(getattr(page, "title", "") or "Untitled")
+    title = str(getattr(page, "title", "") or "")
     category = str(getattr(page, "category", "") or "unknown")
     children = list(getattr(page, "SubContent", []) or [])
 
@@ -110,7 +110,7 @@ def _catalog_tree_lines(nodes: list[Dict[str, Any]], *, indent: int = 0) -> list
         start = meta.get("section_start_page") or meta.get("page") or "?"
         end = meta.get("section_end_page") or start
         cls = str(node.get("class_name") or "Page")
-        title = str(node.get("title") or "Untitled")
+        title = str(node.get("title") or "")
         lines.append(f"{'  ' * indent}- [{cls}] {title} ({start}-{end})")
         children = node.get("children") or []
         if isinstance(children, list) and children:
@@ -196,7 +196,71 @@ def _collect_chapter_boundary_debug(tree: list[Dict[str, Any]]) -> list[Dict[str
     return chapter_rows
 
 
-def _build_payload_from_file(file_path: str) -> Dict[str, Any]:
+def _build_pipeline_debug(rag_doc: Any) -> Dict[str, Any]:
+    debug: Dict[str, Any] = {
+        "doc_parser": str(getattr(rag_doc, "metadata", {}).get("doc_parser") or ""),
+        "docx_parser": str(getattr(rag_doc, "metadata", {}).get("docx_parser") or ""),
+        "native_catalog_count": len(list(getattr(rag_doc, "metadata", {}).get("native_catalog") or [])),
+        "style_catalog_count": len(list(getattr(rag_doc, "metadata", {}).get("style_catalog") or [])),
+        "font_catalog_count": len(list(getattr(rag_doc, "metadata", {}).get("font_catalog") or [])),
+    }
+
+    cleaned_text = str(getattr(rag_doc, "cleaned_text", "") or "")
+    if not cleaned_text:
+        return debug
+
+    raw_pages = [part.strip() for part in cleaned_text.split("\f")]
+    source_page_texts = [part for part in raw_pages]
+    if not source_page_texts:
+        source_page_texts = [cleaned_text.strip()]
+    debug["source_page_count"] = len(source_page_texts)
+
+    if hasattr(rag_doc, "enforce_native_page_count"):
+        page_texts = list(getattr(rag_doc, "enforce_native_page_count")(source_page_texts))
+    else:
+        page_texts = list(source_page_texts)
+    debug["target_page_count"] = len(page_texts)
+
+    if hasattr(rag_doc, "_extract_structured_catalog_ranges"):
+        try:
+            source_ranges = getattr(rag_doc, "_extract_structured_catalog_ranges")(
+                source_page_texts,
+                len(source_page_texts),
+                len(source_page_texts),
+            )
+            debug["source_ranges"] = _json_safe(source_ranges)
+        except Exception as exc:
+            debug["source_ranges_error"] = str(exc)
+
+    if hasattr(rag_doc, "_extract_main_compatible_markers"):
+        try:
+            main_markers = getattr(rag_doc, "_extract_main_compatible_markers")(page_texts)
+            debug["main_markers"] = _json_safe(main_markers)
+        except Exception as exc:
+            debug["main_markers_error"] = str(exc)
+
+    if hasattr(rag_doc, "_ranges_from_main_markers") and "main_markers" in debug:
+        try:
+            main_ranges = getattr(rag_doc, "_ranges_from_main_markers")(list(debug.get("main_markers") or []), len(page_texts))
+            debug["main_ranges"] = _json_safe(main_ranges)
+        except Exception as exc:
+            debug["main_ranges_error"] = str(exc)
+
+    if hasattr(rag_doc, "_extract_main_page_section_map"):
+        try:
+            main_section_map = getattr(rag_doc, "_extract_main_page_section_map")(page_texts)
+            debug["main_section_map"] = _json_safe(main_section_map)
+            if hasattr(rag_doc, "_ranges_from_page_section_map"):
+                debug["main_section_ranges"] = _json_safe(
+                    getattr(rag_doc, "_ranges_from_page_section_map")(main_section_map, len(page_texts))
+                )
+        except Exception as exc:
+            debug["main_section_map_error"] = str(exc)
+
+    return debug
+
+
+def _build_payload_from_file(file_path: str, *, include_build_debug: bool = False) -> Dict[str, Any]:
     from rag.documents import load_rag_documents_from_paths, _probe_libreoffice_physical_page_count
 
     source_file = Path(file_path).expanduser().resolve()
@@ -257,6 +321,8 @@ def _build_payload_from_file(file_path: str) -> Dict[str, Any]:
       "tree": tree,
       "chapter_boundary_debug": chapter_boundary_debug,
     }
+    if include_build_debug:
+      payload["build_debug"] = _build_pipeline_debug(rag_doc)
 
     safe_name = _sanitize_filename(source_file.stem)
     out_path = DEBUG_JSON_DIR / f"{safe_name}_{uuid.uuid4().hex[:8]}.json"
@@ -853,11 +919,12 @@ def main() -> None:
     parser.add_argument("--input-file", default="", help="直接构建指定文件并输出结果，不启动 Web")
     parser.add_argument("--output-json", default="", help="配合 --input-file 使用：将 payload 写入指定 JSON 文件")
     parser.add_argument("--print-tree", action="store_true", help="配合 --input-file 使用：在终端打印 catalog 树")
+    parser.add_argument("--include-build-debug", action="store_true", help="配合 --input-file 使用：输出构建过程中的 marker/range/section-map 调试信息")
     args = parser.parse_args()
 
     input_file = str(args.input_file or "").strip()
     if input_file:
-        payload = _build_payload_from_file(input_file)
+        payload = _build_payload_from_file(input_file, include_build_debug=bool(args.include_build_debug))
         output_json = str(args.output_json or "").strip()
         if output_json:
             out_path = Path(output_json).expanduser().resolve()
