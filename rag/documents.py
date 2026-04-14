@@ -133,8 +133,11 @@ with tempfile.TemporaryDirectory(prefix="lo_uno_profile_") as profile_dir:
             raise SystemExit(0)
 
         desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
-        props = (PropertyValue("Hidden", 0, True, 0),)
+        props = (PropertyValue("Hidden", 0, True, 0), PropertyValue("ReadOnly", 0, True, 0))
         doc = desktop.loadComponentFromURL(uno.systemPathToFileUrl(os.path.abspath(path)), "_blank", 0, props)
+        if doc is None:
+            print(0)
+            raise SystemExit(0)
         try:
             cursor = doc.getCurrentController().getViewCursor()
             if not cursor.jumpToPage(1):
@@ -188,10 +191,14 @@ with tempfile.TemporaryDirectory(prefix="lo_uno_profile_") as profile_dir:
         return 0
 
 
-def _require_libreoffice_physical_page_count(file_path: str, *, ext: str) -> int:
+def _require_libreoffice_physical_page_count(file_path: str, *, ext: str, fallback_counts: Optional[Sequence[int]] = None) -> int:
     value = int(_probe_libreoffice_physical_page_count(file_path) or 0)
     if value > 0:
         return value
+    for fallback in list(fallback_counts or []):
+        count = int(fallback or 0)
+        if count > 0:
+            return count
     raise RuntimeError(
         f"{_NATIVE_PAGE_COUNT_ERROR_PREFIX} "
         f"无法获取 {ext} 文档的 LibreOffice 物理页数。"
@@ -253,8 +260,11 @@ with tempfile.TemporaryDirectory(prefix="lo_uno_pages_") as profile_dir:
             raise SystemExit(0)
 
         desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
-        props = (PropertyValue("Hidden", 0, True, 0),)
+        props = (PropertyValue("Hidden", 0, True, 0), PropertyValue("ReadOnly", 0, True, 0))
         doc = desktop.loadComponentFromURL(uno.systemPathToFileUrl(os.path.abspath(path)), "_blank", 0, props)
+        if doc is None:
+            print("")
+            raise SystemExit(0)
         try:
             vc = doc.getCurrentController().getViewCursor()
             page_texts = []
@@ -268,21 +278,22 @@ with tempfile.TemporaryDirectory(prefix="lo_uno_pages_") as profile_dir:
                     break
                 seen.add(current_page)
                 text = ""
+                moved = False
                 try:
                     vc.jumpToStartOfPage()
                     start = vc.getStart()
-                    vc.jumpToEndOfPage()
-                    end = vc.getEnd()
+                    moved = bool(vc.jumpToNextPage())
+                    if moved:
+                        vc.jumpToStartOfPage()
+                        end = vc.getStart()
+                    else:
+                        end = doc.Text.getEnd()
                     cursor = doc.Text.createTextCursorByRange(start)
                     cursor.gotoRange(end, True)
                     text = str(cursor.getString() or "")
                 except Exception:
                     text = ""
                 page_texts.append(text.strip())
-                try:
-                    moved = bool(vc.jumpToNextPage())
-                except Exception:
-                    moved = False
                 if not moved:
                     break
             print("\\n\\f\\n".join(page_texts).strip())
@@ -943,7 +954,15 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
             xml_text, xml_has_breaks, doc_catalogs = _extract_doc_text_via_converted_docx(file_path)
             uno_text, uno_has_breaks = _extract_office_text_by_uno_pages(file_path)
             office_text, has_native_breaks = _extract_office_text_with_page_breaks(file_path)
-            native_page_count = _require_libreoffice_physical_page_count(file_path, ext=".doc")
+            native_page_count = _require_libreoffice_physical_page_count(
+                file_path,
+                ext=".doc",
+                fallback_counts=[
+                    len(uno_text.split("\f")) if uno_has_breaks and uno_text else 0,
+                    len(xml_text.split("\f")) if xml_has_breaks and xml_text else 0,
+                    len(office_text.split("\f")) if has_native_breaks and office_text else 0,
+                ],
+            )
             if uno_text and uno_has_breaks:
                 return Document(
                     text=uno_text,
@@ -1046,7 +1065,14 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
         if ext == ".docx":
             xml_text, xml_has_breaks, docx_catalogs = _extract_docx_structure_from_xml(file_path)
             uno_text, uno_has_breaks = _extract_office_text_by_uno_pages(file_path)
-            native_page_count = _require_libreoffice_physical_page_count(file_path, ext=".docx")
+            native_page_count = _require_libreoffice_physical_page_count(
+                file_path,
+                ext=".docx",
+                fallback_counts=[
+                    len(uno_text.split("\f")) if uno_has_breaks and uno_text else 0,
+                    len(xml_text.split("\f")) if xml_has_breaks and xml_text else 0,
+                ],
+            )
             if uno_text and uno_has_breaks:
                 return Document(
                     text=uno_text,

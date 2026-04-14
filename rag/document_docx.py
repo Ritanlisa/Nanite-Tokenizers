@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from llama_index.core import Document
 
-from rag.document_interface import Content, PageAssets, RAG_DB_Document
+from rag.document_interface import MonoPage, PageAssets, RAG_DB_Document
 from rag.preprocessor import clean_document
 
 try:
@@ -78,14 +78,10 @@ class DocxRAGDocument(RAG_DB_Document):
         page_signals = self.build_page_signals(page_texts, source_ranges)
         start_markers_by_page = self._build_target_page_start_marker_map(source_ranges, source_page_map)
 
-        page_nodes: List[Content] = []
+        page_nodes: List[MonoPage] = []
         chunks: List[Document] = []
         page_layouts = list(self.metadata.get("page_layout") or [])
         for page_idx, page_text in enumerate(page_texts, start=1):
-            page_markdown = self._render_plaintext_page_to_markdown(
-                page_text,
-                start_markers=start_markers_by_page.get(page_idx, []),
-            )
             signal = page_signals[page_idx - 1] if page_idx - 1 < len(page_signals) else {}
             logical_page = int(signal.get("logical_page_number") or page_idx)
             source_page = source_page_map[page_idx - 1] if page_idx - 1 < len(source_page_map) else page_idx
@@ -114,7 +110,15 @@ class DocxRAGDocument(RAG_DB_Document):
             footers = [str(x).strip() for x in list(page_layout.get("footers") or []) if str(x).strip()]
             if not footers and str(signal.get("footer_text") or "").strip():
                 footers = [str(signal.get("footer_text") or "").strip()]
-            images = [str(x).strip() for x in list(page_layout.get("images") or []) if str(x).strip()]
+            images = self.resolve_page_images(
+                page_text,
+                [str(x).strip() for x in list(page_layout.get("images") or []) if str(x).strip()],
+            )
+            page_markdown = self._render_plaintext_page_to_markdown(
+                page_text,
+                start_markers=start_markers_by_page.get(page_idx, []),
+                page_number=page_idx,
+            )
             page_number_hint = str(page_layout.get("page_number") or "").strip()
             if not page_number_hint:
                 page_number_hint = str(signal.get("page_number_hint") or "").strip()
@@ -141,7 +145,13 @@ class DocxRAGDocument(RAG_DB_Document):
                 "page_number_hint": page_number_hint,
                 "image_count": len(images),
             }
-            node = Content(title="", markdown_text=page_markdown, assets=assets, metadata=page_meta)
+            node = self.create_mono_page_node(
+                page_number=page_idx,
+                page_text=page_text,
+                markdown_text=page_markdown,
+                assets=assets,
+                metadata=page_meta,
+            )
             node.add_page_number(page_idx)
             page_nodes.append(node)
 
@@ -181,7 +191,7 @@ class DocxRAGDocument(RAG_DB_Document):
 
     def _materialize_physical_ranges_from_pages(
         self,
-        pages: List[Content],
+        pages: List[MonoPage],
         source_ranges: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         source_to_pages: Dict[int, List[int]] = {}
@@ -732,6 +742,14 @@ class DocxRAGDocument(RAG_DB_Document):
         lines = [line.strip() for line in str(page_text or "").splitlines() if line and line.strip()]
         if not lines:
             return ""
+        toc_hits = sum(
+            1
+            for line in lines[:48]
+            if re.match(r"^(.{1,200}?)(?:\s*\|\s*|\t+|[·•.]{2,}|\s{2,})(\d{1,4}|[IVXLCDM]{1,8})\s*\|?\s*$", line, flags=re.IGNORECASE)
+        )
+        first_compact = re.sub(r"\s+", "", lines[0]).lower()
+        if first_compact in {"目录", "目錄", "contents", "tableofcontents", "toc"} or toc_hits >= 2:
+            return "目录"
         first = re.sub(r"[·•.]{6,}.*$", "", lines[0]).strip()
         if "目录" in first or first.lower().startswith("contents"):
             return "目录"

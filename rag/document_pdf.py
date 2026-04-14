@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from llama_index.core import Document
 
-from rag.document_interface import Content, RAG_DB_Document
+from rag.document_interface import MonoPage, RAG_DB_Document
 from rag.preprocessor import clean_document
 
 try:
@@ -189,7 +189,7 @@ class PDFRAGDocument(RAG_DB_Document):
                 )
                 ranges = self.derive_catalog_ranges(fallback_markers, len(page_texts))
 
-            page_nodes: List[Content] = []
+            page_nodes: List[MonoPage] = []
             chunks: List[Document] = []
             for fallback_idx, item in enumerate(tool_pages, start=1):
                 page_text = str(item.get("text") or "")
@@ -218,7 +218,12 @@ class PDFRAGDocument(RAG_DB_Document):
                     "page": page_idx,
                 }
 
-                node = Content(title="", markdown_text=page_text, metadata=page_meta)
+                node = self.create_mono_page_node(
+                    page_number=int(page_idx),
+                    page_text=page_text,
+                    markdown_text=page_text,
+                    metadata=page_meta,
+                )
                 node.add_page_number(page_idx)
                 for image_item in item.get("images") or []:
                     node.add_image(str(image_item))
@@ -265,7 +270,7 @@ class PDFRAGDocument(RAG_DB_Document):
             )
             ranges = self.derive_catalog_ranges(fallback_markers, len(page_texts))
 
-        page_nodes: List[Content] = []
+        page_nodes: List[MonoPage] = []
         chunks: List[Document] = []
         for page_idx, page_text in enumerate(page_texts, start=1):
             mapped_path = str(main_section_map.get(int(page_idx)) or "").strip()
@@ -289,7 +294,12 @@ class PDFRAGDocument(RAG_DB_Document):
                 "page": page_idx,
             }
 
-            node = Content(title="", markdown_text=page_text, metadata=page_meta)
+            node = self.create_mono_page_node(
+                page_number=page_idx,
+                page_text=page_text,
+                markdown_text=page_text,
+                metadata=page_meta,
+            )
             node.add_page_number(page_idx)
             page_nodes.append(node)
 

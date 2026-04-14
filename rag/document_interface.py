@@ -634,6 +634,9 @@ class RAG_DB_Document(Chapter, ABC):
             value = int(compact)
             if 1 <= value <= 5000:
                 return value
+        roman = RAG_DB_Document._roman_numeral_to_int(compact)
+        if roman is not None and 1 <= roman <= 5000:
+            return roman
         return None
 
     @staticmethod
@@ -735,7 +738,7 @@ class RAG_DB_Document(Chapter, ABC):
         text = str(line or "").strip()
         text = re.sub(r"^\s*#{1,6}\s*", "", text)
         text = re.sub(r"\s+", " ", text)
-        text = re.sub(r"(?:\t+|[·•.]{2,}|\s{2,})\d{1,4}\s*$", "", text)
+        text = re.sub(r"(?:\t+|[·•.]{2,}|\s{2,})(?:\d{1,4}|[IVXLCDMivxlcdm]{1,8})\s*$", "", text)
         return text.strip()
 
     @staticmethod
@@ -747,38 +750,72 @@ class RAG_DB_Document(Chapter, ABC):
 
     @staticmethod
     def _is_noise_heading_line(line: str) -> bool:
-        text = str(line or "").strip().lower()
+        text = re.sub(r"\s+", "", str(line or "").strip().lower())
         if not text:
             return True
-        noise = {"目录", "contents", "table of contents", "toc"}
+        noise = {"目录", "目錄", "contents", "tableofcontents", "toc"}
         return text in noise
+
+    @staticmethod
+    def _is_catalogue_keyword(line: str) -> bool:
+        text = re.sub(r"\s+", "", str(line or "").strip().lower())
+        if not text:
+            return False
+        return text in {"目录", "目錄", "contents", "tableofcontents", "toc"}
+
+    @classmethod
+    def _parse_toc_entry_line(cls, line: str) -> Optional[Dict[str, Any]]:
+        text = str(line or "").strip()
+        if not text:
+            return None
+
+        normalized = text.strip("|").strip()
+        patterns = [
+            r"^(.{1,200}?)(?:\s*\|\s*|\t+|[·•.]{2,}|\s{2,})(\d{1,4}|[IVXLCDM]{1,8})\s*\|?\s*$",
+            r"^(.{1,200}?)\s+(\d{1,4}|[IVXLCDM]{1,8})\s*$",
+        ]
+        match = None
+        for pattern in patterns:
+            match = re.match(pattern, normalized, flags=re.IGNORECASE)
+            if match:
+                break
+        if not match:
+            return None
+
+        title = cls._clean_heading_title(match.group(1))
+        page = cls.coerce_page_number(match.group(2))
+        if not title or page is None or cls._is_noise_heading_line(title):
+            return None
+
+        level = cls._heading_level(title) or 1
+        return {
+            "title": title,
+            "page": int(page),
+            "level": max(1, min(int(level), 6)),
+        }
 
     @classmethod
     def _looks_like_toc_entry_line(cls, line: str) -> bool:
-        text = str(line or "").strip()
-        if not text:
+        row = cls._parse_toc_entry_line(line)
+        if row is None:
             return False
-
-        table_match = re.match(r"^\|\s*(.+?)\s*\|\s*([ivxlcdm]+|\d{1,4})\s*\|?$", text, flags=re.IGNORECASE)
-        if table_match:
-            title = cls._clean_heading_title(table_match.group(1))
-            return bool(title) and not cls._is_noise_heading_line(title)
-
-        manual_match = re.match(
-            r"^\s*([\u4e00-\u9fffA-Za-z0-9][^\n]{1,140}?)(?:\t+|[·•.\s]{2,})([ivxlcdm]+|\d{1,4})\s*$",
-            text,
-            flags=re.IGNORECASE,
-        )
-        if not manual_match:
-            return False
-
-        title = cls._clean_heading_title(manual_match.group(1))
-        if not title or cls._is_noise_heading_line(title):
-            return False
-
+        title = str(row.get("title") or "")
         if cls._heading_level(title) is not None:
             return True
         return bool(re.match(r"^(?:第[一二三四五六七八九十百千万0-9]+[章节部分篇]|附录|\d+(?:\.\d+){0,5})", title))
+
+    def _looks_like_catalogue_page(self, page_text: str) -> bool:
+        lines = [line.strip() for line in str(page_text or "").splitlines() if line and line.strip()]
+        if not lines:
+            return False
+
+        first_line = lines[0]
+        toc_hits = sum(1 for line in lines[:48] if self._parse_toc_entry_line(line) is not None)
+        if self._is_catalogue_keyword(first_line):
+            return True
+        if toc_hits >= 4:
+            return True
+        return toc_hits >= 2 and toc_hits * 2 >= min(len(lines), 12)
 
     @classmethod
     def _heading_level(cls, line: str) -> Optional[int]:
@@ -840,22 +877,14 @@ class RAG_DB_Document(Chapter, ABC):
 
         markers: List[Dict[str, Any]] = []
         for raw in lines:
-            text = str(raw or "").strip()
-            if not text:
+            row = self._parse_toc_entry_line(raw)
+            if row is None:
                 continue
-            match = re.match(r"^\s*([\u4e00-\u9fffA-Za-z0-9][^\n]{1,140}?)(?:\t+|[·•.\s]{2,})(\d{1,4})\s*$", text)
-            if not match:
-                continue
-            title = self._clean_heading_title(match.group(1))
-            page = self._coerce_positive_int(match.group(2))
-            if not title or page is None or self._is_noise_heading_line(title):
-                continue
-            level = self._heading_level(title) or 1
             markers.append(
                 {
-                    "title": title,
-                    "page": page,
-                    "level": max(1, min(level, 6)),
+                    "title": str(row.get("title") or ""),
+                    "page": int(row.get("page") or 1),
+                    "level": int(row.get("level") or 1),
                     "kind": "manual-toc",
                 }
             )
@@ -1129,32 +1158,66 @@ class RAG_DB_Document(Chapter, ABC):
         if not text.strip():
             return ""
 
-        ordered_paren = re.match(r"^\s*[（(](\d+)[）)]\s*(.+)$", text)
-        if ordered_paren:
-            return f"{ordered_paren.group(1)}. {ordered_paren.group(2).strip()}"
-
-        ordered = re.match(r"^\s*(\d+)[）)]\s*(.+)$", text)
-        if ordered:
-            return f"{ordered.group(1)}. {ordered.group(2).strip()}"
-
         bullet = re.match(r"^\s*[•●▪■◆◇·]\s*(.+)$", text)
         if bullet:
             return f"- {bullet.group(1).strip()}"
 
         return text
 
+    @classmethod
+    def _extract_figure_captions(cls, text: str) -> List[str]:
+        captions: List[str] = []
+        seen: Set[str] = set()
+        for raw in str(text or "").splitlines():
+            line = str(raw or "").strip()
+            if not line or len(line) > 160:
+                continue
+            if not re.match(r"^(?:图|figure)\s*[A-Za-z0-9一二三四五六七八九十百千万\-‐‑–—.]*\s*[:：]?\s*.+$", line, flags=re.IGNORECASE):
+                continue
+            key = cls._normalized_heading_text(line)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            captions.append(line)
+        return captions
+
+    def resolve_page_images(self, page_text: str, existing_images: Optional[Sequence[str]] = None) -> List[str]:
+        resolved: List[str] = []
+        seen: Set[str] = set()
+        for item in list(existing_images or []):
+            text = str(item or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            resolved.append(text)
+
+        for caption in self._extract_figure_captions(page_text):
+            marker = f"figure: {caption}"
+            if marker in seen:
+                continue
+            seen.add(marker)
+            resolved.append(marker)
+        return resolved
+
     def _render_plaintext_page_to_markdown(
         self,
         text: str,
         *,
         start_markers: Optional[Sequence[Dict[str, Any]]] = None,
+        page_number: Optional[int] = None,
     ) -> str:
         markers = [dict(item) for item in list(start_markers or []) if str(item.get("title") or "").strip()]
+        figure_captions = self._extract_figure_captions(text)
 
         def _marker_key(item: Dict[str, Any]) -> str:
             return self._normalized_heading_text(self._clean_heading_title(str(item.get("title") or "")))
 
         marker_keys = {_marker_key(item): item for item in markers if _marker_key(item)}
+        figure_keys = {
+            self._normalized_heading_text(caption): (idx, caption)
+            for idx, caption in enumerate(figure_captions, start=1)
+            if self._normalized_heading_text(caption)
+        }
         consumed: Set[str] = set()
         normalized_lines: List[str] = []
         for raw in str(text or "").splitlines():
@@ -1178,20 +1241,44 @@ class RAG_DB_Document(Chapter, ABC):
 
         lines = prepend + normalized_lines if prepend else normalized_lines
         out: List[str] = []
+        emitted_figures: Set[str] = set()
         i = 0
         while i < len(lines):
             line = lines[i]
+            stripped_line = str(line or "").strip()
+            figure_key = self._normalized_heading_text(stripped_line)
+            figure_info = figure_keys.get(figure_key)
+            if figure_info is not None and figure_key not in emitted_figures:
+                figure_idx, caption = figure_info
+                page_token = int(page_number or 0) if page_number else 0
+                out.append(f"![{caption}](image://page-{page_token}/{figure_idx})")
+                emitted_figures.add(figure_key)
+
             cells = [cell.strip() for cell in str(line).split("\t") if cell.strip()]
             if len(cells) >= 2:
+                block_lines: List[str] = [str(line)]
                 table_rows: List[List[str]] = [cells]
-                i += 1
-                while i < len(lines):
-                    next_cells = [cell.strip() for cell in str(lines[i]).split("\t") if cell.strip()]
+                probe_idx = i + 1
+                while probe_idx < len(lines):
+                    next_line = str(lines[probe_idx])
+                    next_cells = [cell.strip() for cell in next_line.split("\t") if cell.strip()]
                     if len(next_cells) >= 2:
+                        block_lines.append(next_line)
                         table_rows.append(next_cells)
-                        i += 1
+                        probe_idx += 1
                     else:
                         break
+
+                toc_like_count = sum(
+                    1
+                    for row in block_lines
+                    if self._looks_like_toc_entry_line(row) or self._is_catalogue_keyword(row)
+                )
+                if toc_like_count >= max(1, len(block_lines) - 1):
+                    for row in block_lines:
+                        out.append(re.sub(r"\t+", "    ", str(row).rstrip()))
+                    i = probe_idx
+                    continue
 
                 width = max(len(row) for row in table_rows)
                 norm = [row + [""] * (width - len(row)) for row in table_rows]
@@ -1201,13 +1288,34 @@ class RAG_DB_Document(Chapter, ABC):
                 out.append(sep)
                 for row in norm[1:]:
                     out.append("| " + " | ".join(cell.replace("|", "\\|") for cell in row) + " |")
+                i = probe_idx
                 continue
 
             out.append(line)
             i += 1
         return "\n".join(out)
 
-    def build_catalog_tree(self, pages: Sequence[Content], ranges: Sequence[Dict[str, Any]]) -> List[Page]:
+    def create_mono_page_node(
+        self,
+        *,
+        page_number: int,
+        page_text: str,
+        markdown_text: str,
+        assets: Optional[PageAssets] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> MonoPage:
+        page_meta = dict(metadata or {})
+        section_title = str(page_meta.get("section_title") or "").strip()
+        if self._looks_like_catalogue_page(page_text) or self._is_catalogue_keyword(section_title):
+            page_meta["section_title"] = "目录"
+            if self._is_catalogue_keyword(str(page_meta.get("section_path") or "")) or not str(page_meta.get("section_path") or "").strip():
+                page_meta["section_path"] = "目录"
+            return Catalogue(title="目录", markdown_text=markdown_text, assets=assets, metadata=page_meta)
+        if section_title == "封面":
+            return Cover(title="封面", markdown_text=markdown_text, assets=assets, metadata=page_meta)
+        return Content(title="", markdown_text=markdown_text, assets=assets, metadata=page_meta)
+
+    def build_catalog_tree(self, pages: Sequence[MonoPage], ranges: Sequence[Dict[str, Any]]) -> List[Page]:
         if not ranges:
             return list(pages)
 
@@ -1273,7 +1381,7 @@ class RAG_DB_Document(Chapter, ABC):
             if path_parts:
                 chapter_path_lookup[tuple(path_parts)] = chapter
 
-        def _select_chapter_from_page_path(page: Content) -> Optional[Chapter]:
+        def _select_chapter_from_page_path(page: MonoPage) -> Optional[Chapter]:
             resolver = str(page.metadata.get("section_resolver") or "").strip().lower()
             if resolver != "main_section_map":
                 return None
@@ -1439,7 +1547,69 @@ class RAG_DB_Document(Chapter, ABC):
                     best = min(best, int(value))
             return best
 
-        roots.sort(key=_node_start_page)
+        def _node_order_value(node: Page) -> int:
+            metadata = dict(getattr(node, "metadata", {}) or {})
+            return int(self._coerce_positive_int(metadata.get("order")) or 0)
+
+        def _node_sort_key(node: Page) -> tuple[int, int, int, str]:
+            title = str(getattr(node, "title", "") or (getattr(node, "metadata", {}) or {}).get("section_title") or "").strip()
+            mono_rank = 0 if isinstance(node, MonoPage) else 1
+            return (_node_start_page(node), mono_rank, _node_order_value(node), title)
+
+        def _sort_tree_children(node: Page) -> None:
+            if not isinstance(node, Chapter):
+                return
+            for child in node.SubContent:
+                _sort_tree_children(child)
+            node.SubContent.sort(key=_node_sort_key)
+
+        def _wrap_top_level_catalogue_pages(nodes: Sequence[Page]) -> List[Page]:
+            wrapped: List[Page] = []
+            idx = 0
+            ordered = list(nodes)
+            while idx < len(ordered):
+                item = ordered[idx]
+                if isinstance(item, MonoPage) and item.category == PageType.CATALOGUE:
+                    group: List[MonoPage] = []
+                    while idx < len(ordered):
+                        candidate = ordered[idx]
+                        if not isinstance(candidate, MonoPage) or candidate.category != PageType.CATALOGUE:
+                            break
+                        group.append(candidate)
+                        idx += 1
+                    page_numbers = [
+                        page_no
+                        for page in group
+                        for page_no in self._coerce_page_numbers_from_page(page)
+                    ]
+                    start_page = min(page_numbers) if page_numbers else _node_start_page(group[0])
+                    end_page = max(page_numbers) if page_numbers else _node_start_page(group[-1])
+                    wrapped.append(
+                        Chapter(
+                            title="目录",
+                            metadata={
+                                "section_id": f"front-catalogue-{start_page}-{end_page}",
+                                "section_title": "目录",
+                                "section_path": "目录",
+                                "section_start_page": start_page,
+                                "section_end_page": end_page,
+                                "level": 1,
+                                "order": -1,
+                            },
+                            SubContent=group,
+                        )
+                    )
+                    continue
+                wrapped.append(item)
+                idx += 1
+            return wrapped
+
+        roots.sort(key=_node_sort_key)
+        roots = _wrap_top_level_catalogue_pages(roots)
+        for root in roots:
+            _refresh_chapter_page_span(root)
+            _sort_tree_children(root)
+        roots.sort(key=_node_sort_key)
         return roots
 
     def _build_from_cleaned_text(self) -> "RAG_DB_Document":
@@ -1457,7 +1627,7 @@ class RAG_DB_Document(Chapter, ABC):
         if not page_texts:
             page_texts = [cleaned_text]
 
-        page_nodes: List[Content] = []
+        page_nodes: List[MonoPage] = []
         chunks: List[Document] = []
 
         for page_idx, page_text in enumerate(page_texts, start=1):
@@ -1474,7 +1644,12 @@ class RAG_DB_Document(Chapter, ABC):
                 "page": page_idx,
             }
 
-            node = Content(title="", markdown_text=page_text, metadata=page_meta)
+            node = self.create_mono_page_node(
+                page_number=page_idx,
+                page_text=page_text,
+                markdown_text=page_text,
+                metadata=page_meta,
+            )
             node.add_page_number(page_idx)
             page_nodes.append(node)
 
@@ -1882,6 +2057,23 @@ class RAG_DB_Document(Chapter, ABC):
         return cls._normalize_doc_path(str(base_doc_id))
 
     @staticmethod
+    def _roman_numeral_to_int(token: str) -> Optional[int]:
+        text = str(token or "").strip().upper()
+        if not text or not re.fullmatch(r"[IVXLCDM]{1,8}", text):
+            return None
+        mapping = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+        total = 0
+        prev = 0
+        for ch in reversed(text):
+            value = mapping.get(ch, 0)
+            if value < prev:
+                total -= value
+            else:
+                total += value
+                prev = value
+        return total if total > 0 else None
+
+    @staticmethod
     def coerce_page_number(value: Any) -> Optional[int]:
         if value is None:
             return None
@@ -1898,6 +2090,9 @@ class RAG_DB_Document(Chapter, ABC):
             number = int(float(text))
             return number if number >= 0 else 0
         except Exception:
+            roman = RAG_DB_Document._roman_numeral_to_int(text)
+            if roman is not None:
+                return roman
             match = re.search(r"\d+", text)
             if not match:
                 return None

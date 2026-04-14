@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 from llama_index.core import Document
 
-from rag.document_interface import Content, RAG_DB_Document
+from rag.document_interface import MonoPage, RAG_DB_Document
 from rag.preprocessor import clean_document
 
 
@@ -28,7 +28,7 @@ class TextRAGDocument(RAG_DB_Document):
         if not page_texts:
             page_texts = [self.cleaned_text.strip()]
 
-        page_nodes: List[Content] = []
+        page_nodes: List[MonoPage] = []
         chunks: List[Document] = []
         for page_idx, page_text in enumerate(page_texts, start=1):
             section_title = "Document"
@@ -44,7 +44,12 @@ class TextRAGDocument(RAG_DB_Document):
                 "section_end_page": page_idx,
                 "page": page_idx,
             }
-            node = Content(title="", markdown_text=page_text, metadata=page_meta)
+            node = self.create_mono_page_node(
+                page_number=page_idx,
+                page_text=page_text,
+                markdown_text=page_text,
+                metadata=page_meta,
+            )
             node.add_page_number(page_idx)
             page_nodes.append(node)
 
