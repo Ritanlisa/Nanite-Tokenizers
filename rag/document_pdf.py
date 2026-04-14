@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+import hashlib
 import subprocess
 import sys
 import types
@@ -8,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from llama_index.core import Document
 
-from rag.document_interface import MonoPage, RAG_DB_Document
+from rag.document_interface import MonoPage, PageAssets, RAG_DB_Document
 from rag.preprocessor import clean_document
 
 try:
@@ -47,6 +49,248 @@ class PDFRAGDocument(RAG_DB_Document):
             if isinstance(item, dict):
                 pages.append(item)
         return pages or None
+
+    def _asset_output_dir(self) -> str:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        digest = hashlib.md5(str(self.base_doc_id).encode("utf-8")).hexdigest()
+        out_dir = os.path.join(repo_root, "tmp", "doc_tree_assets", digest, "pdf")
+        os.makedirs(out_dir, exist_ok=True)
+        return out_dir
+
+    @staticmethod
+    def _normalize_toc_title(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(
+            r"^((?:\d+(?:\.\d+)*)|第[一二三四五六七八九十百千万0-9]+[章节部分篇]|附录[一二三四五六七八九十百千万A-Za-z0-9]+)(?=[A-Za-z\u4e00-\u9fff])",
+            r"\1 ",
+            text,
+        )
+        return text.strip()
+
+    def _extract_toc_item_markers(self, tool_pages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        markers: List[Dict[str, Any]] = []
+        seen: set[tuple[str, int, int]] = set()
+        for item in tool_pages:
+            for row in list(item.get("toc_items") or []):
+                if not isinstance(row, (list, tuple)) or len(row) < 3:
+                    continue
+                try:
+                    level = max(1, min(int(row[0]), 6))
+                    title = self._normalize_toc_title(str(row[1] or ""))
+                    page = int(row[2])
+                except Exception:
+                    continue
+                if not title or page <= 0:
+                    continue
+                key = (title, page, level)
+                if key in seen:
+                    continue
+                seen.add(key)
+                markers.append({"title": title, "page": page, "level": level})
+        return markers
+
+    @staticmethod
+    def _group_words_into_lines(words: List[Any]) -> List[Dict[str, Any]]:
+        buckets: Dict[tuple[int, int], Dict[str, Any]] = {}
+        for item in list(words or []):
+            if not isinstance(item, tuple) or len(item) < 8:
+                continue
+            x0, y0, x1, y1, text, block_no, line_no, _ = item[:8]
+            key = (int(block_no), int(line_no))
+            bucket = buckets.setdefault(
+                key,
+                {
+                    "x0": float(x0 or 0.0),
+                    "y0": float(y0 or 0.0),
+                    "x1": float(x1 or 0.0),
+                    "y1": float(y1 or 0.0),
+                    "parts": [],
+                },
+            )
+            bucket["x0"] = min(float(bucket["x0"]), float(x0 or 0.0))
+            bucket["y0"] = min(float(bucket["y0"]), float(y0 or 0.0))
+            bucket["x1"] = max(float(bucket["x1"]), float(x1 or 0.0))
+            bucket["y1"] = max(float(bucket["y1"]), float(y1 or 0.0))
+            word = str(text or "").strip()
+            if word:
+                bucket["parts"].append(word)
+
+        lines: List[Dict[str, Any]] = []
+        for value in buckets.values():
+            text = " ".join(str(part or "").strip() for part in value.get("parts") or [] if str(part or "").strip()).strip()
+            if not text:
+                continue
+            lines.append(
+                {
+                    "text": text,
+                    "x0": float(value.get("x0") or 0.0),
+                    "y0": float(value.get("y0") or 0.0),
+                    "x1": float(value.get("x1") or 0.0),
+                    "y1": float(value.get("y1") or 0.0),
+                }
+            )
+        lines.sort(key=lambda item: (float(item.get("y0") or 0.0), float(item.get("x0") or 0.0)))
+        return lines
+
+    def _extract_page_layout_from_tool_page(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        lines = self._group_words_into_lines(list(item.get("words") or []))
+        if not lines:
+            return {"headers": [], "footers": [], "page_number": ""}
+
+        max_y = max(float(line.get("y1") or 0.0) for line in lines) or 1.0
+        header_cut = max_y * 0.10
+        footer_cut = max_y * 0.90
+
+        headers: List[str] = []
+        footers: List[str] = []
+        for line in lines:
+            text = str(line.get("text") or "").strip()
+            if not text:
+                continue
+            y0 = float(line.get("y0") or 0.0)
+            y1 = float(line.get("y1") or 0.0)
+            if y1 <= header_cut:
+                headers.append(text)
+            elif y0 >= footer_cut:
+                footers.append(text)
+
+        page_number = ""
+        for candidate in reversed(footers):
+            if self._parse_page_number_hint(candidate) is not None:
+                page_number = str(candidate).strip()
+                break
+
+        return {
+            "headers": list(dict.fromkeys(headers)),
+            "footers": list(dict.fromkeys(footers)),
+            "page_number": page_number,
+        }
+
+    def _normalize_page_layouts(self, page_layouts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        header_freq: Dict[str, int] = {}
+        footer_freq: Dict[str, int] = {}
+        for layout in list(page_layouts or []):
+            for text in list(layout.get("headers") or []):
+                header_freq[text] = header_freq.get(text, 0) + 1
+            for text in list(layout.get("footers") or []):
+                footer_freq[text] = footer_freq.get(text, 0) + 1
+
+        normalized: List[Dict[str, Any]] = []
+        for layout in list(page_layouts or []):
+            page_number = str(layout.get("page_number") or "").strip()
+            headers = [
+                text
+                for text in list(layout.get("headers") or [])
+                if header_freq.get(text, 0) >= 2
+            ]
+            footers: List[str] = []
+            for text in list(layout.get("footers") or []):
+                if text == page_number or self._parse_page_number_hint(text) is not None:
+                    footers.append(text)
+                    continue
+                if footer_freq.get(text, 0) >= 2:
+                    footers.append(text)
+            if page_number and page_number not in footers:
+                footers.append(page_number)
+            normalized.append(
+                {
+                    "headers": list(dict.fromkeys(headers)),
+                    "footers": list(dict.fromkeys(footers)),
+                    "page_number": page_number,
+                }
+            )
+        return normalized
+
+    @staticmethod
+    def _line_matches_layout_asset(line: str, asset_keys: set[str]) -> bool:
+        line_key = RAG_DB_Document._normalized_heading_text(str(line or ""))
+        if not line_key or not asset_keys:
+            return False
+        if line_key in asset_keys:
+            return True
+        if len(line_key) > 48:
+            return False
+        match_count = sum(1 for key in asset_keys if key and key in line_key)
+        return match_count >= 2
+
+    def _strip_layout_lines_from_page_text(
+        self,
+        page_text: str,
+        headers: List[str],
+        footers: List[str],
+    ) -> str:
+        lines = [str(line or "").rstrip() for line in str(page_text or "").splitlines()]
+        header_keys = {
+            self._normalized_heading_text(line)
+            for line in headers
+            if self._normalized_heading_text(line)
+        }
+        footer_keys = {
+            self._normalized_heading_text(line)
+            for line in footers
+            if self._normalized_heading_text(line)
+        }
+        while lines:
+            if not str(lines[0] or "").strip():
+                lines.pop(0)
+                continue
+            if self._line_matches_layout_asset(lines[0], header_keys):
+                lines.pop(0)
+                continue
+            break
+        while lines:
+            if not str(lines[-1] or "").strip():
+                lines.pop()
+                continue
+            if self._line_matches_layout_asset(lines[-1], footer_keys):
+                lines.pop()
+                continue
+            break
+        return "\n".join(lines).strip()
+
+    def _extract_pdf_page_images(self, page_count: int) -> List[List[str]]:
+        results: List[List[str]] = [[] for _ in range(max(0, int(page_count or 0)))]
+        file_path = str(self.metadata.get("file_name") or "").strip()
+        if not file_path or not os.path.isfile(file_path):
+            return results
+        try:
+            import fitz  # type: ignore
+        except Exception:
+            return results
+
+        try:
+            output_dir = self._asset_output_dir()
+            with fitz.open(file_path) as pdf_doc:
+                for page_idx in range(min(int(pdf_doc.page_count or 0), len(results))):
+                    page = pdf_doc.load_page(page_idx)
+                    seen_xrefs: set[int] = set()
+                    image_counter = 0
+                    for image_meta in page.get_images(full=True):
+                        if not image_meta:
+                            continue
+                        xref = int(image_meta[0] or 0)
+                        if xref <= 0 or xref in seen_xrefs:
+                            continue
+                        seen_xrefs.add(xref)
+                        image_info = pdf_doc.extract_image(xref)
+                        if not isinstance(image_info, dict):
+                            continue
+                        image_bytes = image_info.get("image")
+                        ext = str(image_info.get("ext") or "png").strip().lower() or "png"
+                        if not image_bytes:
+                            continue
+                        image_counter += 1
+                        out_path = os.path.join(output_dir, f"page-{page_idx + 1:04d}-img-{image_counter:02d}.{ext}")
+                        if not os.path.isfile(out_path):
+                            with open(out_path, "wb") as handle:
+                                handle.write(image_bytes)
+                        results[page_idx].append(out_path)
+        except Exception:
+            return [[] for _ in range(max(0, int(page_count or 0)))]
+        return results
 
     @staticmethod
     def _load_main_pdf_class() -> Optional[type]:
@@ -179,15 +423,20 @@ class PDFRAGDocument(RAG_DB_Document):
         tool_pages = self._extract_with_pymupdf4llm()
         if tool_pages is not None:
             page_texts = [str(item.get("text") or "") for item in tool_pages]
-            markers = self._extract_main_compatible_markers(page_texts)
+            toc_markers = self._extract_toc_item_markers(tool_pages)
+            markers = list(toc_markers) if toc_markers else self._extract_main_compatible_markers(page_texts)
             ranges = self._ranges_from_main_markers(markers, len(page_texts))
-            main_section_map = self._extract_main_page_section_map(page_texts)
+            main_section_map = self._extract_main_page_section_map(page_texts) if not toc_markers else {}
             if not ranges:
                 fallback_markers = self.extract_multilevel_catalog_markers(
                     page_texts,
                     metadata_keys=["native_catalog", "style_catalog", "font_catalog"],
                 )
+                fallback_markers = self._remap_markers_with_text_hits(fallback_markers, page_texts, len(page_texts))
                 ranges = self.derive_catalog_ranges(fallback_markers, len(page_texts))
+
+            page_layouts = self._normalize_page_layouts([self._extract_page_layout_from_tool_page(item) for item in tool_pages])
+            page_images = self._extract_pdf_page_images(len(tool_pages))
 
             page_nodes: List[MonoPage] = []
             chunks: List[Document] = []
@@ -196,6 +445,12 @@ class PDFRAGDocument(RAG_DB_Document):
                 metadata_raw = item.get("metadata")
                 metadata = dict(metadata_raw) if isinstance(metadata_raw, dict) else {}
                 page_idx = self.coerce_page_number(metadata.get("page")) or fallback_idx
+
+                page_layout = page_layouts[fallback_idx - 1] if fallback_idx - 1 < len(page_layouts) else {}
+                headers = [str(x).strip() for x in list(page_layout.get("headers") or []) if str(x).strip()]
+                footers = [str(x).strip() for x in list(page_layout.get("footers") or []) if str(x).strip()]
+                body_text = self._strip_layout_lines_from_page_text(page_text, headers, footers) or page_text
+                page_number_hint = str(page_layout.get("page_number") or "").strip()
 
                 mapped_path = str(main_section_map.get(int(page_idx)) or "").strip()
                 if mapped_path:
@@ -216,20 +471,36 @@ class PDFRAGDocument(RAG_DB_Document):
                     "section_start_page": page_idx,
                     "section_end_page": page_idx,
                     "page": page_idx,
+                    "logical_page": self._parse_page_number_hint(page_number_hint) or page_idx,
+                    "header_text": "\n".join(headers),
+                    "footer_text": "\n".join(footers),
+                    "page_number_hint": page_number_hint,
                 }
+
+                images = self.resolve_page_images(
+                    body_text,
+                    page_images[fallback_idx - 1] if fallback_idx - 1 < len(page_images) else [],
+                )
+                assets = PageAssets(
+                    headers=headers,
+                    footers=footers,
+                    page_numbers=[page_number_hint] if page_number_hint else [],
+                    images=images,
+                )
+                page_meta["image_count"] = len(images)
+                page_markdown = self._render_plaintext_page_to_markdown(body_text, page_number=int(page_idx))
 
                 node = self.create_mono_page_node(
                     page_number=int(page_idx),
-                    page_text=page_text,
-                    markdown_text=page_text,
+                    page_text=body_text,
+                    markdown_text=page_markdown,
+                    assets=assets,
                     metadata=page_meta,
                 )
                 node.add_page_number(page_idx)
-                for image_item in item.get("images") or []:
-                    node.add_image(str(image_item))
                 page_nodes.append(node)
 
-                for chunk_idx, chunk_text in enumerate(self._split_text_chunks(page_text), start=1):
+                for chunk_idx, chunk_text in enumerate(self._split_text_chunks(page_markdown), start=1):
                     chunk_meta = dict(page_meta)
                     chunk_meta["chunk_index"] = chunk_idx
                     chunks.append(

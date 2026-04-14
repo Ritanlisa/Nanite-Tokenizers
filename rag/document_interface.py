@@ -1191,6 +1191,9 @@ class RAG_DB_Document(Chapter, ABC):
             seen.add(text)
             resolved.append(text)
 
+        if any(self._looks_like_real_image_asset(item) for item in resolved):
+            return resolved
+
         for caption in self._extract_figure_captions(page_text):
             marker = f"figure: {caption}"
             if marker in seen:
@@ -1198,6 +1201,15 @@ class RAG_DB_Document(Chapter, ABC):
             seen.add(marker)
             resolved.append(marker)
         return resolved
+
+    @staticmethod
+    def _looks_like_real_image_asset(value: str) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        if text.startswith("data:image/"):
+            return True
+        return bool(re.search(r"(?:^|/|\\)([^/\\]+)\.(?:png|jpe?g|gif|bmp|webp|tiff?|svg|wmf|emf)$", text, flags=re.IGNORECASE))
 
     def _render_plaintext_page_to_markdown(
         self,
@@ -1294,6 +1306,222 @@ class RAG_DB_Document(Chapter, ABC):
             out.append(line)
             i += 1
         return "\n".join(out)
+
+    @staticmethod
+    def _is_markdown_table_block(block: str) -> bool:
+        lines = [line.rstrip() for line in str(block or "").splitlines() if line.strip()]
+        if len(lines) < 3:
+            return False
+        if not lines[0].lstrip().startswith("|"):
+            return False
+        return lines[1].lstrip().startswith("|") and "---" in lines[1]
+
+    @classmethod
+    def _split_markdown_table_block(cls, block: str, slots: int) -> List[str]:
+        lines = [line.rstrip() for line in str(block or "").splitlines() if line.strip()]
+        if len(lines) < 3 or slots <= 1:
+            return [str(block or "").strip()]
+        header = lines[:2]
+        rows = lines[2:]
+        if not rows:
+            return ["\n".join(header)]
+        parts: List[str] = []
+        total_rows = len(rows)
+        chunk_count = max(1, min(int(slots), total_rows))
+        for idx in range(chunk_count):
+            start = int(round(idx * total_rows / chunk_count))
+            end = int(round((idx + 1) * total_rows / chunk_count))
+            chunk_rows = rows[start:end]
+            if not chunk_rows:
+                continue
+            parts.append("\n".join(header + chunk_rows).strip())
+        return parts or [str(block or "").strip()]
+
+    @staticmethod
+    def _split_markdown_text_block(block: str, slots: int) -> List[str]:
+        text = str(block or "").strip()
+        if not text or slots <= 1:
+            return [text]
+
+        paragraphs = [part.strip() for part in re.split(r"\n{2,}", text) if part.strip()]
+        if len(paragraphs) >= 2:
+            mid = max(1, len(paragraphs) // 2)
+            return ["\n\n".join(paragraphs[:mid]).strip(), "\n\n".join(paragraphs[mid:]).strip()]
+
+        lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+        if len(lines) >= 4:
+            mid = max(1, len(lines) // 2)
+            return ["\n".join(lines[:mid]).strip(), "\n".join(lines[mid:]).strip()]
+
+        if len(text) < 480:
+            return [text]
+
+        split_at = len(text) // 2
+        window = text[max(0, split_at - 120): min(len(text), split_at + 120)]
+        match = re.search(r"[。！？!?]\s*", window)
+        if match:
+            split_at = max(1, max(0, split_at - 120) + match.end())
+        return [text[:split_at].strip(), text[split_at:].strip()]
+
+    @classmethod
+    def _split_markdown_blocks_for_slots(cls, blocks: Sequence[str], slots: int) -> List[str]:
+        cleaned_blocks = [str(item or "").strip() for item in list(blocks or []) if str(item or "").strip()]
+        if slots <= 0:
+            return []
+        if not cleaned_blocks:
+            return [""] * slots
+
+        fragments = list(cleaned_blocks)
+        while len(fragments) < slots:
+            best_index = -1
+            best_size = 0
+            for idx, fragment in enumerate(fragments):
+                size = len(fragment)
+                if size > best_size:
+                    best_index = idx
+                    best_size = size
+            if best_index < 0:
+                break
+            fragment = fragments[best_index]
+            if cls._is_markdown_table_block(fragment):
+                split_parts = cls._split_markdown_table_block(fragment, 2)
+            else:
+                split_parts = cls._split_markdown_text_block(fragment, 2)
+            split_parts = [part for part in split_parts if str(part or "").strip()]
+            if len(split_parts) <= 1:
+                break
+            fragments = fragments[:best_index] + split_parts + fragments[best_index + 1:]
+
+        if len(fragments) > slots:
+            merged = [""] * slots
+            total = len(fragments)
+            for idx, fragment in enumerate(fragments):
+                slot = min(slots - 1, int(idx * slots / max(1, total)))
+                merged[slot] = f"{merged[slot]}\n\n{fragment}".strip() if merged[slot] else fragment
+            fragments = merged
+
+        if len(fragments) < slots:
+            fragments.extend([""] * (slots - len(fragments)))
+        return [str(item or "").strip() for item in fragments[:slots]]
+
+    @staticmethod
+    def _group_values_evenly(values: Sequence[str], slots: int) -> List[List[str]]:
+        if slots <= 0:
+            return []
+        groups: List[List[str]] = [[] for _ in range(slots)]
+        items = [str(value or "").strip() for value in list(values or []) if str(value or "").strip()]
+        for idx, item in enumerate(items):
+            groups[min(slots - 1, idx % slots)].append(item)
+        return groups
+
+    def _apply_structured_section_fallback(
+        self,
+        pages: Sequence[MonoPage],
+        ranges: Sequence[Dict[str, Any]],
+    ) -> None:
+        structured_rows = list(self.metadata.get("structured_sections") or [])
+        if not structured_rows or not pages or not ranges:
+            return
+
+        section_lookup: Dict[str, Dict[str, Any]] = {}
+        for row in structured_rows:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "").strip()
+            key = self._normalized_heading_text(self._clean_heading_title(title))
+            if not key:
+                continue
+            blocks = [str(item or "").strip() for item in list(row.get("blocks") or []) if str(item or "").strip()]
+            images = [str(item or "").strip() for item in list(row.get("images") or []) if str(item or "").strip()]
+            current_score = len(blocks) + len(images)
+            old = section_lookup.get(key)
+            old_score = 0
+            if old is not None:
+                old_score = len(list(old.get("blocks") or [])) + len(list(old.get("images") or []))
+            if old is None or current_score > old_score:
+                section_lookup[key] = {
+                    "title": title,
+                    "blocks": blocks,
+                    "images": images,
+                }
+
+        sorted_ranges = sorted(
+            list(ranges or []),
+            key=lambda row: (
+                -(int(self._coerce_positive_int(row.get("level")) or 1)),
+                max(1, int(self._coerce_positive_int(row.get("end")) or self._coerce_positive_int(row.get("start")) or 1) - int(self._coerce_positive_int(row.get("start")) or 1) + 1),
+                int(self._coerce_positive_int(row.get("start")) or 0),
+            ),
+        )
+
+        for item in sorted_ranges:
+            title = str(item.get("title") or "").strip()
+            key = self._normalized_heading_text(self._clean_heading_title(title))
+            if not key:
+                continue
+            section = section_lookup.get(key)
+            if section is None:
+                continue
+
+            start = int(self._coerce_positive_int(item.get("start")) or 0)
+            end = int(self._coerce_positive_int(item.get("end")) or start)
+            if start <= 0 or end <= 0:
+                continue
+
+            target_indexes: List[int] = []
+            for idx, page in enumerate(pages):
+                meta = dict(getattr(page, "metadata", {}) or {})
+                source_page = self.coerce_page_number(meta.get("source_page"))
+                page_no = self.coerce_page_number(meta.get("page"))
+                candidate = int(source_page or page_no or 0)
+                if start <= candidate <= end:
+                    target_indexes.append(idx)
+            if not target_indexes:
+                continue
+
+            blank_indexes = [
+                idx
+                for idx in target_indexes
+                if not str(getattr(pages[idx], "markdown_text", "") or "").strip()
+            ]
+
+            blocks = list(section.get("blocks") or [])
+            if blocks and blank_indexes:
+                fragments = self._split_markdown_blocks_for_slots(blocks, len(blank_indexes))
+                for page_idx, fragment in zip(blank_indexes, fragments):
+                    text = str(fragment or "").strip()
+                    if not text:
+                        continue
+                    current = str(getattr(pages[page_idx], "markdown_text", "") or "").strip()
+                    if current:
+                        pages[page_idx].set_markdown(f"{current}\n\n{text}".strip())
+                    else:
+                        pages[page_idx].set_markdown(text)
+
+            images = [item for item in list(section.get("images") or []) if self._looks_like_real_image_asset(item)]
+            if not images:
+                continue
+            preferred_indexes = [
+                idx
+                for idx in target_indexes
+                if re.search(r"image://page-|^(?:图|figure)\b", str(getattr(pages[idx], "markdown_text", "") or ""), flags=re.IGNORECASE | re.MULTILINE)
+            ]
+            image_target_indexes = preferred_indexes or target_indexes
+            image_groups = self._group_values_evenly(images, len(image_target_indexes))
+            for page_idx, group in zip(image_target_indexes, image_groups):
+                if group:
+                    pages[page_idx].assets.images = [
+                        item
+                        for item in list(pages[page_idx].assets.images or [])
+                        if self._looks_like_real_image_asset(item)
+                    ]
+                existing = set(pages[page_idx].get_images())
+                for image in group:
+                    if image in existing:
+                        continue
+                    pages[page_idx].add_image(image)
+                    existing.add(image)
+                pages[page_idx].metadata["image_count"] = len(pages[page_idx].get_images())
 
     def create_mono_page_node(
         self,

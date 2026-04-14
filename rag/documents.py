@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
 import logging
 import shutil
 import subprocess
@@ -654,7 +655,154 @@ def _docx_paragraph_has_section_page_break(paragraph: ET.Element, ns: Dict[str, 
     return val in {"nextpage", "oddpage", "evenpage"}
 
 
-def _extract_docx_structure_from_xml(file_path: str) -> Tuple[str, bool, Dict[str, List[Dict[str, Any]]]]:
+def _docx_paragraph_page_break_count(paragraph: ET.Element, ns: Dict[str, str]) -> int:
+    count = 0
+    for br in paragraph.findall(".//w:br", ns):
+        br_type = str(br.attrib.get(f"{{{ns['w']}}}type") or "").strip().lower()
+        if br_type == "page":
+            count += 1
+    count += len(paragraph.findall(".//w:lastRenderedPageBreak", ns))
+    if _docx_paragraph_has_section_page_break(paragraph, ns):
+        count += 1
+    return count
+
+
+def _docx_text_heading_level(text: str) -> Optional[int]:
+    stripped = str(text or "").strip()
+    if not stripped or len(stripped) > 96:
+        return None
+    if re.match(r"^第[一二三四五六七八九十百千万0-9]+[章节部分篇]", stripped):
+        return 1
+    if re.match(r"^附录[一二三四五六七八九十百千万A-Za-z0-9]+", stripped):
+        return 1
+    match = re.match(r"^(\d+(?:\.\d+)*)\s+", stripped)
+    if not match:
+        return None
+    return max(1, min(match.group(1).count(".") + 1, 6))
+
+
+def _docx_asset_output_dir(file_path: str, namespace: str) -> str:
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    digest = hashlib.md5(os.path.abspath(file_path).encode("utf-8")).hexdigest()
+    out_dir = os.path.join(repo_root, "tmp", "doc_tree_assets", digest, namespace)
+    os.makedirs(out_dir, exist_ok=True)
+    return out_dir
+
+
+def _extract_docx_relationship_targets(archive: zipfile.ZipFile) -> Dict[str, str]:
+    try:
+        rels_xml = archive.read("word/_rels/document.xml.rels")
+    except Exception:
+        return {}
+    ns = {"rel": "http://schemas.openxmlformats.org/package/2006/relationships"}
+    try:
+        root = ET.fromstring(rels_xml)
+    except Exception:
+        return {}
+    rel_targets: Dict[str, str] = {}
+    for rel in root.findall("rel:Relationship", ns):
+        rel_id = str(rel.attrib.get("Id") or "").strip()
+        target = str(rel.attrib.get("Target") or "").strip()
+        if rel_id and target:
+            rel_targets[rel_id] = target
+    return rel_targets
+
+
+def _copy_docx_media_asset(
+    archive: zipfile.ZipFile,
+    target: str,
+    output_dir: str,
+    cache: Dict[str, str],
+) -> str:
+    normalized = os.path.normpath(os.path.join("word", str(target or "").lstrip("/"))).replace("\\", "/")
+    if normalized in cache:
+        return cache[normalized]
+    if not normalized.startswith("word/"):
+        return ""
+    try:
+        data = archive.read(normalized)
+    except Exception:
+        return ""
+    base_name = os.path.basename(normalized)
+    if not base_name:
+        return ""
+    out_path = os.path.join(output_dir, base_name)
+    if not os.path.isfile(out_path):
+        with open(out_path, "wb") as handle:
+            handle.write(data)
+    cache[normalized] = out_path
+    return out_path
+
+
+def _extract_docx_images_from_element(
+    element: ET.Element,
+    archive: zipfile.ZipFile,
+    rel_targets: Dict[str, str],
+    output_dir: str,
+    cache: Dict[str, str],
+    ns: Dict[str, str],
+) -> List[str]:
+    rel_ids: List[str] = []
+    for blip in element.findall(".//a:blip", ns):
+        embed = str(blip.attrib.get(f"{{{ns['r']}}}embed") or "").strip()
+        if embed:
+            rel_ids.append(embed)
+    for image_data in element.findall(".//v:imagedata", ns):
+        rel_id = str(image_data.attrib.get(f"{{{ns['r']}}}id") or "").strip()
+        if rel_id:
+            rel_ids.append(rel_id)
+
+    image_paths: List[str] = []
+    seen: Set[str] = set()
+    for rel_id in rel_ids:
+        target = str(rel_targets.get(rel_id) or "").strip()
+        if not target:
+            continue
+        image_path = _copy_docx_media_asset(archive, target, output_dir, cache)
+        if not image_path or image_path in seen:
+            continue
+        seen.add(image_path)
+        image_paths.append(image_path)
+    return image_paths
+
+
+def _extract_docx_run_sizes(paragraph: ET.Element, ns: Dict[str, str]) -> List[int]:
+    run_sizes: List[int] = []
+    for run in paragraph.findall(".//w:r", ns):
+        sz_node = run.find("w:rPr/w:sz", ns)
+        if sz_node is None:
+            continue
+        raw = str(sz_node.attrib.get(f"{{{ns['w']}}}val") or "").strip()
+        if raw.isdigit():
+            run_sizes.append(int(raw))
+    return run_sizes
+
+
+def _docx_table_to_markdown(table: ET.Element, ns: Dict[str, str]) -> str:
+    rows: List[List[str]] = []
+    for tr in table.findall("w:tr", ns):
+        row: List[str] = []
+        for tc in tr.findall("w:tc", ns):
+            parts: List[str] = []
+            for paragraph in tc.findall("w:p", ns):
+                text = _extract_docx_text_from_paragraph(paragraph, ns)
+                if text:
+                    parts.append(text)
+            row.append(" ".join(parts).strip())
+        if any(cell for cell in row):
+            rows.append(row)
+    if not rows:
+        return ""
+    width = max(len(row) for row in rows)
+    normalized_rows = [row + [""] * (width - len(row)) for row in rows]
+    out = ["| " + " | ".join(cell.replace("|", "\\|") for cell in normalized_rows[0]) + " |"]
+    out.append("| " + " | ".join(["---"] * width) + " |")
+    for row in normalized_rows[1:]:
+        out.append("| " + " | ".join(cell.replace("|", "\\|") for cell in row) + " |")
+    return "\n".join(out)
+
+
+def _extract_docx_structured_payload(file_path: str) -> Dict[str, Any]:
     native_catalog: List[Dict[str, Any]] = []
     style_catalog: List[Dict[str, Any]] = []
     font_catalog: List[Dict[str, Any]] = []
@@ -698,6 +846,8 @@ def _extract_docx_structure_from_xml(file_path: str) -> Tuple[str, bool, Dict[st
 
     paragraph_rows: List[Dict[str, Any]] = []
     pages: List[List[str]] = [[]]
+    page_assets: List[Dict[str, List[str]]] = [{"images": []}]
+    structured_sections: List[Dict[str, Any]] = []
 
     try:
         with zipfile.ZipFile(file_path, "r") as archive:
@@ -707,8 +857,16 @@ def _extract_docx_structure_from_xml(file_path: str) -> Tuple[str, bool, Dict[st
                 styles_xml = archive.read("word/styles.xml")
             except Exception:
                 styles_xml = None
+            rel_targets = _extract_docx_relationship_targets(archive)
+            asset_output_dir = _docx_asset_output_dir(file_path, "office")
+            asset_cache: Dict[str, str] = {}
 
-        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+            ns = {
+                "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+                "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+                "v": "urn:schemas-microsoft-com:vml",
+            }
         style_name_by_id: Dict[str, str] = {}
         if styles_xml:
             styles_root = ET.fromstring(styles_xml)
@@ -722,47 +880,137 @@ def _extract_docx_structure_from_xml(file_path: str) -> Tuple[str, bool, Dict[st
                     if style_name:
                         style_name_by_id[style_id] = style_name
 
-        doc_root = ET.fromstring(document_xml)
-        paragraphs = list(doc_root.findall(".//w:body/w:p", ns))
+        with zipfile.ZipFile(file_path, "r") as archive:
+            doc_root = ET.fromstring(document_xml)
+            body = doc_root.find("w:body", ns)
 
-        page_idx = 1
-        for paragraph in paragraphs:
-            text = _extract_docx_text_from_paragraph(paragraph, ns)
-            if text:
-                pages[-1].append(text)
+            section_stack: List[Dict[str, Any]] = []
 
-            p_style = paragraph.find("w:pPr/w:pStyle", ns)
-            style_id = ""
-            if p_style is not None:
-                style_id = str(p_style.attrib.get(f"{{{ns['w']}}}val") or "").strip()
-            run_sizes: List[int] = []
-            for run in paragraph.findall(".//w:r", ns):
-                sz_node = run.find("w:rPr/w:sz", ns)
-                if sz_node is None:
-                    continue
-                raw = str(sz_node.attrib.get(f"{{{ns['w']}}}val") or "").strip()
-                if raw.isdigit():
-                    run_sizes.append(int(raw))
-            if text:
-                paragraph_rows.append(
-                    {
-                        "text": text,
-                        "style_id": style_id,
-                        "style_name": style_name_by_id.get(style_id, ""),
-                        "max_sz": max(run_sizes) if run_sizes else 0,
-                        "page": page_idx,
-                    }
+            def _unique_paths(values: List[str]) -> List[str]:
+                unique: List[str] = []
+                seen_paths: Set[str] = set()
+                for item in values:
+                    text = str(item or "").strip()
+                    if not text or text in seen_paths:
+                        continue
+                    seen_paths.add(text)
+                    unique.append(text)
+                return unique
+
+            def _start_section(title: str, level: int, page: int) -> None:
+                cleaned_title = str(title or "").strip()[:160]
+                if not cleaned_title:
+                    return
+                while section_stack and int(section_stack[-1].get("level") or 1) >= int(level):
+                    section_stack.pop()
+                path_parts = [str(item.get("title") or "").strip() for item in section_stack if str(item.get("title") or "").strip()]
+                path_parts.append(cleaned_title)
+                section = {
+                    "title": cleaned_title,
+                    "level": max(1, min(int(level or 1), 6)),
+                    "page": int(page or 1),
+                    "path": " > ".join(path_parts),
+                    "blocks": [],
+                    "images": [],
+                    "order": len(structured_sections),
+                }
+                structured_sections.append(section)
+                section_stack.append(section)
+
+            def _append_block(text: str) -> None:
+                block = str(text or "").strip()
+                if not block or not section_stack:
+                    return
+                section_stack[-1]["blocks"].append(block)
+
+            def _append_images(images: List[str]) -> None:
+                if not images:
+                    return
+                current_images = page_assets[-1].setdefault("images", [])
+                current_images.extend(images)
+                if section_stack:
+                    section_stack[-1]["images"].extend(images)
+
+            page_idx = 1
+            for child in list(body or []):
+                tag = child.tag.rsplit("}", 1)[-1]
+                child_images = _extract_docx_images_from_element(
+                    child,
+                    archive,
+                    rel_targets,
+                    asset_output_dir,
+                    asset_cache,
+                    ns,
                 )
+                _append_images(child_images)
 
-            has_page_break = _docx_paragraph_has_rendered_page_break(paragraph, ns) or _docx_paragraph_has_section_page_break(paragraph, ns)
-            if has_page_break:
-                page_idx += 1
-                pages.append([])
+                if tag == "p":
+                    paragraph = child
+                    text = _extract_docx_text_from_paragraph(paragraph, ns)
+                    if text:
+                        pages[-1].append(text)
+
+                    p_style = paragraph.find("w:pPr/w:pStyle", ns)
+                    style_id = ""
+                    if p_style is not None:
+                        style_id = str(p_style.attrib.get(f"{{{ns['w']}}}val") or "").strip()
+                    style_name = style_name_by_id.get(style_id, "")
+                    run_sizes = _extract_docx_run_sizes(paragraph, ns)
+                    max_sz = max(run_sizes) if run_sizes else 0
+
+                    if text:
+                        paragraph_rows.append(
+                            {
+                                "text": text,
+                                "style_id": style_id,
+                                "style_name": style_name,
+                                "max_sz": max_sz,
+                                "page": page_idx,
+                            }
+                        )
+
+                    lower_style = f"{style_id} {style_name}".lower()
+                    heading_level = _docx_heading_level_from_style(style_id, style_name)
+                    if heading_level is None:
+                        heading_level = _docx_text_heading_level(text)
+                    title_candidate, catalog_page = _parse_catalog_tail_page(text)
+                    is_catalogue_paragraph = bool(catalog_page is not None and title_candidate)
+                    if text and heading_level is not None and "toc" not in lower_style and "目录" not in lower_style and not is_catalogue_paragraph:
+                        _start_section(text, heading_level, page_idx)
+                    elif text:
+                        _append_block(text)
+
+                    page_break_count = _docx_paragraph_page_break_count(paragraph, ns)
+                    for _ in range(page_break_count):
+                        page_idx += 1
+                        pages.append([])
+                        page_assets.append({"images": []})
+                    continue
+
+                if tag != "tbl":
+                    continue
+
+                table_markdown = _docx_table_to_markdown(child, ns)
+                if table_markdown:
+                    pages[-1].append(table_markdown)
+                    _append_block(table_markdown)
+
+                table_break_count = 0
+                for paragraph in child.findall(".//w:p", ns):
+                    table_break_count += _docx_paragraph_page_break_count(paragraph, ns)
+                for _ in range(table_break_count):
+                    page_idx += 1
+                    pages.append([])
+                    page_assets.append({"images": []})
 
         while pages and not pages[-1]:
             pages.pop()
+            if page_assets:
+                page_assets.pop()
         if not pages:
             pages = [[]]
+        if not page_assets:
+            page_assets = [{"images": []}]
 
         for row in paragraph_rows:
             style_id = str(row.get("style_id") or "")
@@ -853,7 +1101,57 @@ def _extract_docx_structure_from_xml(file_path: str) -> Tuple[str, bool, Dict[st
         "style_catalog": _dedupe(style_catalog),
         "font_catalog": _dedupe(font_catalog),
     }
-    return text_with_breaks, has_breaks, catalogs
+    structured_section_payload: List[Dict[str, Any]] = []
+    for section in structured_sections:
+        title = str(section.get("title") or "").strip()
+        if not title:
+            continue
+        blocks = [str(item or "").strip() for item in list(section.get("blocks") or []) if str(item or "").strip()]
+        images = []
+        seen_images: Set[str] = set()
+        for item in list(section.get("images") or []):
+            value = str(item or "").strip()
+            if not value or value in seen_images:
+                continue
+            seen_images.add(value)
+            images.append(value)
+        if not blocks and not images:
+            continue
+        structured_section_payload.append(
+            {
+                "title": title,
+                "level": int(section.get("level") or 1),
+                "page": int(section.get("page") or 1),
+                "path": str(section.get("path") or title),
+                "order": int(section.get("order") or 0),
+                "blocks": blocks,
+                "images": images,
+            }
+        )
+
+    normalized_page_assets: List[Dict[str, List[str]]] = []
+    for item in page_assets:
+        normalized_page_assets.append({
+            "images": [str(value or "").strip() for value in list(item.get("images") or []) if str(value or "").strip()]
+        })
+
+    return {
+        "text_with_breaks": text_with_breaks,
+        "has_breaks": has_breaks,
+        "catalogs": catalogs,
+        "page_markdowns": page_texts,
+        "page_assets": normalized_page_assets,
+        "structured_sections": structured_section_payload,
+    }
+
+
+def _extract_docx_structure_from_xml(file_path: str) -> Tuple[str, bool, Dict[str, List[Dict[str, Any]]]]:
+    payload = _extract_docx_structured_payload(file_path)
+    return (
+        str(payload.get("text_with_breaks") or ""),
+        bool(payload.get("has_breaks")),
+        dict(payload.get("catalogs") or {}),
+    )
 
 
 def _extract_docx_catalog_metadata(file_path: str) -> Dict[str, List[Dict[str, Any]]]:
@@ -895,9 +1193,24 @@ def _extract_doc_catalog_metadata(file_path: str) -> Dict[str, List[Dict[str, An
 
 
 def _extract_doc_text_via_converted_docx(file_path: str) -> Tuple[str, bool, Dict[str, List[Dict[str, Any]]]]:
+    payload = _extract_doc_structured_payload_via_converted_docx(file_path)
+    return (
+        str(payload.get("text_with_breaks") or ""),
+        bool(payload.get("has_breaks")),
+        dict(payload.get("catalogs") or {}),
+    )
+
+
+def _extract_doc_structured_payload_via_converted_docx(file_path: str) -> Dict[str, Any]:
     office = shutil.which("soffice") or shutil.which("libreoffice")
     if not office:
-        return "", False, {"native_catalog": [], "style_catalog": [], "font_catalog": []}
+        return {
+            "text_with_breaks": "",
+            "has_breaks": False,
+            "catalogs": {"native_catalog": [], "style_catalog": [], "font_catalog": []},
+            "page_assets": [],
+            "structured_sections": [],
+        }
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         command = [
@@ -920,12 +1233,24 @@ def _extract_doc_text_via_converted_docx(file_path: str) -> Tuple[str, bool, Dic
                     if name.lower().endswith(".docx")
                 ]
                 if not candidates:
-                    return "", False, {"native_catalog": [], "style_catalog": [], "font_catalog": []}
+                    return {
+                        "text_with_breaks": "",
+                        "has_breaks": False,
+                        "catalogs": {"native_catalog": [], "style_catalog": [], "font_catalog": []},
+                        "page_assets": [],
+                        "structured_sections": [],
+                    }
                 docx_path = sorted(candidates)[0]
 
-            return _extract_docx_structure_from_xml(docx_path)
+            return _extract_docx_structured_payload(docx_path)
         except Exception:
-            return "", False, {"native_catalog": [], "style_catalog": [], "font_catalog": []}
+            return {
+                "text_with_breaks": "",
+                "has_breaks": False,
+                "catalogs": {"native_catalog": [], "style_catalog": [], "font_catalog": []},
+                "page_assets": [],
+                "structured_sections": [],
+            }
 
 
 def load_single_file_document(file_path: str, supported_extensions: Set[str]) -> Optional[Document]:
@@ -951,7 +1276,12 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
             )
 
         if ext == ".doc":
-            xml_text, xml_has_breaks, doc_catalogs = _extract_doc_text_via_converted_docx(file_path)
+            doc_payload = _extract_doc_structured_payload_via_converted_docx(file_path)
+            xml_text = str(doc_payload.get("text_with_breaks") or "")
+            xml_has_breaks = bool(doc_payload.get("has_breaks"))
+            doc_catalogs = dict(doc_payload.get("catalogs") or {})
+            doc_structured_sections = list(doc_payload.get("structured_sections") or [])
+            doc_page_assets = list(doc_payload.get("page_assets") or [])
             uno_text, uno_has_breaks = _extract_office_text_by_uno_pages(file_path)
             office_text, has_native_breaks = _extract_office_text_with_page_breaks(file_path)
             native_page_count = _require_libreoffice_physical_page_count(
@@ -975,6 +1305,8 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "native_catalog": doc_catalogs.get("native_catalog") or [],
                         "style_catalog": doc_catalogs.get("style_catalog") or [],
                         "font_catalog": doc_catalogs.get("font_catalog") or [],
+                        "structured_sections": doc_structured_sections,
+                        "structured_page_assets": doc_page_assets,
                     },
                     doc_id=file_path,
                 )
@@ -990,6 +1322,8 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "native_catalog": doc_catalogs.get("native_catalog") or [],
                         "style_catalog": doc_catalogs.get("style_catalog") or [],
                         "font_catalog": doc_catalogs.get("font_catalog") or [],
+                        "structured_sections": doc_structured_sections,
+                        "structured_page_assets": doc_page_assets,
                     },
                     doc_id=file_path,
                 )
@@ -1006,6 +1340,8 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "native_catalog": doc_catalogs.get("native_catalog") or [],
                         "style_catalog": doc_catalogs.get("style_catalog") or [],
                         "font_catalog": doc_catalogs.get("font_catalog") or [],
+                        "structured_sections": doc_structured_sections,
+                        "structured_page_assets": doc_page_assets,
                     },
                     doc_id=file_path,
                 )
@@ -1022,6 +1358,8 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "native_catalog": doc_catalogs.get("native_catalog") or [],
                         "style_catalog": doc_catalogs.get("style_catalog") or [],
                         "font_catalog": doc_catalogs.get("font_catalog") or [],
+                        "structured_sections": doc_structured_sections,
+                        "structured_page_assets": doc_page_assets,
                     },
                     doc_id=file_path,
                 )
@@ -1040,6 +1378,8 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "native_catalog": doc_catalogs.get("native_catalog") or [],
                         "style_catalog": doc_catalogs.get("style_catalog") or [],
                         "font_catalog": doc_catalogs.get("font_catalog") or [],
+                        "structured_sections": doc_structured_sections,
+                        "structured_page_assets": doc_page_assets,
                     },
                     doc_id=file_path,
                 )
@@ -1058,12 +1398,19 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                     "native_catalog": doc_catalogs.get("native_catalog") or [],
                     "style_catalog": doc_catalogs.get("style_catalog") or [],
                     "font_catalog": doc_catalogs.get("font_catalog") or [],
+                    "structured_sections": doc_structured_sections,
+                    "structured_page_assets": doc_page_assets,
                 },
                 doc_id=file_path,
             )
 
         if ext == ".docx":
-            xml_text, xml_has_breaks, docx_catalogs = _extract_docx_structure_from_xml(file_path)
+            docx_payload = _extract_docx_structured_payload(file_path)
+            xml_text = str(docx_payload.get("text_with_breaks") or "")
+            xml_has_breaks = bool(docx_payload.get("has_breaks"))
+            docx_catalogs = dict(docx_payload.get("catalogs") or {})
+            docx_structured_sections = list(docx_payload.get("structured_sections") or [])
+            docx_page_assets = list(docx_payload.get("page_assets") or [])
             uno_text, uno_has_breaks = _extract_office_text_by_uno_pages(file_path)
             native_page_count = _require_libreoffice_physical_page_count(
                 file_path,
@@ -1085,6 +1432,8 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "native_catalog": docx_catalogs.get("native_catalog") or [],
                         "style_catalog": docx_catalogs.get("style_catalog") or [],
                         "font_catalog": docx_catalogs.get("font_catalog") or [],
+                        "structured_sections": docx_structured_sections,
+                        "structured_page_assets": docx_page_assets,
                     },
                     doc_id=file_path,
                 )
@@ -1100,6 +1449,8 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "native_catalog": docx_catalogs.get("native_catalog") or [],
                         "style_catalog": docx_catalogs.get("style_catalog") or [],
                         "font_catalog": docx_catalogs.get("font_catalog") or [],
+                        "structured_sections": docx_structured_sections,
+                        "structured_page_assets": docx_page_assets,
                     },
                     doc_id=file_path,
                 )
@@ -1117,6 +1468,8 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "native_catalog": docx_catalogs.get("native_catalog") or [],
                         "style_catalog": docx_catalogs.get("style_catalog") or [],
                         "font_catalog": docx_catalogs.get("font_catalog") or [],
+                        "structured_sections": docx_structured_sections,
+                        "structured_page_assets": docx_page_assets,
                     },
                     doc_id=file_path,
                 )
@@ -1133,6 +1486,8 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "native_catalog": docx_catalogs.get("native_catalog") or [],
                         "style_catalog": docx_catalogs.get("style_catalog") or [],
                         "font_catalog": docx_catalogs.get("font_catalog") or [],
+                        "structured_sections": docx_structured_sections,
+                        "structured_page_assets": docx_page_assets,
                     },
                     doc_id=file_path,
                 )
@@ -1151,6 +1506,8 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
                         "native_catalog": docx_catalogs.get("native_catalog") or [],
                         "style_catalog": docx_catalogs.get("style_catalog") or [],
                         "font_catalog": docx_catalogs.get("font_catalog") or [],
+                        "structured_sections": docx_structured_sections,
+                        "structured_page_assets": docx_page_assets,
                     },
                     doc_id=file_path,
                 )
@@ -1190,10 +1547,13 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
         metadata["file_name"] = file_path
         metadata.setdefault("source_extension", ext)
         if ext == ".docx":
-            docx_catalogs = _extract_docx_catalog_metadata(file_path)
+            docx_payload = _extract_docx_structured_payload(file_path)
+            docx_catalogs = dict(docx_payload.get("catalogs") or {})
             metadata.setdefault("native_catalog", docx_catalogs.get("native_catalog") or [])
             metadata.setdefault("style_catalog", docx_catalogs.get("style_catalog") or [])
             metadata.setdefault("font_catalog", docx_catalogs.get("font_catalog") or [])
+            metadata.setdefault("structured_sections", list(docx_payload.get("structured_sections") or []))
+            metadata.setdefault("structured_page_assets", list(docx_payload.get("page_assets") or []))
         return Document(
             text=first.text,
             metadata=metadata,

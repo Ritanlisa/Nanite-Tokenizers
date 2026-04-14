@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Set
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 import uvicorn
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -260,7 +260,17 @@ def _build_pipeline_debug(rag_doc: Any) -> Dict[str, Any]:
     return debug
 
 
-def _build_payload_from_file(file_path: str, *, include_build_debug: bool = False) -> Dict[str, Any]:
+def _export_markdown_from_rag_doc(rag_doc: Any) -> str:
+    if hasattr(rag_doc, "export_markdown_from_tree"):
+        return str(getattr(rag_doc, "export_markdown_from_tree")() or "")
+    return ""
+
+
+def _build_payload_and_rag_doc_from_file(
+    file_path: str,
+    *,
+    include_build_debug: bool = False,
+) -> tuple[Dict[str, Any], Any]:
     from rag.documents import load_rag_documents_from_paths, _probe_libreoffice_physical_page_count
 
     source_file = Path(file_path).expanduser().resolve()
@@ -336,6 +346,14 @@ def _build_payload_from_file(file_path: str, *, include_build_debug: bool = Fals
       f"expected_page_count={expected_pages}, aligned={is_aligned}"
     )
 
+    return payload, rag_doc
+
+
+def _build_payload_from_file(file_path: str, *, include_build_debug: bool = False) -> Dict[str, Any]:
+    payload, _ = _build_payload_and_rag_doc_from_file(
+        file_path,
+        include_build_debug=include_build_debug,
+    )
     return payload
 
 
@@ -349,6 +367,27 @@ def _save_upload(upload: UploadFile) -> Path:
     content = upload.file.read()
     saved.write_bytes(content)
     return saved
+
+
+def _resolve_workspace_asset_path(raw_path: str) -> Path:
+    asset_path = str(raw_path or "").strip()
+    if not asset_path:
+        raise HTTPException(status_code=400, detail="缺少资产路径")
+
+    candidate = Path(asset_path).expanduser()
+    if candidate.is_absolute():
+        candidate = candidate.resolve()
+    else:
+        candidate = (PROJECT_ROOT / candidate).resolve()
+
+    try:
+        candidate.relative_to(PROJECT_ROOT)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="资产路径超出工作区范围") from exc
+
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="资产文件不存在")
+    return candidate
 
 
 def _build_page_html() -> str:
@@ -490,6 +529,49 @@ def _build_page_html() -> str:
       white-space: pre-wrap;
       word-break: break-word;
     }
+    .asset-media-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+    }
+    .asset-media-entry {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+      background: rgba(255,255,255,0.03);
+      min-height: 68px;
+    }
+    .asset-media-item {
+      display: block;
+      color: inherit;
+      text-decoration: none;
+    }
+    .asset-link {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .asset-link:hover {
+      text-decoration: underline;
+    }
+    .asset-thumb {
+      display: block;
+      width: 100%;
+      max-height: 180px;
+      object-fit: contain;
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.22);
+      margin-bottom: 6px;
+    }
+    .asset-path {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.4;
+      word-break: break-word;
+      white-space: pre-wrap;
+      margin-top: 6px;
+    }
     .asset-kv {
       display: grid;
       grid-template-columns: 96px 1fr;
@@ -612,7 +694,84 @@ def _build_page_html() -> str:
       return text ? [text] : [];
     }
 
-    function renderAssetList(title, items) {
+    function isLikelyFilePath(value) {
+      const text = String(value || '').trim();
+      if (!text) return false;
+      return text.startsWith('/') || text.startsWith('./') || text.startsWith('../');
+    }
+
+    function isPreviewableImagePath(value) {
+      const text = String(value || '').trim().toLowerCase();
+      if (!isLikelyFilePath(text)) return false;
+      return /\\.(png|jpe?g|gif|webp|bmp|svg)$/.test(text);
+    }
+
+    function buildAssetHref(value) {
+      return `/api/asset?path=${encodeURIComponent(String(value || '').trim())}`;
+    }
+
+    function renderAssetTextItem(item) {
+      const text = String(item || '').trim();
+      const li = document.createElement('li');
+      if (isLikelyFilePath(text)) {
+        const link = document.createElement('a');
+        link.className = 'asset-link';
+        link.href = buildAssetHref(text);
+        link.target = '_blank';
+        link.rel = 'noreferrer';
+        link.textContent = text;
+        li.appendChild(link);
+      } else {
+        li.textContent = text;
+      }
+      return li;
+    }
+
+    function renderImageAssetItem(item) {
+      const text = String(item || '').trim();
+      const entry = document.createElement('div');
+      entry.className = 'asset-media-entry';
+
+      if (isPreviewableImagePath(text)) {
+        const link = document.createElement('a');
+        link.className = 'asset-media-item';
+        link.href = buildAssetHref(text);
+        link.target = '_blank';
+        link.rel = 'noreferrer';
+
+        const img = document.createElement('img');
+        img.className = 'asset-thumb';
+        img.loading = 'lazy';
+        img.src = buildAssetHref(text);
+        img.alt = text.split(/[\\/]/).pop() || 'asset image';
+        link.appendChild(img);
+
+        const pathText = document.createElement('div');
+        pathText.className = 'asset-path';
+        pathText.textContent = text;
+        link.appendChild(pathText);
+        entry.appendChild(link);
+        return entry;
+      }
+
+      if (isLikelyFilePath(text)) {
+        const link = document.createElement('a');
+        link.className = 'asset-link';
+        link.href = buildAssetHref(text);
+        link.target = '_blank';
+        link.rel = 'noreferrer';
+        link.textContent = '打开文件';
+        entry.appendChild(link);
+      }
+
+      const pathText = document.createElement('div');
+      pathText.className = 'asset-path';
+      pathText.textContent = text;
+      entry.appendChild(pathText);
+      return entry;
+    }
+
+    function renderAssetList(title, items, options = {}) {
       const card = document.createElement('div');
       card.className = 'asset-card';
       const head = document.createElement('div');
@@ -629,12 +788,20 @@ def _build_page_html() -> str:
         return card;
       }
 
+      if (String(options.kind || '') === 'image') {
+        const grid = document.createElement('div');
+        grid.className = 'asset-media-list';
+        for (const item of list) {
+          grid.appendChild(renderImageAssetItem(item));
+        }
+        card.appendChild(grid);
+        return card;
+      }
+
       const ul = document.createElement('ul');
       ul.className = 'asset-list';
       for (const item of list) {
-        const li = document.createElement('li');
-        li.textContent = String(item);
-        ul.appendChild(li);
+        ul.appendChild(renderAssetTextItem(item));
       }
       card.appendChild(ul);
       return card;
@@ -687,7 +854,7 @@ def _build_page_html() -> str:
       assetsEl.appendChild(renderAssetList('页眉 Header', headers));
       assetsEl.appendChild(renderAssetList('页脚 Footer', footers));
       assetsEl.appendChild(renderAssetList('页码 Page Number', pageNumbers));
-      assetsEl.appendChild(renderAssetList('图片 Images', images));
+      assetsEl.appendChild(renderAssetList('图片 Images', images, { kind: 'image' }));
     }
 
     function renderVars(node) {
@@ -842,7 +1009,8 @@ def _build_page_html() -> str:
         `expected_pages=${payload.expected_page_count || 0}`,
         `aligned=${aligned ? 'yes' : 'no'}`,
         `pagination=${payload.pagination_mode || ''}`,
-        `nodes=${nodes.length}`
+        `nodes=${nodes.length}`,
+        `debug_json=${payload.debug_json_path || ''}`
       ].join(' | ');
       if (!aligned && Number(payload.native_page_count || 0) > 0) {
         setStatus(`页数未对齐: mono=${payload.mono_page_count || 0}, expected=${payload.expected_page_count || payload.native_page_count || 0}`, true);
@@ -908,6 +1076,11 @@ def create_app() -> FastAPI:
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    @app.get("/api/asset")
+    async def asset(path: str) -> FileResponse:
+      resolved = _resolve_workspace_asset_path(path)
+      return FileResponse(resolved)
+
     return app
 
 
@@ -918,19 +1091,30 @@ def main() -> None:
     parser.add_argument("--no-open", action="store_true", help="启动后不自动打开浏览器")
     parser.add_argument("--input-file", default="", help="直接构建指定文件并输出结果，不启动 Web")
     parser.add_argument("--output-json", default="", help="配合 --input-file 使用：将 payload 写入指定 JSON 文件")
+    parser.add_argument("--output-markdown", default="", help="配合 --input-file 使用：将整棵文档树导出为 Markdown 文件")
     parser.add_argument("--print-tree", action="store_true", help="配合 --input-file 使用：在终端打印 catalog 树")
     parser.add_argument("--include-build-debug", action="store_true", help="配合 --input-file 使用：输出构建过程中的 marker/range/section-map 调试信息")
     args = parser.parse_args()
 
     input_file = str(args.input_file or "").strip()
     if input_file:
-        payload = _build_payload_from_file(input_file, include_build_debug=bool(args.include_build_debug))
+        payload, rag_doc = _build_payload_and_rag_doc_from_file(
+            input_file,
+            include_build_debug=bool(args.include_build_debug),
+        )
         output_json = str(args.output_json or "").strip()
         if output_json:
             out_path = Path(output_json).expanduser().resolve()
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             print(f"[DocTreeDebug] Payload JSON: {out_path}")
+        output_markdown = str(args.output_markdown or "").strip()
+        if output_markdown:
+            markdown_path = Path(output_markdown).expanduser().resolve()
+            markdown_path.parent.mkdir(parents=True, exist_ok=True)
+            markdown_text = _export_markdown_from_rag_doc(rag_doc)
+            markdown_path.write_text(markdown_text, encoding="utf-8")
+            print(f"[DocTreeDebug] Exported Markdown: {markdown_path}")
         if args.print_tree:
             print("\n[DocTreeDebug] Tree Lines")
             for line in _catalog_tree_lines(payload.get("tree") or []):

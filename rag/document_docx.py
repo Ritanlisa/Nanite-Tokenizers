@@ -166,6 +166,7 @@ class DocxRAGDocument(RAG_DB_Document):
                     )
                 )
 
+        self._apply_structured_section_fallback(page_nodes, source_ranges)
         physical_ranges = self._materialize_physical_ranges_from_pages(page_nodes, source_ranges)
         tree_ranges = list(physical_ranges)
         if not tree_ranges and main_section_map:
