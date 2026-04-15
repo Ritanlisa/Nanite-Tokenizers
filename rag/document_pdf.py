@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from llama_index.core import Document
 
-from rag.document_interface import MonoPage, PageAssets, RAG_DB_Document
+from rag.document_interface import ImageAsset, MonoPage, PageAssets, RAG_DB_Document
 from rag.preprocessor import clean_document
 
 try:
@@ -251,8 +251,8 @@ class PDFRAGDocument(RAG_DB_Document):
             break
         return "\n".join(lines).strip()
 
-    def _extract_pdf_page_images(self, page_count: int) -> List[List[str]]:
-        results: List[List[str]] = [[] for _ in range(max(0, int(page_count or 0)))]
+    def _extract_pdf_page_images(self, page_count: int) -> List[List[Any]]:
+        results: List[List[Any]] = [[] for _ in range(max(0, int(page_count or 0)))]
         file_path = str(self.metadata.get("file_name") or "").strip()
         if not file_path or not os.path.isfile(file_path):
             return results
@@ -262,12 +262,10 @@ class PDFRAGDocument(RAG_DB_Document):
             return results
 
         try:
-            output_dir = self._asset_output_dir()
             with fitz.open(file_path) as pdf_doc:
                 for page_idx in range(min(int(pdf_doc.page_count or 0), len(results))):
                     page = pdf_doc.load_page(page_idx)
                     seen_xrefs: set[int] = set()
-                    image_counter = 0
                     for image_meta in page.get_images(full=True):
                         if not image_meta:
                             continue
@@ -282,12 +280,18 @@ class PDFRAGDocument(RAG_DB_Document):
                         ext = str(image_info.get("ext") or "png").strip().lower() or "png"
                         if not image_bytes:
                             continue
-                        image_counter += 1
-                        out_path = os.path.join(output_dir, f"page-{page_idx + 1:04d}-img-{image_counter:02d}.{ext}")
-                        if not os.path.isfile(out_path):
-                            with open(out_path, "wb") as handle:
-                                handle.write(image_bytes)
-                        results[page_idx].append(out_path)
+                        filename = f"page-{page_idx + 1:04d}-xref-{xref}.{ext}"
+                        results[page_idx].append(
+                            ImageAsset.from_bytes(
+                                data=bytes(image_bytes),
+                                filename=filename,
+                                media_type=f"image/{ext}",
+                                width=int(image_info.get("width") or 0),
+                                height=int(image_info.get("height") or 0),
+                                source=f"{os.path.basename(file_path)}#page={page_idx + 1};xref={xref}",
+                                page=page_idx + 1,
+                            )
+                        )
         except Exception:
             return [[] for _ in range(max(0, int(page_count or 0)))]
         return results
@@ -423,17 +427,35 @@ class PDFRAGDocument(RAG_DB_Document):
         tool_pages = self._extract_with_pymupdf4llm()
         if tool_pages is not None:
             page_texts = [str(item.get("text") or "") for item in tool_pages]
+            metadata_markers = self._extract_markers_from_metadata(["native_catalog"])
             toc_markers = self._extract_toc_item_markers(tool_pages)
-            markers = list(toc_markers) if toc_markers else self._extract_main_compatible_markers(page_texts)
-            ranges = self._ranges_from_main_markers(markers, len(page_texts))
-            main_section_map = self._extract_main_page_section_map(page_texts) if not toc_markers else {}
+            marker_source = "native_catalog" if metadata_markers else ("tool_toc" if toc_markers else "main_compatible")
+            markers = list(metadata_markers) if metadata_markers else (list(toc_markers) if toc_markers else self._extract_main_compatible_markers(page_texts))
+            markers = self._remap_markers_with_text_hits(markers, page_texts, len(page_texts))
+            markers = self._prune_unmatched_tail_markers(markers, page_texts)
+            ranges = self.derive_catalog_ranges(markers, len(page_texts))
+            main_section_map = self._extract_main_page_section_map(page_texts) if not metadata_markers and not toc_markers else {}
+            range_source = marker_source
             if not ranges:
                 fallback_markers = self.extract_multilevel_catalog_markers(
                     page_texts,
                     metadata_keys=["native_catalog", "style_catalog", "font_catalog"],
                 )
                 fallback_markers = self._remap_markers_with_text_hits(fallback_markers, page_texts, len(page_texts))
+                markers = list(fallback_markers)
                 ranges = self.derive_catalog_ranges(fallback_markers, len(page_texts))
+                range_source = "fallback_multilevel"
+
+            self.set_build_trace(
+                builder="pdf-tool",
+                marker_source=marker_source,
+                range_source=range_source,
+                source_page_count=len(page_texts),
+                target_page_count=len(page_texts),
+                selected_markers=list(markers),
+                tree_ranges=list(ranges),
+                main_section_map=dict(main_section_map),
+            )
 
             page_layouts = self._normalize_page_layouts([self._extract_page_layout_from_tool_page(item) for item in tool_pages])
             page_images = self._extract_pdf_page_images(len(tool_pages))
@@ -457,10 +479,12 @@ class PDFRAGDocument(RAG_DB_Document):
                     mapped_parts = [part.strip() for part in mapped_path.split(" > ") if part.strip()]
                     section_title = mapped_parts[-1] if mapped_parts else mapped_path
                     section_path = mapped_path
+                    section_resolver = "main_section_map"
                 else:
                     section = self._pick_catalog_section(page_idx, ranges)
                     section_title = str(section.get("title")) if section else f"PDF Page {page_idx}"
                     section_path = section_title if not section else f"L{section['level']}/{section_title}"
+                    section_resolver = "catalog_range" if section else "guessed"
                 page_meta: Dict[str, Any] = {
                     "doc_name": self.doc_name,
                     "file_name": self.doc_name,
@@ -472,9 +496,13 @@ class PDFRAGDocument(RAG_DB_Document):
                     "section_end_page": page_idx,
                     "page": page_idx,
                     "logical_page": self._parse_page_number_hint(page_number_hint) or page_idx,
+                    "resolved_section_path": section_path,
+                    "section_resolver": section_resolver,
                     "header_text": "\n".join(headers),
                     "footer_text": "\n".join(footers),
                     "page_number_hint": page_number_hint,
+                    "physical_page": page_idx,
+                    "raw_page_text": body_text,
                 }
 
                 images = self.resolve_page_images(
@@ -511,6 +539,10 @@ class PDFRAGDocument(RAG_DB_Document):
                         )
                     )
 
+            self.set_build_trace(
+                page_layout_count=len(page_layouts),
+                physical_page_count=len(page_nodes),
+            )
             self.set_page_nodes(self.build_catalog_tree(page_nodes, ranges))
             self.chunk_documents = chunks
             self.page_count = len(page_nodes)
@@ -531,15 +563,33 @@ class PDFRAGDocument(RAG_DB_Document):
         if not page_texts:
             page_texts = [self.cleaned_text.strip()]
 
-        markers = self._extract_main_compatible_markers(page_texts)
-        ranges = self._ranges_from_main_markers(markers, len(page_texts))
+        metadata_markers = self._extract_markers_from_metadata(["native_catalog"])
+        marker_source = "native_catalog" if metadata_markers else "main_compatible"
+        markers = list(metadata_markers) if metadata_markers else self._extract_main_compatible_markers(page_texts)
+        markers = self._remap_markers_with_text_hits(markers, page_texts, len(page_texts))
+        markers = self._prune_unmatched_tail_markers(markers, page_texts)
+        ranges = self.derive_catalog_ranges(markers, len(page_texts))
         main_section_map = self._extract_main_page_section_map(page_texts)
+        range_source = marker_source
         if not ranges:
             fallback_markers = self.extract_multilevel_catalog_markers(
                 page_texts,
                 metadata_keys=["native_catalog", "style_catalog", "font_catalog"],
             )
+            markers = list(fallback_markers)
             ranges = self.derive_catalog_ranges(fallback_markers, len(page_texts))
+            range_source = "fallback_multilevel"
+
+        self.set_build_trace(
+            builder="pdf-text",
+            marker_source=marker_source,
+            range_source=range_source,
+            source_page_count=len(page_texts),
+            target_page_count=len(page_texts),
+            selected_markers=list(markers),
+            tree_ranges=list(ranges),
+            main_section_map=dict(main_section_map),
+        )
 
         page_nodes: List[MonoPage] = []
         chunks: List[Document] = []
@@ -549,10 +599,12 @@ class PDFRAGDocument(RAG_DB_Document):
                 mapped_parts = [part.strip() for part in mapped_path.split(" > ") if part.strip()]
                 section_title = mapped_parts[-1] if mapped_parts else mapped_path
                 section_path = mapped_path
+                section_resolver = "main_section_map"
             else:
                 section = self._pick_catalog_section(page_idx, ranges)
                 section_title = str(section.get("title")) if section else f"PDF Page {page_idx}"
                 section_path = section_title if not section else f"L{section['level']}/{section_title}"
+                section_resolver = "catalog_range" if section else "guessed"
             page_meta: Dict[str, Any] = {
                 "doc_name": self.doc_name,
                 "file_name": self.doc_name,
@@ -563,6 +615,10 @@ class PDFRAGDocument(RAG_DB_Document):
                 "section_start_page": page_idx,
                 "section_end_page": page_idx,
                 "page": page_idx,
+                "resolved_section_path": section_path,
+                "section_resolver": section_resolver,
+                "physical_page": page_idx,
+                "raw_page_text": page_text,
             }
 
             node = self.create_mono_page_node(
@@ -585,6 +641,7 @@ class PDFRAGDocument(RAG_DB_Document):
                     )
                 )
 
+            self.set_build_trace(physical_page_count=len(page_nodes))
         self.set_page_nodes(self.build_catalog_tree(page_nodes, ranges))
         self.chunk_documents = chunks
         self.page_count = len(page_nodes)

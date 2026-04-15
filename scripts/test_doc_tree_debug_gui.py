@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from io import BytesIO
 import json
 import re
 import sys
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Set
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 import uvicorn
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -36,6 +37,19 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 DEBUG_JSON_DIR = Path("tmp") / "doc_tree_debug_json"
 DEBUG_JSON_DIR.mkdir(parents=True, exist_ok=True)
 
+DEBUG_IMAGE_STORE: Dict[str, Any] = {}
+HEAVY_METADATA_KEYS: Set[str] = {
+  "structured_page_assets",
+  "page_layout",
+  "pdf_reference_pages",
+  "txt_reference_pages",
+  "structured_sections",
+  "native_catalog",
+  "style_catalog",
+  "font_catalog",
+  "pdf_reference_catalog",
+}
+
 
 def _sanitize_filename(name: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff._-]+", "_", str(name).strip())
@@ -47,6 +61,13 @@ def _json_safe(value: Any, *, depth: int = 0, max_depth: int = 8) -> Any:
         return str(value)
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
+    if isinstance(value, (bytes, bytearray)):
+        return {"type": "bytes", "byte_size": len(value)}
+    if hasattr(value, "to_debug_payload"):
+        try:
+            return _json_safe(value.to_debug_payload(), depth=depth + 1, max_depth=max_depth)
+        except Exception:
+            pass
     if isinstance(value, dict):
         return {
             str(key): _json_safe(item, depth=depth + 1, max_depth=max_depth)
@@ -56,6 +77,115 @@ def _json_safe(value: Any, *, depth: int = 0, max_depth: int = 8) -> Any:
         return [_json_safe(item, depth=depth + 1, max_depth=max_depth) for item in value]
     if hasattr(value, "__dict__"):
         return _json_safe(vars(value), depth=depth + 1, max_depth=max_depth)
+    return str(value)
+
+
+def _refresh_debug_image_store(rag_doc: Any) -> None:
+    DEBUG_IMAGE_STORE.clear()
+    pages = []
+    if hasattr(rag_doc, "get_mono_pages"):
+        try:
+            pages = list(getattr(rag_doc, "get_mono_pages")() or [])
+        except Exception:
+            pages = []
+    for page in pages:
+        try:
+            images = list(getattr(page, "get_images")() or [])
+        except Exception:
+            images = []
+        for image in images:
+            asset_id = str(getattr(image, "asset_id", "") or "").strip()
+            if not asset_id:
+                continue
+            DEBUG_IMAGE_STORE[asset_id] = image
+
+
+def _summarize_large_value(value: Any) -> Any:
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if len(text) <= 240:
+            return text
+        return {"char_count": len(text), "preview": text[:240]}
+    if isinstance(value, dict):
+        return {
+            "type": "dict",
+            "size": len(value),
+            "keys": [str(key) for key in list(value.keys())[:12]],
+        }
+    if isinstance(value, (list, tuple, set)):
+        return {"type": type(value).__name__, "size": len(value)}
+    if hasattr(value, "doc_id") or hasattr(value, "text"):
+        metadata = getattr(value, "metadata", {}) or {}
+        doc_text = str(getattr(value, "text", "") or "")
+        return {
+            "type": type(value).__name__,
+            "doc_id": str(getattr(value, "doc_id", "") or ""),
+            "metadata_keys": [str(key) for key in list(dict(metadata).keys())[:12]],
+            "text_chars": len(doc_text),
+        }
+    return str(value)
+
+
+def _metadata_snapshot(metadata: Any) -> Dict[str, Any]:
+    result: Dict[str, Any] = {}
+    meta = dict(metadata or {})
+    for key, value in meta.items():
+        key_text = str(key)
+        if key_text in HEAVY_METADATA_KEYS:
+            result[key_text] = _summarize_large_value(value)
+            continue
+        result[key_text] = _json_safe(value, max_depth=4)
+    return result
+
+
+def _local_asset_payload(page: Any) -> Dict[str, Any]:
+    assets = getattr(page, "assets", None)
+    if assets is None:
+        return {"headers": [], "footers": [], "page_numbers": [], "images": []}
+
+    def _clean_text_list(values: Any) -> list[str]:
+        cleaned: list[str] = []
+        for item in list(values or []):
+            text = str(item or "").strip()
+            if text:
+                cleaned.append(text)
+        return cleaned
+
+    images: list[Any] = []
+    for item in list(getattr(assets, "images", []) or []):
+        if hasattr(item, "to_debug_payload"):
+            try:
+                images.append(item.to_debug_payload())
+                continue
+            except Exception:
+                pass
+        text = str(item or "").strip()
+        if text:
+            images.append(text)
+
+    return {
+        "headers": _clean_text_list(getattr(assets, "headers", [])),
+        "footers": _clean_text_list(getattr(assets, "footers", [])),
+        "page_numbers": _clean_text_list(getattr(assets, "page_numbers", [])),
+        "images": images,
+    }
+
+
+def _snapshot_attr_value(key: str, value: Any) -> Any:
+    if key == "SubContent":
+        return f"<{len(value) if isinstance(value, list) else 0} children>"
+    if key in {"page_nodes", "chunk_documents", "catalog", "source_document", "cleaned_text"}:
+        return _summarize_large_value(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return _summarize_large_value(value)
+    if isinstance(value, dict):
+        if len(value) > 20:
+            return _summarize_large_value(value)
+        return {str(sub_key): _json_safe(sub_value, max_depth=2) for sub_key, sub_value in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return _summarize_large_value(value)
     return str(value)
 
 
@@ -71,16 +201,15 @@ def _page_variable_snapshot(page: Any) -> Dict[str, Any]:
         "category": str(getattr(page, "category", "") or ""),
         "title": str(getattr(page, "title", "") or ""),
         "markdown_text": str(getattr(page, "markdown_text", "") or ""),
-        "metadata": _json_safe(getattr(page, "metadata", {}) or {}),
-        "assets": _json_safe(getattr(page, "assets", None)),
-        "to_payload": _json_safe(page.to_payload()) if hasattr(page, "to_payload") else {},
+        "metadata": _metadata_snapshot(getattr(page, "metadata", {}) or {}),
+        "assets": _json_safe(getattr(page, "assets", None), max_depth=3),
+        "to_payload": _local_asset_payload(page),
     }
 
     for key, value in attrs.items():
-        if key == "SubContent":
-            snapshot[key] = f"<{len(value) if isinstance(value, list) else 0} children>"
+        if key in {"title", "markdown_text", "metadata", "assets"}:
             continue
-        snapshot[key] = _json_safe(value)
+        snapshot[key] = _snapshot_attr_value(key, value)
     return snapshot
 
 
@@ -94,7 +223,7 @@ def _serialize_page_node(page: Any, node_id_prefix: str = "node") -> Dict[str, A
         "title": title,
         "category": category,
         "class_name": type(page).__name__,
-        "metadata": _json_safe(getattr(page, "metadata", {}) or {}),
+        "metadata": _metadata_snapshot(getattr(page, "metadata", {}) or {}),
         "variables": _page_variable_snapshot(page),
         "children": [],
     }
@@ -205,6 +334,11 @@ def _build_pipeline_debug(rag_doc: Any) -> Dict[str, Any]:
         "font_catalog_count": len(list(getattr(rag_doc, "metadata", {}).get("font_catalog") or [])),
     }
 
+    build_trace = dict(getattr(rag_doc, "metadata", {}).get("_doc_tree_build_trace") or {})
+    if build_trace:
+        debug["build_trace"] = _json_safe(build_trace)
+        return debug
+
     cleaned_text = str(getattr(rag_doc, "cleaned_text", "") or "")
     if not cleaned_text:
         return debug
@@ -270,6 +404,9 @@ def _build_payload_and_rag_doc_from_file(
     file_path: str,
     *,
     include_build_debug: bool = False,
+  emit_summary: bool = False,
+  emit_tree: bool = False,
+  emit_boundary_debug: bool = False,
 ) -> tuple[Dict[str, Any], Any]:
     from rag.documents import load_rag_documents_from_paths, _probe_libreoffice_physical_page_count
 
@@ -286,22 +423,26 @@ def _build_payload_and_rag_doc_from_file(
         raise RuntimeError("文档树构建失败：未返回 RAG 文档对象")
 
     rag_doc = rag_docs[0]
+    _refresh_debug_image_store(rag_doc)
     page_nodes = list(rag_doc.get_page_nodes() or [])
     tree = [_serialize_page_node(node, node_id_prefix="root") for node in page_nodes]
     mono_pages = list(getattr(rag_doc, "get_mono_pages")() or []) if hasattr(rag_doc, "get_mono_pages") else []
-    mono_page_count = len(mono_pages)
+    single_pages = list(getattr(rag_doc, "get_single_pages")() or mono_pages) if hasattr(rag_doc, "get_single_pages") else mono_pages
+    mono_page_count = len(single_pages)
+    leaf_mono_page_count = len(mono_pages)
     native_page_count_raw = getattr(rag_doc, "metadata", {}).get("native_page_count") if hasattr(rag_doc, "metadata") else None
     native_page_count = int(native_page_count_raw or 0) if str(native_page_count_raw or "").strip() else 0
     runtime_native_page_count = int(_probe_libreoffice_physical_page_count(str(source_file)) or 0)
     page_count = int(getattr(rag_doc, "page_count", 0) or 0)
-    expected_pages = runtime_native_page_count or native_page_count
+    expected_pages = max(runtime_native_page_count, native_page_count)
     is_aligned = bool(expected_pages > 0 and mono_page_count == expected_pages and page_count == expected_pages)
-    print(f"\n[DocTreeDebug] Structured catalog for: {source_file.name}")
-    for line in _catalog_tree_lines(tree):
-      print(line)
+    if emit_tree:
+      print(f"\n[DocTreeDebug] Structured catalog for: {source_file.name}")
+      for line in _catalog_tree_lines(tree):
+        print(line)
 
     chapter_boundary_debug = _collect_chapter_boundary_debug(tree)
-    if chapter_boundary_debug:
+    if emit_boundary_debug and chapter_boundary_debug:
       print("\n[DocTreeDebug] Chapter Boundary Diagnostics")
       for row in chapter_boundary_debug:
         print(
@@ -322,6 +463,7 @@ def _build_payload_and_rag_doc_from_file(
       "pagination_mode": str(getattr(rag_doc, "pagination_mode", "") or ""),
       "page_count": page_count,
       "mono_page_count": mono_page_count,
+      "leaf_mono_page_count": leaf_mono_page_count,
       "native_page_count": native_page_count,
       "runtime_native_page_count": runtime_native_page_count,
       "expected_page_count": expected_pages,
@@ -338,13 +480,14 @@ def _build_payload_and_rag_doc_from_file(
     out_path = DEBUG_JSON_DIR / f"{safe_name}_{uuid.uuid4().hex[:8]}.json"
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     payload["debug_json_path"] = str(out_path)
-    print(f"[DocTreeDebug] JSON sidecar: {out_path}")
-    print(
-      "[DocTreeDebug] Alignment: "
-      f"page_count={page_count}, mono_page_count={mono_page_count}, "
-      f"native_page_count={native_page_count}, runtime_native_page_count={runtime_native_page_count}, "
-      f"expected_page_count={expected_pages}, aligned={is_aligned}"
-    )
+    if emit_summary:
+      print(f"[DocTreeDebug] JSON sidecar: {out_path}")
+      print(
+        "[DocTreeDebug] Alignment: "
+        f"page_count={page_count}, mono_page_count={mono_page_count}, leaf_mono_page_count={leaf_mono_page_count}, "
+        f"native_page_count={native_page_count}, runtime_native_page_count={runtime_native_page_count}, "
+        f"expected_page_count={expected_pages}, aligned={is_aligned}"
+      )
 
     return payload, rag_doc
 
@@ -353,6 +496,9 @@ def _build_payload_from_file(file_path: str, *, include_build_debug: bool = Fals
     payload, _ = _build_payload_and_rag_doc_from_file(
         file_path,
         include_build_debug=include_build_debug,
+        emit_summary=False,
+        emit_tree=False,
+        emit_boundary_debug=False,
     )
     return payload
 
@@ -388,6 +534,56 @@ def _resolve_workspace_asset_path(raw_path: str) -> Path:
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail="资产文件不存在")
     return candidate
+
+
+def _resolve_debug_image_asset(asset_id: str) -> Any:
+    key = str(asset_id or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="缺少 asset_id")
+    asset = DEBUG_IMAGE_STORE.get(key)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="调试图片不存在")
+    data = bytes(getattr(asset, "data", b"") or b"")
+    if not data:
+        raise HTTPException(status_code=404, detail="调试图片无二进制内容")
+    media_type = str(getattr(asset, "media_type", "") or "application/octet-stream").strip()
+    return asset, data, media_type
+
+def _build_debug_image_bytes(data: bytes, media_type: str, *, preview: bool = False, max_px: int = 360) -> tuple[bytes, str]:
+    payload = bytes(data or b"")
+    resolved_media_type = str(media_type or "application/octet-stream").strip() or "application/octet-stream"
+    if not preview or not payload or not resolved_media_type.startswith("image/"):
+        return payload, resolved_media_type
+    try:
+        from PIL import Image  # type: ignore
+
+        with Image.open(BytesIO(payload)) as image:
+            image.load()
+            resampling_owner = getattr(Image, "Resampling", None)
+            resampling = getattr(resampling_owner, "LANCZOS", None)
+            if resampling is None:
+                resampling = getattr(Image, "LANCZOS", None)
+            if resampling is None:
+                resampling = getattr(Image, "BICUBIC", 3)
+            resample_filter: Any = resampling
+            image.thumbnail((max(64, int(max_px or 360)), max(64, int(max_px or 360))), resample_filter)
+            fmt = str(getattr(image, "format", "") or "").strip().upper()
+            if not fmt:
+                fmt = str(resolved_media_type.split("/", 1)[-1] or "PNG").strip().upper()
+            if fmt == "JPG":
+                fmt = "JPEG"
+            save_image = image
+            if fmt in {"JPEG", "WEBP"} and image.mode not in {"RGB", "L"}:
+                save_image = image.convert("RGB")
+            output = BytesIO()
+            save_image.save(output, format=fmt, optimize=True)
+            output_bytes = output.getvalue()
+            if output_bytes:
+                resolved_media_type = str(getattr(Image, "MIME", {}).get(fmt) or resolved_media_type)
+                return output_bytes, resolved_media_type
+    except Exception:
+        return payload, resolved_media_type
+    return payload, resolved_media_type
 
 
 def _build_page_html() -> str:
@@ -688,10 +884,25 @@ def _build_page_html() -> str:
     }
 
     function toList(value) {
-      if (Array.isArray(value)) return value.filter(v => String(v || '').trim() !== '');
+      if (Array.isArray(value)) {
+        return value.filter(v => {
+          if (v && typeof v === 'object') return true;
+          return String(v || '').trim() !== '';
+        });
+      }
       if (value === null || value === undefined) return [];
+      if (typeof value === 'object') return [value];
       const text = String(value).trim();
       return text ? [text] : [];
+    }
+
+    function isImageAssetObject(value) {
+      return Boolean(value && typeof value === 'object' && String(value.asset_id || '').trim());
+    }
+
+    function isBrowserPreviewableMediaType(value) {
+      const text = String(value || '').trim().toLowerCase();
+      return /^(image\\/(png|jpe?g|gif|webp|bmp|svg\\+xml))$/.test(text);
     }
 
     function isLikelyFilePath(value) {
@@ -710,7 +921,24 @@ def _build_page_html() -> str:
       return `/api/asset?path=${encodeURIComponent(String(value || '').trim())}`;
     }
 
+    function buildAssetObjectHref(value, options = {}) {
+      const assetId = String((value && value.asset_id) || '').trim();
+      const params = new URLSearchParams({ asset_id: assetId });
+      if (options.preview) {
+        params.set('preview', '1');
+      }
+      if (options.maxPx) {
+        params.set('max_px', String(options.maxPx));
+      }
+      return `/api/asset-object?${params.toString()}`;
+    }
+
     function renderAssetTextItem(item) {
+      if (item && typeof item === 'object') {
+        const li = document.createElement('li');
+        li.textContent = pretty(item);
+        return li;
+      }
       const text = String(item || '').trim();
       const li = document.createElement('li');
       if (isLikelyFilePath(text)) {
@@ -728,9 +956,84 @@ def _build_page_html() -> str:
     }
 
     function renderImageAssetItem(item) {
-      const text = String(item || '').trim();
       const entry = document.createElement('div');
       entry.className = 'asset-media-entry';
+
+      if (isImageAssetObject(item)) {
+        const asset = item;
+        const hasBinary = Boolean(asset.has_binary);
+        const filename = String(asset.filename || asset.caption || asset.asset_id || 'asset').trim();
+        const mediaType = String(asset.media_type || '').trim();
+        const byteSize = Number(asset.byte_size || 0);
+        const source = String(asset.source || '').trim();
+        const canPreviewInBrowser = isBrowserPreviewableMediaType(mediaType) || /\\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(filename);
+
+        if (hasBinary && mediaType.startsWith('image/')) {
+          const box = document.createElement('div');
+          box.className = 'asset-media-item';
+
+          const controls = document.createElement('div');
+          controls.className = 'asset-path';
+          controls.textContent = [filename, mediaType, byteSize ? `${byteSize} bytes` : '', source].filter(Boolean).join('\\n');
+          box.appendChild(controls);
+
+          if (canPreviewInBrowser) {
+            const previewBtn = document.createElement('button');
+            previewBtn.type = 'button';
+            previewBtn.className = 'asset-link';
+            previewBtn.textContent = '加载预览';
+            previewBtn.onclick = (event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (box.querySelector('img.asset-thumb')) {
+                return;
+              }
+              previewBtn.disabled = true;
+              previewBtn.textContent = '预览加载中...';
+              const img = document.createElement('img');
+              img.className = 'asset-thumb';
+              img.loading = 'lazy';
+              img.decoding = 'async';
+              img.alt = filename;
+              img.src = buildAssetObjectHref(asset, { preview: true, maxPx: 360 });
+              img.onload = () => {
+                previewBtn.textContent = '预览已加载';
+              };
+              img.onerror = () => {
+                previewBtn.disabled = false;
+                previewBtn.textContent = '预览失败，重试';
+                img.remove();
+              };
+              box.insertBefore(img, controls);
+            };
+            box.appendChild(previewBtn);
+          } else {
+            const unsupported = document.createElement('div');
+            unsupported.className = 'asset-empty';
+            unsupported.textContent = `当前浏览器不支持直接预览 ${mediaType || '该格式'}，请打开原图查看。`;
+            box.appendChild(unsupported);
+          }
+
+          const openLink = document.createElement('a');
+          openLink.className = 'asset-link';
+          openLink.href = buildAssetObjectHref(asset);
+          openLink.target = '_blank';
+          openLink.rel = 'noreferrer';
+          openLink.textContent = '打开原图';
+          box.appendChild(openLink);
+
+          entry.appendChild(box);
+          return entry;
+        }
+
+        const info = document.createElement('div');
+        info.className = 'asset-path';
+        info.textContent = [filename, mediaType, byteSize ? `${byteSize} bytes` : '', source, pretty(asset)].filter(Boolean).join('\\n');
+        entry.appendChild(info);
+        return entry;
+      }
+
+      const text = String(item || '').trim();
 
       if (isPreviewableImagePath(text)) {
         const link = document.createElement('a');
@@ -807,6 +1110,82 @@ def _build_page_html() -> str:
       return card;
     }
 
+    function getLocalAssetPayload(node) {
+      const vars = node && node.variables && typeof node.variables === 'object' ? node.variables : {};
+      return vars.to_payload && typeof vars.to_payload === 'object' ? vars.to_payload : {};
+    }
+
+    function collectNodeAssets(node, options = {}) {
+      const includeLists = Boolean(options.includeLists);
+      const imageStoreLimit = Number.isFinite(options.imageStoreLimit) ? Number(options.imageStoreLimit) : Number.POSITIVE_INFINITY;
+      const headers = [];
+      const footers = [];
+      const pageNumbers = [];
+      const images = [];
+      const seenHeaders = new Set();
+      const seenFooters = new Set();
+      const seenPageNumbers = new Set();
+      const seenImages = new Set();
+      let imageCount = 0;
+      const stack = [node];
+
+      function pushUniqueText(items, seen, out) {
+        for (const item of toList(items)) {
+          const text = String(item || '').trim();
+          if (!text || seen.has(text)) {
+            continue;
+          }
+          seen.add(text);
+          if (includeLists) {
+            out.push(text);
+          }
+        }
+      }
+
+      function pushUniqueImage(items) {
+        for (const item of toList(items)) {
+          const key = item && typeof item === 'object'
+            ? String(item.asset_id || item.source || item.filename || JSON.stringify(item))
+            : String(item || '').trim();
+          if (!key || seenImages.has(key)) {
+            continue;
+          }
+          seenImages.add(key);
+          imageCount += 1;
+          if (includeLists && images.length < imageStoreLimit) {
+            images.push(item);
+          }
+        }
+      }
+
+      while (stack.length > 0) {
+        const current = stack.pop();
+        if (!current || typeof current !== 'object') {
+          continue;
+        }
+        const payload = getLocalAssetPayload(current);
+        pushUniqueText(payload.headers, seenHeaders, headers);
+        pushUniqueText(payload.footers, seenFooters, footers);
+        pushUniqueText(payload.page_numbers, seenPageNumbers, pageNumbers);
+        pushUniqueImage(payload.images);
+        const children = Array.isArray(current.children) ? current.children : [];
+        for (const child of children) {
+          stack.push(child);
+        }
+      }
+
+      return {
+        headers,
+        footers,
+        pageNumbers,
+        images,
+        headerCount: seenHeaders.size,
+        footerCount: seenFooters.size,
+        pageNumberCount: seenPageNumbers.size,
+        imageCount,
+      };
+    }
+
     function renderAssets(node) {
       if (!assetsEl) {
         return;
@@ -816,14 +1195,14 @@ def _build_page_html() -> str:
         return;
       }
 
-      const vars = node.variables && typeof node.variables === 'object' ? node.variables : {};
-      const payload = vars.to_payload && typeof vars.to_payload === 'object' ? vars.to_payload : {};
       const metadata = node.metadata && typeof node.metadata === 'object' ? node.metadata : {};
+      const isChapter = String(node.category || '').toLowerCase() === 'chapter';
+      const assets = collectNodeAssets(node, { includeLists: true, imageStoreLimit: isChapter ? 24 : 48 });
 
-      const headers = toList(payload.headers || metadata.headers || metadata.header_text);
-      const footers = toList(payload.footers || metadata.footers || metadata.footer_text);
-      const pageNumbers = toList(payload.page_numbers || metadata.page_number_hint || metadata.page);
-      const images = toList(payload.images || metadata.images);
+      const headers = assets.headers.length > 0 ? assets.headers : toList(metadata.headers || metadata.header_text);
+      const footers = assets.footers.length > 0 ? assets.footers : toList(metadata.footers || metadata.footer_text);
+      const pageNumbers = assets.pageNumbers.length > 0 ? assets.pageNumbers : toList(metadata.page_number_hint || metadata.page);
+      const images = assets.images;
 
       const summary = document.createElement('div');
       summary.className = 'asset-card';
@@ -834,10 +1213,10 @@ def _build_page_html() -> str:
       const kv = document.createElement('div');
       kv.className = 'asset-kv';
       const rows = [
-        ['Headers', String(headers.length)],
-        ['Footers', String(footers.length)],
-        ['Page No.', String(pageNumbers.length)],
-        ['Images', String(images.length || Number(metadata.image_count || 0))],
+        ['Headers', String(assets.headerCount || headers.length)],
+        ['Footers', String(assets.footerCount || footers.length)],
+        ['Page No.', String(assets.pageNumberCount || pageNumbers.length)],
+        ['Images', String(assets.imageCount || Number(metadata.image_count || 0))],
       ];
       for (const [k, v] of rows) {
         const kEl = document.createElement('div');
@@ -851,10 +1230,30 @@ def _build_page_html() -> str:
       summary.appendChild(kv);
 
       assetsEl.appendChild(summary);
+      if (isChapter && assets.imageCount > images.length) {
+        const note = document.createElement('div');
+        note.className = 'asset-empty';
+        note.textContent = `Chapter 已汇总子页图片，当前仅展示前 ${images.length} 张，完整数量为 ${assets.imageCount}。`;
+        assetsEl.appendChild(note);
+      }
       assetsEl.appendChild(renderAssetList('页眉 Header', headers));
       assetsEl.appendChild(renderAssetList('页脚 Footer', footers));
       assetsEl.appendChild(renderAssetList('页码 Page Number', pageNumbers));
       assetsEl.appendChild(renderAssetList('图片 Images', images, { kind: 'image' }));
+    }
+
+    function summarizeVarValue(value) {
+      if (typeof value === 'string') {
+        if (value.length <= 8000) {
+          return value;
+        }
+        return `${value.slice(0, 8000)}\n\n...[truncated ${value.length - 8000} chars]`;
+      }
+      const text = pretty(value);
+      if (text.length <= 16000) {
+        return text;
+      }
+      return `${text.slice(0, 16000)}\n\n...[truncated ${text.length - 16000} chars]`;
     }
 
     function renderVars(node) {
@@ -871,7 +1270,7 @@ def _build_page_html() -> str:
         name.textContent = k;
         const box = document.createElement('textarea');
         box.readOnly = true;
-        box.value = pretty(v);
+        box.value = summarizeVarValue(v);
         card.appendChild(name);
         card.appendChild(box);
         varsEl.appendChild(card);
@@ -1004,6 +1403,7 @@ def _build_page_html() -> str:
         `doc_name=${payload.doc_name || ''}`,
         `page_count=${payload.page_count || 0}`,
         `mono_pages=${payload.mono_page_count || 0}`,
+        `leaf_pages=${payload.leaf_mono_page_count || 0}`,
         `native_pages=${payload.native_page_count || 0}`,
         `runtime_native_pages=${payload.runtime_native_page_count || 0}`,
         `expected_pages=${payload.expected_page_count || 0}`,
@@ -1028,7 +1428,7 @@ def _build_page_html() -> str:
         if (varsEl) varsEl.innerHTML = '';
       }
       if (aligned) {
-        setStatus(`构建完成，页数已对齐（mono=${payload.mono_page_count || 0}）`);
+        setStatus(`构建完成，页数已对齐（mono=${payload.mono_page_count || 0}, leaf=${payload.leaf_mono_page_count || 0}）`);
       } else if (Number(payload.native_page_count || 0) <= 0) {
         setStatus(`构建完成，节点数: ${nodes.length}（未获取物理页数）`);
       }
@@ -1061,6 +1461,10 @@ def _build_page_html() -> str:
 def create_app() -> FastAPI:
     app = FastAPI(title="Doc Tree Debug GUI")
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> Response:
+        return Response(status_code=204)
+
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
         return _build_page_html()
@@ -1081,56 +1485,97 @@ def create_app() -> FastAPI:
       resolved = _resolve_workspace_asset_path(path)
       return FileResponse(resolved)
 
+    @app.get("/api/asset-object")
+    async def asset_object(asset_id: str, preview: int = 0, max_px: int = 360) -> Response:
+      asset, data, media_type = _resolve_debug_image_asset(asset_id)
+      data, media_type = _build_debug_image_bytes(
+          data,
+          media_type,
+          preview=bool(int(preview or 0)),
+          max_px=max(64, min(1200, int(max_px or 360))),
+      )
+      filename = str(getattr(asset, "filename", "") or "asset.bin").replace('"', "")
+      headers = {"Content-Disposition": f'inline; filename="{filename}"'}
+      return Response(content=data, media_type=media_type, headers=headers)
+
     return app
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="文档树调试前端（浏览器选文件）")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=7869)
-    parser.add_argument("--no-open", action="store_true", help="启动后不自动打开浏览器")
-    parser.add_argument("--input-file", default="", help="直接构建指定文件并输出结果，不启动 Web")
-    parser.add_argument("--output-json", default="", help="配合 --input-file 使用：将 payload 写入指定 JSON 文件")
-    parser.add_argument("--output-markdown", default="", help="配合 --input-file 使用：将整棵文档树导出为 Markdown 文件")
-    parser.add_argument("--print-tree", action="store_true", help="配合 --input-file 使用：在终端打印 catalog 树")
-    parser.add_argument("--include-build-debug", action="store_true", help="配合 --input-file 使用：输出构建过程中的 marker/range/section-map 调试信息")
-    args = parser.parse_args()
+  parser = argparse.ArgumentParser(description="文档树调试前端（浏览器选文件）")
+  parser.add_argument("--host", default="127.0.0.1")
+  parser.add_argument("--port", type=int, default=7869)
+  parser.add_argument("--open-browser", action="store_true", help="启动后自动打开外部浏览器")
+  parser.add_argument("--no-open", action="store_true", help="兼容旧参数：禁止自动打开浏览器")
+  parser.add_argument("--input-file", default="", help="直接构建指定文件并输出结果，不启动 Web")
+  parser.add_argument("--input-files", nargs="*", default=[], help="批量构建多个文件并输出结果，不启动 Web")
+  parser.add_argument("--output-json", default="", help="配合 --input-file 使用：将 payload 写入指定 JSON 文件")
+  parser.add_argument("--output-markdown", default="", help="配合 --input-file 使用：将整棵文档树导出为 Markdown 文件")
+  parser.add_argument("--output-dir", default="", help="配合 --input-files 使用：将每个文件的 JSON/Markdown 写入该目录")
+  parser.add_argument("--print-tree", action="store_true", help="配合 --input-file 使用：在终端打印 catalog 树")
+  parser.add_argument("--include-build-debug", action="store_true", help="配合 --input-file 使用：输出构建过程中的 marker/range/section-map 调试信息")
+  args = parser.parse_args()
 
-    input_file = str(args.input_file or "").strip()
-    if input_file:
-        payload, rag_doc = _build_payload_and_rag_doc_from_file(
-            input_file,
-            include_build_debug=bool(args.include_build_debug),
-        )
-        output_json = str(args.output_json or "").strip()
-        if output_json:
-            out_path = Path(output_json).expanduser().resolve()
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"[DocTreeDebug] Payload JSON: {out_path}")
-        output_markdown = str(args.output_markdown or "").strip()
-        if output_markdown:
-            markdown_path = Path(output_markdown).expanduser().resolve()
-            markdown_path.parent.mkdir(parents=True, exist_ok=True)
-            markdown_text = _export_markdown_from_rag_doc(rag_doc)
-            markdown_path.write_text(markdown_text, encoding="utf-8")
-            print(f"[DocTreeDebug] Exported Markdown: {markdown_path}")
-        if args.print_tree:
-            print("\n[DocTreeDebug] Tree Lines")
-            for line in _catalog_tree_lines(payload.get("tree") or []):
-                print(line)
-        return
+  input_files = [str(item or "").strip() for item in list(args.input_files or []) if str(item or "").strip()]
+  if input_files:
+    output_dir = Path(str(args.output_dir or "tmp/doc_tree_debug_batch")).expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for file_path in input_files:
+      payload, rag_doc = _build_payload_and_rag_doc_from_file(
+        file_path,
+        include_build_debug=bool(args.include_build_debug),
+        emit_summary=True,
+        emit_tree=False,
+        emit_boundary_debug=False,
+      )
+      stem = _sanitize_filename(Path(file_path).stem)
+      json_path = output_dir / f"{stem}.json"
+      markdown_path = output_dir / f"{stem}.md"
+      json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+      markdown_path.write_text(_export_markdown_from_rag_doc(rag_doc), encoding="utf-8")
+      print(f"[DocTreeDebug] Batch JSON: {json_path}")
+      print(f"[DocTreeDebug] Batch Markdown: {markdown_path}")
+    return
 
-    if not args.no_open:
-        url = f"http://{args.host}:{args.port}"
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
+  input_file = str(args.input_file or "").strip()
+  if input_file:
+    payload, rag_doc = _build_payload_and_rag_doc_from_file(
+      input_file,
+      include_build_debug=bool(args.include_build_debug),
+      emit_summary=True,
+      emit_tree=bool(args.print_tree),
+      emit_boundary_debug=bool(args.print_tree),
+    )
+    output_json = str(args.output_json or "").strip()
+    if output_json:
+      out_path = Path(output_json).expanduser().resolve()
+      out_path.parent.mkdir(parents=True, exist_ok=True)
+      out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+      print(f"[DocTreeDebug] Payload JSON: {out_path}")
+    output_markdown = str(args.output_markdown or "").strip()
+    if output_markdown:
+      markdown_path = Path(output_markdown).expanduser().resolve()
+      markdown_path.parent.mkdir(parents=True, exist_ok=True)
+      markdown_text = _export_markdown_from_rag_doc(rag_doc)
+      markdown_path.write_text(markdown_text, encoding="utf-8")
+      print(f"[DocTreeDebug] Exported Markdown: {markdown_path}")
+    if args.print_tree:
+      print("\n[DocTreeDebug] Tree Lines")
+      for line in _catalog_tree_lines(payload.get("tree") or []):
+        print(line)
+    return
 
-    app = create_app()
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+  url = f"http://{args.host}:{args.port}"
+  print(f"[DocTreeDebug] URL: {url}")
+  if not bool(args.no_open):
+    try:
+      webbrowser.open(url)
+    except Exception:
+      pass
+
+  app = create_app()
+  uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":
-    main()
+  main()

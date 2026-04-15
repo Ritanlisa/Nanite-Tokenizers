@@ -47,11 +47,9 @@ class DocRAGDocument(RAG_DB_Document):
         main_ranges = self._ranges_from_main_markers(main_markers, len(page_texts))
         main_section_map = self._extract_main_page_section_map(page_texts)
         page_signals = self.build_page_signals(page_texts, source_ranges)
-        start_markers_by_page = self._build_target_page_start_marker_map(source_ranges, source_page_map)
 
-        page_nodes: List[MonoPage] = []
-        chunks: List[Document] = []
-        page_layouts = list(self.metadata.get("page_layout") or [])
+        physical_page_nodes: List[MonoPage] = []
+        page_layouts = self.get_page_layouts()
         for page_idx, page_text in enumerate(page_texts, start=1):
             signal = page_signals[page_idx - 1] if page_idx - 1 < len(page_signals) else {}
             logical_page = int(signal.get("logical_page_number") or page_idx)
@@ -83,13 +81,9 @@ class DocRAGDocument(RAG_DB_Document):
                 footers = [str(signal.get("footer_text") or "").strip()]
             images = self.resolve_page_images(
                 page_text,
-                [str(x).strip() for x in list(page_layout.get("images") or []) if str(x).strip()],
+                list(page_layout.get("images") or []),
             )
-            page_markdown = self._render_plaintext_page_to_markdown(
-                page_text,
-                start_markers=start_markers_by_page.get(page_idx, []),
-                page_number=page_idx,
-            )
+            page_markdown = self._render_plaintext_page_to_markdown(page_text, page_number=page_idx)
             page_number_hint = str(page_layout.get("page_number") or "").strip()
             if not page_number_hint:
                 page_number_hint = str(signal.get("page_number_hint") or "").strip()
@@ -114,6 +108,8 @@ class DocRAGDocument(RAG_DB_Document):
                 "footer_text": "\n".join(footers),
                 "page_number_hint": page_number_hint,
                 "image_count": len(images),
+                "physical_page": page_idx,
+                "raw_page_text": page_text,
             }
             node = self.create_mono_page_node(
                 page_number=page_idx,
@@ -123,29 +119,58 @@ class DocRAGDocument(RAG_DB_Document):
                 metadata=page_meta,
             )
             node.add_page_number(page_idx)
-            page_nodes.append(node)
+            physical_page_nodes.append(node)
 
-            for chunk_idx, chunk_text in enumerate(self._split_text_chunks(page_markdown), start=1):
-                chunk_meta = dict(page_meta)
+        self._apply_structured_section_fallback(physical_page_nodes, source_ranges)
+        physical_ranges = self._materialize_physical_ranges_from_pages(physical_page_nodes, source_ranges)
+        tree_ranges = list(physical_ranges)
+        tree_range_source = "physical_ranges"
+        if not tree_ranges and main_section_map:
+            tree_ranges = self._ranges_from_page_section_map(main_section_map, len(page_texts))
+            tree_range_source = "main_section_map"
+        if not tree_ranges and main_ranges:
+            tree_ranges = list(main_ranges)
+            tree_range_source = "main_ranges"
+
+        self.set_build_trace(
+            builder="doc",
+            source_page_count=source_page_count,
+            target_page_count=len(page_texts),
+            source_page_map=list(source_page_map),
+            source_ranges=list(source_ranges),
+            main_markers=list(main_markers),
+            main_ranges=list(main_ranges),
+            main_section_map=dict(main_section_map),
+            physical_ranges=list(physical_ranges),
+            tree_ranges=list(tree_ranges),
+            tree_range_source=tree_range_source,
+        )
+
+        leaf_page_nodes = self.split_mono_pages_by_section_markers(physical_page_nodes, tree_ranges)
+        chunks: List[Document] = []
+        for leaf_index, leaf_page in enumerate(leaf_page_nodes, start=1):
+            leaf_meta = dict(getattr(leaf_page, "metadata", {}) or {})
+            leaf_page_no = int(self.coerce_page_number(leaf_meta.get("page")) or leaf_index)
+            for chunk_idx, chunk_text in enumerate(self._split_text_chunks(str(getattr(leaf_page, "markdown_text", "") or "")), start=1):
+                if not str(chunk_text or "").strip():
+                    continue
+                chunk_meta = dict(leaf_meta)
                 chunk_meta["chunk_index"] = chunk_idx
                 chunks.append(
                     Document(
                         text=chunk_text,
                         metadata=chunk_meta,
-                        doc_id=f"{self.doc_name}::doc-page::{page_idx}::chunk::{chunk_idx}",
+                        doc_id=f"{self.doc_name}::doc-page::{leaf_page_no}::chunk::{chunk_idx}",
                     )
                 )
 
-        self._apply_structured_section_fallback(page_nodes, source_ranges)
-        physical_ranges = self._materialize_physical_ranges_from_pages(page_nodes, source_ranges)
-        tree_ranges = list(physical_ranges)
-        if not tree_ranges and main_section_map:
-            tree_ranges = self._ranges_from_page_section_map(main_section_map, len(page_texts))
-        if not tree_ranges and main_ranges:
-            tree_ranges = list(main_ranges)
-        self.set_page_nodes(self.build_catalog_tree(page_nodes, tree_ranges))
+            self.set_build_trace(
+                leaf_page_count=len(leaf_page_nodes),
+                physical_page_count=len(physical_page_nodes),
+            )
+        self.set_page_nodes(self.build_catalog_tree(leaf_page_nodes, tree_ranges))
         self.chunk_documents = chunks
-        self.page_count = len(page_nodes)
+        self.page_count = len(physical_page_nodes)
         self.pagination_mode = "doc-page-tree"
         self.catalog = self.catalog_payload()
         return self

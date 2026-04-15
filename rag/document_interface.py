@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import mimetypes
 import os
 import re
 from abc import ABC, abstractmethod
@@ -18,6 +21,168 @@ class PageType:
     CHAPTER = "chapter"
 
 
+@dataclass(frozen=True)
+class ImageAsset:
+    asset_id: str
+    filename: str = ""
+    media_type: str = ""
+    data: bytes = b""
+    width: int = 0
+    height: int = 0
+    caption: str = ""
+    source: str = ""
+    page: int = 0
+
+    @classmethod
+    def from_bytes(
+        cls,
+        *,
+        data: bytes,
+        filename: str = "",
+        media_type: str = "",
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        caption: str = "",
+        source: str = "",
+        page: Optional[int] = None,
+    ) -> "ImageAsset":
+        payload = bytes(data or b"")
+        name = str(filename or "").strip()
+        mime = str(media_type or "").strip().lower()
+        if (not mime) and name:
+            guessed, _ = mimetypes.guess_type(name)
+            mime = str(guessed or "").strip().lower()
+        digest = hashlib.sha1(payload or name.encode("utf-8") or caption.encode("utf-8") or source.encode("utf-8")).hexdigest()
+        return cls(
+            asset_id=digest,
+            filename=name,
+            media_type=mime,
+            data=payload,
+            width=max(0, int(width or 0)),
+            height=max(0, int(height or 0)),
+            caption=str(caption or "").strip(),
+            source=str(source or "").strip(),
+            page=max(0, int(page or 0)),
+        )
+
+    @classmethod
+    def from_payload(cls, value: Any) -> Optional["ImageAsset"]:
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, dict):
+            return None
+
+        payload = dict(value)
+        raw_data = payload.get("data")
+        if isinstance(raw_data, str):
+            try:
+                raw_data = base64.b64decode(raw_data.encode("ascii"), validate=False)
+            except Exception:
+                raw_data = b""
+        elif not isinstance(raw_data, (bytes, bytearray)):
+            raw_data = b""
+
+        asset_id = str(payload.get("asset_id") or "").strip()
+        if not asset_id:
+            digest_source = bytes(raw_data or b"")
+            if not digest_source:
+                digest_source = "|".join(
+                    [
+                        str(payload.get("filename") or "").strip(),
+                        str(payload.get("caption") or "").strip(),
+                        str(payload.get("source") or "").strip(),
+                        str(payload.get("media_type") or "").strip(),
+                    ]
+                ).encode("utf-8")
+            asset_id = hashlib.sha1(digest_source).hexdigest()
+
+        return cls(
+            asset_id=asset_id,
+            filename=str(payload.get("filename") or "").strip(),
+            media_type=str(payload.get("media_type") or "").strip().lower(),
+            data=bytes(raw_data or b""),
+            width=max(0, int(payload.get("width") or 0)),
+            height=max(0, int(payload.get("height") or 0)),
+            caption=str(payload.get("caption") or "").strip(),
+            source=str(payload.get("source") or "").strip(),
+            page=max(0, int(payload.get("page") or 0)),
+        )
+
+    @property
+    def byte_size(self) -> int:
+        return len(self.data or b"")
+
+    @property
+    def has_binary(self) -> bool:
+        return bool(self.data)
+
+    def to_payload(self, *, include_data: bool = False) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "asset_id": self.asset_id,
+            "filename": self.filename,
+            "media_type": self.media_type,
+            "byte_size": self.byte_size,
+            "width": self.width,
+            "height": self.height,
+            "caption": self.caption,
+            "source": self.source,
+            "page": self.page,
+            "has_binary": self.has_binary,
+        }
+        if include_data and self.data:
+            payload["data"] = base64.b64encode(self.data).decode("ascii")
+        return payload
+
+    def to_debug_payload(self) -> Dict[str, Any]:
+        return self.to_payload(include_data=False)
+
+
+def _normalize_image_asset(value: Any) -> Optional[Any]:
+    if isinstance(value, ImageAsset):
+        return value
+    asset = ImageAsset.from_payload(value)
+    if asset is not None:
+        return asset
+    text = str(value or "").strip()
+    return text or None
+
+
+def _image_asset_key(value: Any) -> str:
+    normalized = _normalize_image_asset(value)
+    if normalized is None:
+        return ""
+    if isinstance(normalized, ImageAsset):
+        return f"image:{normalized.asset_id}"
+    return f"text:{normalized}"
+
+
+def _dedupe_text_values(values: Sequence[Any]) -> List[str]:
+    seen: Set[str] = set()
+    ordered: List[str] = []
+    for item in values:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        ordered.append(text)
+    return ordered
+
+
+def _dedupe_image_values(values: Sequence[Any]) -> List[Any]:
+    seen: Set[str] = set()
+    ordered: List[Any] = []
+    for item in values:
+        normalized = _normalize_image_asset(item)
+        if normalized is None:
+            continue
+        key = _image_asset_key(normalized)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(normalized)
+    return ordered
+
+
 @dataclass
 class PageAssets:
     headers: List[str] = field(default_factory=list)
@@ -25,7 +190,7 @@ class PageAssets:
     annotations: List[str] = field(default_factory=list)
     citations: List[str] = field(default_factory=list)
     page_numbers: List[str] = field(default_factory=list)
-    images: List[str] = field(default_factory=list)
+    images: List[Any] = field(default_factory=list)
 
     def merged(self, others: Sequence["PageAssets"]) -> "PageAssets":
         merged_assets = PageAssets(
@@ -43,6 +208,12 @@ class PageAssets:
             merged_assets.citations.extend(item.citations)
             merged_assets.page_numbers.extend(item.page_numbers)
             merged_assets.images.extend(item.images)
+        merged_assets.headers = _dedupe_text_values(merged_assets.headers)
+        merged_assets.footers = _dedupe_text_values(merged_assets.footers)
+        merged_assets.annotations = _dedupe_text_values(merged_assets.annotations)
+        merged_assets.citations = _dedupe_text_values(merged_assets.citations)
+        merged_assets.page_numbers = _dedupe_text_values(merged_assets.page_numbers)
+        merged_assets.images = _dedupe_image_values(merged_assets.images)
         return merged_assets
 
 
@@ -109,10 +280,11 @@ class Page(ABC):
         if v:
             self.assets.page_numbers.append(v)
 
-    def add_image(self, value: str) -> None:
-        v = str(value or "").strip()
-        if v:
-            self.assets.images.append(v)
+    def add_image(self, value: Any) -> None:
+        normalized = _normalize_image_asset(value)
+        if normalized is None:
+            return
+        self.assets.images.append(normalized)
 
     def get_headers(self) -> List[str]:
         return list(self.assets.headers)
@@ -129,7 +301,7 @@ class Page(ABC):
     def get_page_numbers(self) -> List[str]:
         return list(self.assets.page_numbers)
 
-    def get_images(self) -> List[str]:
+    def get_images(self) -> List[Any]:
         return list(self.assets.images)
 
     def collect_assets(self) -> PageAssets:
@@ -152,7 +324,7 @@ class Page(ABC):
             "annotations": self.get_annotations(),
             "citations": self.get_citations(),
             "page_numbers": self.get_page_numbers(),
-            "images": self.get_images(),
+            "images": [item.to_payload() if isinstance(item, ImageAsset) else str(item or "") for item in self.get_images()],
             "metadata": dict(self.metadata),
         }
 
@@ -227,6 +399,23 @@ class Content(MonoPage):
             markdown_text=markdown_text,
             assets=assets,
             metadata=metadata,
+        )
+
+
+class SemiPage(Content):
+    def __init__(
+        self,
+        *,
+        markdown_text: str = "",
+        assets: Optional[PageAssets] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        fragment_meta = dict(metadata or {})
+        fragment_meta.setdefault("is_fragment", True)
+        super().__init__(
+            markdown_text=markdown_text,
+            assets=assets,
+            metadata=fragment_meta,
         )
 
 
@@ -320,7 +509,7 @@ class Chapter(Page):
     def get_page_numbers(self) -> List[str]:
         return self.collect_assets().page_numbers
 
-    def get_images(self) -> List[str]:
+    def get_images(self) -> List[Any]:
         return self.collect_assets().images
 
     def to_payload(self) -> Dict[str, Any]:
@@ -351,6 +540,15 @@ class RAG_DB_Document(Chapter, ABC):
         self.catalog: List[Any] = []
         self.page_count = 0
         self.pagination_mode = "page-tree"
+
+    def set_build_trace(self, **kwargs: Any) -> None:
+        trace = dict(self.metadata.get("_doc_tree_build_trace") or {})
+        for key, value in kwargs.items():
+            trace[str(key)] = value
+        self.metadata["_doc_tree_build_trace"] = trace
+
+    def get_build_trace(self) -> Dict[str, Any]:
+        return dict(self.metadata.get("_doc_tree_build_trace") or {})
 
     @abstractmethod
     def build(self) -> "RAG_DB_Document":
@@ -1181,35 +1379,291 @@ class RAG_DB_Document(Chapter, ABC):
             captions.append(line)
         return captions
 
-    def resolve_page_images(self, page_text: str, existing_images: Optional[Sequence[str]] = None) -> List[str]:
-        resolved: List[str] = []
-        seen: Set[str] = set()
-        for item in list(existing_images or []):
-            text = str(item or "").strip()
-            if not text or text in seen:
-                continue
-            seen.add(text)
-            resolved.append(text)
+    def resolve_page_images(self, page_text: str, existing_images: Optional[Sequence[Any]] = None) -> List[Any]:
+        resolved = _dedupe_image_values(list(existing_images or []))
 
         if any(self._looks_like_real_image_asset(item) for item in resolved):
             return resolved
 
         for caption in self._extract_figure_captions(page_text):
             marker = f"figure: {caption}"
-            if marker in seen:
-                continue
-            seen.add(marker)
             resolved.append(marker)
-        return resolved
+        return _dedupe_image_values(resolved)
 
     @staticmethod
-    def _looks_like_real_image_asset(value: str) -> bool:
-        text = str(value or "").strip()
-        if not text:
+    def _looks_like_real_image_asset(value: Any) -> bool:
+        normalized = _normalize_image_asset(value)
+        if normalized is None:
             return False
+        if isinstance(normalized, ImageAsset):
+            return bool(normalized.has_binary or normalized.media_type or normalized.filename)
+        text = str(normalized or "").strip()
         if text.startswith("data:image/"):
             return True
         return bool(re.search(r"(?:^|/|\\)([^/\\]+)\.(?:png|jpe?g|gif|bmp|webp|tiff?|svg|wmf|emf)$", text, flags=re.IGNORECASE))
+
+    def get_page_layouts(self) -> List[Dict[str, Any]]:
+        raw_layouts = self.metadata.get("page_layout")
+        if not isinstance(raw_layouts, list) or not raw_layouts:
+            raw_layouts = self.metadata.get("structured_page_assets")
+        if not isinstance(raw_layouts, list):
+            return []
+
+        normalized_layouts: List[Dict[str, Any]] = []
+        for index, item in enumerate(raw_layouts, start=1):
+            row = dict(item) if isinstance(item, dict) else {}
+            normalized_layouts.append(
+                {
+                    "page": int(self._coerce_positive_int(row.get("page")) or index),
+                    "headers": _dedupe_text_values(list(row.get("headers") or [])),
+                    "footers": _dedupe_text_values(list(row.get("footers") or [])),
+                    "page_number": str(row.get("page_number") or "").strip(),
+                    "images": _dedupe_image_values(list(row.get("images") or [])),
+                }
+            )
+        return normalized_layouts
+
+    @staticmethod
+    def _group_items_evenly(values: Sequence[Any], slots: int) -> List[List[Any]]:
+        if slots <= 0:
+            return []
+        groups: List[List[Any]] = [[] for _ in range(slots)]
+        items = [value for value in list(values or []) if _normalize_image_asset(value) is not None or str(value or "").strip()]
+        for idx, item in enumerate(items):
+            groups[min(slots - 1, idx % slots)].append(item)
+        return groups
+
+    def _annotate_range_paths(self, ranges: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        annotated: List[Dict[str, Any]] = []
+        stack: List[Dict[str, Any]] = []
+        ordered = sorted(
+            [dict(item) for item in list(ranges or [])],
+            key=lambda row: (
+                int(self._coerce_positive_int(row.get("start")) or 10**9),
+                int(row.get("order", 0) or 0),
+                int(self._coerce_positive_int(row.get("level")) or 1),
+            ),
+        )
+        for index, item in enumerate(ordered):
+            title = self._clean_heading_title(str(item.get("title") or ""))
+            if not title:
+                continue
+            level = max(1, min(int(self._coerce_positive_int(item.get("level")) or 1), 6))
+            while stack and int(stack[-1].get("level") or 1) >= level:
+                stack.pop()
+            parent_path = str(stack[-1].get("section_path") or "").strip() if stack else ""
+            section_path = f"{parent_path}/{title}" if parent_path else title
+            row = dict(item)
+            row["title"] = title
+            row["level"] = level
+            row["order"] = int(row.get("order", index) or index)
+            row["section_path"] = section_path
+            annotated.append(row)
+            stack.append({"level": level, "section_path": section_path})
+        return annotated
+
+    def _find_page_marker_hits(
+        self,
+        lines: Sequence[str],
+        markers: Sequence[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        normalized_lines = [
+            self._normalized_heading_text(self._clean_heading_title(line))
+            for line in list(lines or [])
+        ]
+        hits: List[Dict[str, Any]] = []
+        for order, marker in enumerate(markers):
+            title = self._clean_heading_title(str(marker.get("title") or ""))
+            key = self._normalized_heading_text(title)
+            if not title or not key or self._is_noise_heading_line(title):
+                continue
+            if len(key) < 2 and self._heading_level(title) is None:
+                continue
+            hit_index: Optional[int] = None
+            for line_index, line_key in enumerate(normalized_lines):
+                if not line_key:
+                    continue
+                if line_key == key or line_key.startswith(key) or (len(line_key) >= 6 and key.startswith(line_key)):
+                    hit_index = line_index
+                    break
+            if hit_index is None:
+                continue
+            row = dict(marker)
+            row["title"] = title
+            row["line_index"] = int(hit_index)
+            row["order"] = int(row.get("order", order) or order)
+            hits.append(row)
+
+        deduped_by_line: Dict[int, Dict[str, Any]] = {}
+        for item in sorted(
+            hits,
+            key=lambda row: (
+                int(row.get("line_index", 10**9)),
+                -len(self._normalized_heading_text(str(row.get("title") or ""))),
+                -int(self._coerce_positive_int(row.get("level")) or 1),
+                int(row.get("order", 0) or 0),
+            ),
+        ):
+            line_index = int(item.get("line_index", 10**9))
+            deduped_by_line.setdefault(line_index, item)
+        return [deduped_by_line[key] for key in sorted(deduped_by_line.keys())]
+
+    def _split_monopage_by_markers(
+        self,
+        page: MonoPage,
+        markers: Sequence[Dict[str, Any]],
+    ) -> List[MonoPage]:
+        if not isinstance(page, MonoPage) or page.category != PageType.CONTENT:
+            return [page]
+
+        page_meta = dict(getattr(page, "metadata", {}) or {})
+        physical_page = int(self.coerce_page_number(page_meta.get("page")) or 0)
+        if physical_page <= 0:
+            return [page]
+
+        raw_text = str(page_meta.get("raw_page_text") or page.markdown_text or "")
+        lines = [str(line or "") for line in raw_text.splitlines()]
+        if not lines:
+            return [page]
+
+        page_markers = [
+            dict(item)
+            for item in list(markers or [])
+            if int(self._coerce_positive_int(item.get("start")) or 0) == physical_page
+        ]
+        if not page_markers:
+            return [page]
+
+        hits = self._find_page_marker_hits(lines, page_markers)
+        if not hits:
+            page.set_markdown(
+                self._render_plaintext_page_to_markdown(
+                    raw_text,
+                    start_markers=page_markers,
+                    page_number=physical_page,
+                )
+            )
+            page.metadata.setdefault("physical_page", physical_page)
+            page.metadata["fragment_index"] = 1
+            page.metadata["fragment_count"] = 1
+            return [page]
+
+        if len(hits) == 1 and int(hits[0].get("line_index", 0) or 0) <= 0:
+            start_marker = dict(hits[0])
+            page.set_markdown(
+                self._render_plaintext_page_to_markdown(
+                    raw_text,
+                    start_markers=[start_marker],
+                    page_number=physical_page,
+                )
+            )
+            page.metadata.setdefault("physical_page", physical_page)
+            page.metadata["fragment_index"] = 1
+            page.metadata["fragment_count"] = 1
+            return [page]
+
+        segments: List[Dict[str, Any]] = []
+        current_title = str(page_meta.get("section_title") or "").strip()
+        current_path = str(page_meta.get("section_path") or current_title).strip()
+        first_hit_index = int(hits[0].get("line_index", 0) or 0)
+        if first_hit_index > 0:
+            prefix_text = "\n".join(lines[:first_hit_index]).strip()
+            if prefix_text:
+                segments.append(
+                    {
+                        "text": prefix_text,
+                        "section_title": current_title,
+                        "section_path": current_path,
+                        "marker": None,
+                    }
+                )
+
+        for index, hit in enumerate(hits):
+            start = int(hit.get("line_index", 0) or 0)
+            next_start = int(hits[index + 1].get("line_index", len(lines)) or len(lines)) if index + 1 < len(hits) else len(lines)
+            fragment_text = "\n".join(lines[start:next_start]).strip()
+            if not fragment_text:
+                continue
+            section_title = str(hit.get("title") or current_title).strip()
+            section_path = str(hit.get("section_path") or section_title).strip() or current_path
+            segments.append(
+                {
+                    "text": fragment_text,
+                    "section_title": section_title,
+                    "section_path": section_path,
+                    "marker": dict(hit),
+                }
+            )
+
+        if len(segments) <= 1:
+            return [page]
+
+        page_images = list(page.get_images() or [])
+        caption_target_indexes = [
+            idx
+            for idx, item in enumerate(segments)
+            if self._extract_figure_captions(str(item.get("text") or ""))
+        ]
+        image_target_indexes = caption_target_indexes or list(range(len(segments)))
+        image_groups = self._group_items_evenly(page_images, len(image_target_indexes)) if image_target_indexes else []
+
+        fragments: List[MonoPage] = []
+        fragment_count = len(segments)
+        for index, segment in enumerate(segments, start=1):
+            fragment_meta = dict(page_meta)
+            fragment_meta["physical_page"] = physical_page
+            fragment_meta["page"] = physical_page
+            fragment_meta["section_start_page"] = physical_page
+            fragment_meta["section_end_page"] = physical_page
+            fragment_meta["fragment_index"] = index
+            fragment_meta["fragment_count"] = fragment_count
+            fragment_meta["section_title"] = str(segment.get("section_title") or current_title).strip()
+            fragment_meta["section_path"] = str(segment.get("section_path") or current_path).strip()
+            fragment_meta["resolved_section_path"] = fragment_meta["section_path"]
+            fragment_meta["section_resolver"] = "intra_page_split"
+            fragment_meta["raw_page_text"] = str(segment.get("text") or "")
+
+            assets = PageAssets(
+                headers=list(page.assets.headers) if index == 1 else [],
+                footers=list(page.assets.footers) if index == fragment_count else [],
+                annotations=list(page.assets.annotations) if index == 1 else [],
+                citations=list(page.assets.citations) if index == 1 else [],
+                page_numbers=list(page.assets.page_numbers) if index == fragment_count else [],
+                images=[],
+            )
+            if image_target_indexes:
+                for target_offset, target_index in enumerate(image_target_indexes):
+                    if target_index != index - 1:
+                        continue
+                    assets.images.extend(image_groups[target_offset])
+
+            fragment_text = str(segment.get("text") or "")
+            marker = segment.get("marker")
+            fragment_markdown = self._render_plaintext_page_to_markdown(
+                fragment_text,
+                start_markers=[dict(marker)] if isinstance(marker, dict) else None,
+                page_number=physical_page,
+            )
+            fragments.append(
+                SemiPage(
+                    markdown_text=fragment_markdown,
+                    assets=assets,
+                    metadata=fragment_meta,
+                )
+            )
+
+        return fragments or [page]
+
+    def split_mono_pages_by_section_markers(
+        self,
+        pages: Sequence[MonoPage],
+        ranges: Sequence[Dict[str, Any]],
+    ) -> List[MonoPage]:
+        annotated_ranges = self._annotate_range_paths(ranges)
+        split_pages: List[MonoPage] = []
+        for page in list(pages or []):
+            split_pages.extend(self._split_monopage_by_markers(page, annotated_ranges))
+        return split_pages
 
     def _render_plaintext_page_to_markdown(
         self,
@@ -1405,11 +1859,19 @@ class RAG_DB_Document(Chapter, ABC):
         return [str(item or "").strip() for item in fragments[:slots]]
 
     @staticmethod
-    def _group_values_evenly(values: Sequence[str], slots: int) -> List[List[str]]:
+    def _group_values_evenly(values: Sequence[Any], slots: int) -> List[List[Any]]:
         if slots <= 0:
             return []
-        groups: List[List[str]] = [[] for _ in range(slots)]
-        items = [str(value or "").strip() for value in list(values or []) if str(value or "").strip()]
+        groups: List[List[Any]] = [[] for _ in range(slots)]
+        items: List[Any] = []
+        for value in list(values or []):
+            normalized = _normalize_image_asset(value)
+            if normalized is not None:
+                items.append(normalized)
+                continue
+            text = str(value or "").strip()
+            if text:
+                items.append(text)
         for idx, item in enumerate(items):
             groups[min(slots - 1, idx % slots)].append(item)
         return groups
@@ -1624,6 +2086,7 @@ class RAG_DB_Document(Chapter, ABC):
 
         page_assigned = [False for _ in pages]
         for pidx, page in enumerate(pages, start=1):
+            page_number = self._coerce_positive_int(page.metadata.get("page")) or self._coerce_positive_int(page.metadata.get("physical_page")) or pidx
             selected = _select_chapter_from_page_path(page)
             if selected is not None:
                 page_assigned[pidx - 1] = True
@@ -1639,7 +2102,7 @@ class RAG_DB_Document(Chapter, ABC):
             for chapter in chapters:
                 start = self._coerce_positive_int(chapter.metadata.get("section_start_page")) or 1
                 end = self._coerce_positive_int(chapter.metadata.get("section_end_page")) or start
-                if not (start <= pidx <= end):
+                if not (start <= int(page_number) <= end):
                     continue
                 level = self._coerce_positive_int(chapter.metadata.get("level")) or 1
                 span = max(1, end - start + 1)
@@ -2098,7 +2561,18 @@ class RAG_DB_Document(Chapter, ABC):
         return leaves
 
     def get_single_pages(self) -> List[MonoPage]:
-        return self.get_mono_pages()
+        unique_pages: List[MonoPage] = []
+        seen: Set[int] = set()
+        for page in self.get_mono_pages():
+            metadata = dict(getattr(page, "metadata", {}) or {})
+            physical_page = self.coerce_page_number(metadata.get("physical_page"))
+            page_no = self.coerce_page_number(metadata.get("page"))
+            key = int(physical_page or page_no or 0)
+            if key <= 0 or key in seen:
+                continue
+            seen.add(key)
+            unique_pages.append(page)
+        return unique_pages
 
     @staticmethod
     def _unique_nonempty(values: Sequence[Any]) -> List[str]:
