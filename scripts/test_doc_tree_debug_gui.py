@@ -14,6 +14,7 @@ import tempfile
 import uuid
 import webbrowser
 from pathlib import Path
+from urllib.parse import quote
 from typing import Any, Dict, Optional, Set
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -179,6 +180,71 @@ def _local_asset_payload(page: Any) -> Dict[str, Any]:
     }
 
 
+def _build_debug_markdown_image_tokens(images: Any) -> list[str]:
+    tokens: list[str] = []
+    for index, item in enumerate(list(images or []), start=1):
+        if isinstance(item, dict):
+            asset_id = str(item.get("asset_id") or "").strip()
+            if not asset_id:
+                continue
+            alt = str(item.get("caption") or item.get("filename") or f"image-{index}").strip() or f"image-{index}"
+            tokens.append(f"![{alt}](debug-image://asset/{asset_id})")
+            continue
+        text = str(item or "").strip()
+        if not text:
+            continue
+        alt = Path(text).name or f"image-{index}"
+        tokens.append(f"![{alt}](debug-image://path/{quote(text, safe='')})")
+    return tokens
+
+
+def _inject_missing_debug_image_tokens(markdown_text: str, image_tokens: list[str]) -> str:
+    base = str(markdown_text or "").strip()
+    tokens = [str(item or "").strip() for item in list(image_tokens or []) if str(item or "").strip()]
+    if not tokens:
+        return base
+
+    existing_targets = re.findall(r"!\[[^\]]*\]\(([^)]+)\)", base)
+    missing_tokens = tokens[len(existing_targets):]
+    if not missing_tokens:
+        return base
+    if not base:
+        return "\n\n".join(missing_tokens)
+
+    blocks = [part.strip() for part in re.split(r"\n{2,}", base) if part.strip()]
+    if len(blocks) <= 1:
+        blocks = [line.strip() for line in base.splitlines() if line.strip()]
+    if not blocks:
+        return "\n\n".join([base] + missing_tokens).strip()
+
+    insert_after: Dict[int, list[str]] = {}
+    total_blocks = len(blocks)
+    total_missing = len(missing_tokens)
+    for index, token in enumerate(missing_tokens, start=1):
+        block_index = min(total_blocks - 1, max(0, int(round(index * total_blocks / (total_missing + 1))) - 1))
+        insert_after.setdefault(block_index, []).append(token)
+
+    output_blocks: list[str] = []
+    for block_index, block in enumerate(blocks):
+        output_blocks.append(block)
+        output_blocks.extend(insert_after.get(block_index, []))
+    return "\n\n".join(output_blocks).strip()
+
+
+def _build_debug_render_markdown_text(page: Any) -> str:
+    payload: Dict[str, Any] = {}
+    try:
+        if hasattr(page, "to_payload"):
+            payload = dict(getattr(page, "to_payload")() or {})
+    except Exception:
+        payload = {}
+
+    base_markdown = str(payload.get("markdown_text") or getattr(page, "markdown_text", "") or "")
+    images = list(payload.get("images") or _local_asset_payload(page).get("images") or [])
+    image_tokens = _build_debug_markdown_image_tokens(images)
+    return _inject_missing_debug_image_tokens(base_markdown, image_tokens)
+
+
 def _snapshot_attr_value(key: str, value: Any) -> Any:
     if key == "SubContent":
         return f"<{len(value) if isinstance(value, list) else 0} children>"
@@ -202,11 +268,15 @@ def _page_variable_snapshot(page: Any) -> Dict[str, Any]:
     except Exception:
         attrs = {}
 
+    raw_markdown_text = str(getattr(page, "markdown_text", "") or "")
+    render_markdown_text = _build_debug_render_markdown_text(page)
     snapshot: Dict[str, Any] = {
         "class_name": str(type(page).__name__),
         "category": str(getattr(page, "category", "") or ""),
         "title": str(getattr(page, "title", "") or ""),
-        "markdown_text": str(getattr(page, "markdown_text", "") or ""),
+        "markdown_text": render_markdown_text,
+        "raw_markdown_text": raw_markdown_text,
+        "render_markdown_text": render_markdown_text,
         "metadata": _metadata_snapshot(getattr(page, "metadata", {}) or {}),
         "assets": _json_safe(getattr(page, "assets", None), max_depth=3),
         "to_payload": _local_asset_payload(page),
@@ -1023,6 +1093,105 @@ def _build_page_html() -> str:
     .asset-k {
       color: var(--muted);
     }
+    .markdown-card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px;
+      background: rgba(10, 16, 13, 0.55);
+      margin-bottom: 10px;
+    }
+    .markdown-render {
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.65;
+      white-space: normal;
+      word-break: break-word;
+    }
+    .markdown-render h1,
+    .markdown-render h2,
+    .markdown-render h3,
+    .markdown-render h4,
+    .markdown-render h5,
+    .markdown-render h6 {
+      margin: 12px 0 8px;
+      line-height: 1.35;
+      color: var(--accent);
+      font-weight: 700;
+    }
+    .markdown-render h1 { font-size: 28px; }
+    .markdown-render h2 { font-size: 24px; }
+    .markdown-render h3 { font-size: 20px; }
+    .markdown-render h4 { font-size: 17px; }
+    .markdown-render h5 { font-size: 15px; }
+    .markdown-render h6 { font-size: 14px; }
+    .markdown-render p,
+    .markdown-render ul,
+    .markdown-render ol,
+    .markdown-render table,
+    .markdown-render pre,
+    .markdown-render blockquote {
+      margin: 0 0 12px;
+    }
+    .markdown-render code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      background: rgba(255,255,255,0.08);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+    .markdown-render pre {
+      overflow: auto;
+      padding: 10px;
+      border-radius: 8px;
+      background: rgba(0,0,0,0.25);
+      border: 1px solid var(--line);
+    }
+    .markdown-render pre code {
+      background: transparent;
+      padding: 0;
+    }
+    .markdown-render table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid var(--line);
+    }
+    .markdown-render th,
+    .markdown-render td {
+      border: 1px solid var(--line);
+      padding: 6px 8px;
+      vertical-align: top;
+    }
+    .markdown-render th {
+      color: var(--accent2);
+      background: rgba(255,255,255,0.04);
+    }
+    .markdown-render figure {
+      margin: 0 0 14px;
+      padding: 10px;
+      border-radius: 10px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    .markdown-render figure a {
+      display: inline-block;
+      max-width: 100%;
+    }
+    .markdown-render img {
+      display: block;
+      max-width: 100%;
+      max-height: 520px;
+      width: auto;
+      height: auto;
+      object-fit: contain;
+      border-radius: 8px;
+      background: rgba(0,0,0,0.22);
+      border: 1px solid var(--line);
+    }
+    .markdown-render figcaption {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
     .card { border: 1px solid var(--line); border-radius: 10px; padding: 8px; background: rgba(10, 16, 13, 0.55); }
     .name { font-size: 12px; color: var(--accent); margin-bottom: 6px; }
     textarea {
@@ -1056,6 +1225,10 @@ def _build_page_html() -> str:
       <section class="panel">
         <div class="head">Page 子页详情（含资产）</div>
         <div class="body">
+          <div class="markdown-card" id="renderMarkdownCard" hidden>
+            <div class="asset-title">Markdown 渲染预览（render_markdown_text）</div>
+            <div class="markdown-render" id="renderMarkdownEl"></div>
+          </div>
           <div class="assets" id="assets"></div>
           <div class="vars" id="vars"></div>
         </div>
@@ -1068,6 +1241,8 @@ def _build_page_html() -> str:
     const statusEl = document.getElementById('status');
     const treeRoot = document.getElementById('treeRoot');
     const assetsEl = document.getElementById('assets');
+    const renderMarkdownCard = document.getElementById('renderMarkdownCard');
+    const renderMarkdownEl = document.getElementById('renderMarkdownEl');
     const varsEl = document.getElementById('vars');
     const meta = document.getElementById('meta');
     const IMAGE_PREVIEW_MAX_PX = 1600;
@@ -1187,6 +1362,263 @@ def _build_page_html() -> str:
         params.set('max_px', String(options.maxPx));
       }
       return `/api/asset-object?${params.toString()}`;
+    }
+
+    function escapeHtml(value) {
+      return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function applyInlineMarkdown(text) {
+      let html = escapeHtml(text);
+      html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+      html = html.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+      html = html.replace(/\\*([^*]+)\\*/g, '<em>$1</em>');
+      return html;
+    }
+
+    function collectNodeImageLookup(node) {
+      const byPage = new Map();
+      const byAssetId = new Map();
+      const stack = [node];
+      while (stack.length > 0) {
+        const current = stack.pop();
+        if (!current || typeof current !== 'object') {
+          continue;
+        }
+        const metadata = current.metadata && typeof current.metadata === 'object' ? current.metadata : {};
+        const pageNo = Number(metadata.page || metadata.physical_page || 0);
+        const payload = getLocalAssetPayload(current);
+        const pageImages = [];
+        for (const item of toList(payload.images)) {
+          if (isImageAssetObject(item)) {
+            byAssetId.set(String(item.asset_id || '').trim(), item);
+          }
+          pageImages.push(item);
+        }
+        if (pageNo > 0 && pageImages.length > 0) {
+          byPage.set(pageNo, pageImages);
+        }
+        for (const child of Array.isArray(current.children) ? current.children : []) {
+          stack.push(child);
+        }
+      }
+      return { byPage, byAssetId };
+    }
+
+    function resolveMarkdownImageTarget(target, node, lookup) {
+      const text = String(target || '').trim();
+      if (!text) {
+        return '';
+      }
+      const pageMatch = text.match(/^image:\\/\\/page-(\\d+)\\/(\\d+)$/i);
+      if (pageMatch) {
+        const pageNo = Number(pageMatch[1] || 0);
+        const imageIndex = Math.max(1, Number(pageMatch[2] || 0));
+        const pageImages = lookup.byPage.get(pageNo) || [];
+        const item = pageImages[imageIndex - 1];
+        if (isImageAssetObject(item)) {
+          return buildAssetObjectHref(item, { preview: true, maxPx: IMAGE_PREVIEW_MAX_PX });
+        }
+        if (typeof item === 'string' && isPreviewableImagePath(item)) {
+          return buildAssetHref(item, { preview: true, maxPx: IMAGE_PREVIEW_MAX_PX });
+        }
+        return '';
+      }
+
+      const assetMatch = text.match(/^debug-image:\\/\\/asset\\/([^\\s]+)$/i);
+      if (assetMatch) {
+        const assetId = String(assetMatch[1] || '').trim();
+        const asset = lookup.byAssetId.get(assetId);
+        if (asset) {
+          return buildAssetObjectHref(asset, { preview: true, maxPx: IMAGE_PREVIEW_MAX_PX });
+        }
+        return buildAssetObjectHref({ asset_id: assetId }, { preview: true, maxPx: IMAGE_PREVIEW_MAX_PX });
+      }
+
+      const pathMatch = text.match(/^debug-image:\\/\\/path\\/(.+)$/i);
+      if (pathMatch) {
+        const decoded = decodeURIComponent(String(pathMatch[1] || '').trim());
+        if (decoded) {
+          return buildAssetHref(decoded, { preview: true, maxPx: IMAGE_PREVIEW_MAX_PX });
+        }
+      }
+
+      if (isPreviewableImagePath(text)) {
+        return buildAssetHref(text, { preview: true, maxPx: IMAGE_PREVIEW_MAX_PX });
+      }
+      return text;
+    }
+
+    function renderMarkdownText(node) {
+      if (!renderMarkdownEl) {
+        return;
+      }
+      renderMarkdownEl.innerHTML = '';
+      if (renderMarkdownCard) {
+        renderMarkdownCard.hidden = true;
+      }
+      if (!node || typeof node !== 'object') {
+        return;
+      }
+
+      if (renderMarkdownCard) {
+        renderMarkdownCard.hidden = false;
+      }
+
+      const vars = node.variables && typeof node.variables === 'object' ? node.variables : {};
+      const markdown = String(vars.render_markdown_text || vars.markdown_text || '').trim();
+      if (!markdown) {
+        renderMarkdownEl.textContent = '无';
+        return;
+      }
+
+      const lookup = collectNodeImageLookup(node);
+      const lines = markdown.replace(/\\r\\n/g, '\\n').split('\\n');
+      let index = 0;
+
+      function isBlank(line) {
+        return String(line || '').trim() === '';
+      }
+
+      function isTableSeparator(line) {
+        return /^\\|?(\\s*:?-{3,}:?\\s*\\|)+\\s*:?-{3,}:?\\|?\\s*$/.test(String(line || '').trim());
+      }
+
+      function appendParagraph(blockLines) {
+        const paragraph = document.createElement('p');
+        paragraph.innerHTML = blockLines.map((line) => applyInlineMarkdown(line)).join('<br/>');
+        renderMarkdownEl.appendChild(paragraph);
+      }
+
+      while (index < lines.length) {
+        const line = lines[index];
+        const trimmed = String(line || '').trim();
+        if (!trimmed) {
+          index += 1;
+          continue;
+        }
+
+        const headingMatch = trimmed.match(/^(#{1,6})\\s+(.*)$/);
+        if (headingMatch) {
+          const level = Math.min(6, Math.max(1, headingMatch[1].length));
+          const heading = document.createElement(`h${level}`);
+          heading.innerHTML = applyInlineMarkdown(headingMatch[2]);
+          renderMarkdownEl.appendChild(heading);
+          index += 1;
+          continue;
+        }
+
+        const imageMatch = trimmed.match(/^!\\[([^\\]]*)\\]\\(([^)]+)\\)$/);
+        if (imageMatch) {
+          const altText = String(imageMatch[1] || '').trim();
+          const target = String(imageMatch[2] || '').trim();
+          const src = resolveMarkdownImageTarget(target, node, lookup);
+          const figure = document.createElement('figure');
+          if (src) {
+            const link = document.createElement('a');
+            link.href = src;
+            link.target = '_blank';
+            link.rel = 'noreferrer';
+            const img = document.createElement('img');
+            img.src = src;
+            img.alt = altText || 'image';
+            img.loading = 'eager';
+            img.decoding = 'async';
+            link.appendChild(img);
+            figure.appendChild(link);
+          }
+          const nextLine = String(lines[index + 1] || '').trim();
+          const captionText = nextLine && !/^(!\\[|#{1,6}\\s|[-*]\\s|\\d+\\.\\s|\\|)/.test(nextLine) ? nextLine : altText;
+          if (captionText) {
+            const caption = document.createElement('figcaption');
+            caption.innerHTML = applyInlineMarkdown(captionText);
+            figure.appendChild(caption);
+          }
+          renderMarkdownEl.appendChild(figure);
+          index += captionText && nextLine === captionText ? 2 : 1;
+          continue;
+        }
+
+        if (trimmed.startsWith('|') && index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
+          const table = document.createElement('table');
+          const thead = document.createElement('thead');
+          const tbody = document.createElement('tbody');
+          const headerCells = trimmed.split('|').slice(1, -1).map((cell) => cell.trim());
+          const headerRow = document.createElement('tr');
+          for (const cell of headerCells) {
+            const th = document.createElement('th');
+            th.innerHTML = applyInlineMarkdown(cell);
+            headerRow.appendChild(th);
+          }
+          thead.appendChild(headerRow);
+          table.appendChild(thead);
+          index += 2;
+          while (index < lines.length) {
+            const rowLine = String(lines[index] || '').trim();
+            if (!rowLine.startsWith('|')) {
+              break;
+            }
+            const row = document.createElement('tr');
+            const cells = rowLine.split('|').slice(1, -1).map((cell) => cell.trim());
+            for (const cell of cells) {
+              const td = document.createElement('td');
+              td.innerHTML = applyInlineMarkdown(cell);
+              row.appendChild(td);
+            }
+            tbody.appendChild(row);
+            index += 1;
+          }
+          table.appendChild(tbody);
+          renderMarkdownEl.appendChild(table);
+          continue;
+        }
+
+        const listMatch = trimmed.match(/^([-*]|\\d+\\.)\\s+(.*)$/);
+        if (listMatch) {
+          const ordered = /\\d+\\./.test(listMatch[1]);
+          const list = document.createElement(ordered ? 'ol' : 'ul');
+          while (index < lines.length) {
+            const current = String(lines[index] || '').trim();
+            const currentMatch = current.match(/^([-*]|\\d+\\.)\\s+(.*)$/);
+            if (!currentMatch) {
+              break;
+            }
+            const li = document.createElement('li');
+            li.innerHTML = applyInlineMarkdown(currentMatch[2]);
+            list.appendChild(li);
+            index += 1;
+          }
+          renderMarkdownEl.appendChild(list);
+          continue;
+        }
+
+        const paragraphLines = [];
+        while (index < lines.length) {
+          const current = String(lines[index] || '');
+          const currentTrimmed = current.trim();
+          if (!currentTrimmed) {
+            break;
+          }
+          if (/^(#{1,6})\\s+/.test(currentTrimmed) || /^!\\[[^\\]]*\\]\\(([^)]+)\\)$/.test(currentTrimmed) || /^([-*]|\\d+\\.)\\s+/.test(currentTrimmed)) {
+            break;
+          }
+          if (currentTrimmed.startsWith('|') && index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
+            break;
+          }
+          paragraphLines.push(currentTrimmed);
+          index += 1;
+        }
+        if (paragraphLines.length > 0) {
+          appendParagraph(paragraphLines);
+          continue;
+        }
+        index += 1;
+      }
     }
 
     function renderAssetTextItem(item) {
@@ -1570,6 +2002,7 @@ def _build_page_html() -> str:
             selectedNodeId = n.id;
             renderTree(payload.tree || []);
             renderAssets(n);
+            renderMarkdownText(n);
             renderVars(n);
           };
 
@@ -1731,9 +2164,12 @@ def _build_page_html() -> str:
         selectedNodeId = nodes[0].id;
         renderTree(payload.tree || []);
         renderAssets(nodes[0]);
+        renderMarkdownText(nodes[0]);
         renderVars(nodes[0]);
       } else {
         if (assetsEl) assetsEl.innerHTML = '';
+        if (renderMarkdownCard) renderMarkdownCard.hidden = true;
+        if (renderMarkdownEl) renderMarkdownEl.innerHTML = '';
         if (varsEl) varsEl.innerHTML = '';
       }
       const preloadResult = await preloadImagesForPayload(payload.tree || [], buildToken);
