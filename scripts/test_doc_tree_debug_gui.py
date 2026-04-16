@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 from io import BytesIO
 import json
+import mimetypes
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import uuid
 import webbrowser
 from pathlib import Path
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
@@ -38,6 +43,7 @@ DEBUG_JSON_DIR = Path("tmp") / "doc_tree_debug_json"
 DEBUG_JSON_DIR.mkdir(parents=True, exist_ok=True)
 
 DEBUG_IMAGE_STORE: Dict[str, Any] = {}
+DEBUG_IMAGE_RENDER_CACHE: Dict[str, tuple[bytes, str]] = {}
 HEAVY_METADATA_KEYS: Set[str] = {
   "structured_page_assets",
   "page_layout",
@@ -404,11 +410,11 @@ def _build_payload_and_rag_doc_from_file(
     file_path: str,
     *,
     include_build_debug: bool = False,
-  emit_summary: bool = False,
-  emit_tree: bool = False,
-  emit_boundary_debug: bool = False,
+    emit_summary: bool = False,
+    emit_tree: bool = False,
+    emit_boundary_debug: bool = False,
 ) -> tuple[Dict[str, Any], Any]:
-    from rag.documents import load_rag_documents_from_paths, _probe_libreoffice_physical_page_count
+    from rag.documents import load_rag_documents_from_paths, _probe_effective_native_page_count
 
     source_file = Path(file_path).expanduser().resolve()
     if not source_file.exists() or not source_file.is_file():
@@ -432,7 +438,7 @@ def _build_payload_and_rag_doc_from_file(
     leaf_mono_page_count = len(mono_pages)
     native_page_count_raw = getattr(rag_doc, "metadata", {}).get("native_page_count") if hasattr(rag_doc, "metadata") else None
     native_page_count = int(native_page_count_raw or 0) if str(native_page_count_raw or "").strip() else 0
-    runtime_native_page_count = int(_probe_libreoffice_physical_page_count(str(source_file)) or 0)
+    runtime_native_page_count = int(_probe_effective_native_page_count(str(source_file)) or 0)
     page_count = int(getattr(rag_doc, "page_count", 0) or 0)
     expected_pages = max(runtime_native_page_count, native_page_count)
     is_aligned = bool(expected_pages > 0 and mono_page_count == expected_pages and page_count == expected_pages)
@@ -549,9 +555,246 @@ def _resolve_debug_image_asset(asset_id: str) -> Any:
     media_type = str(getattr(asset, "media_type", "") or "application/octet-stream").strip()
     return asset, data, media_type
 
-def _build_debug_image_bytes(data: bytes, media_type: str, *, preview: bool = False, max_px: int = 360) -> tuple[bytes, str]:
+
+def _detect_content_bbox_in_image_bytes(data: bytes) -> Optional[tuple[int, int, int, int]]:
     payload = bytes(data or b"")
-    resolved_media_type = str(media_type or "application/octet-stream").strip() or "application/octet-stream"
+    if not payload:
+        return None
+    try:
+        from PIL import Image, ImageChops  # type: ignore
+
+        with Image.open(BytesIO(payload)) as image:
+            image.load()
+            rgba = image.convert("RGBA")
+
+            alpha_bbox = None
+            try:
+                alpha_bbox = rgba.getchannel("A").getbbox()
+                if alpha_bbox == (0, 0, rgba.width, rgba.height):
+                    alpha_bbox = None
+            except Exception:
+                alpha_bbox = None
+
+            rgb = rgba.convert("RGB")
+            white_bg = Image.new("RGB", rgb.size, (255, 255, 255))
+            diff = ImageChops.difference(rgb, white_bg).convert("L")
+            threshold_lut = [0] * 256
+            for index in range(5, 256):
+                threshold_lut[index] = 255
+            diff = diff.point(threshold_lut)
+            rgb_bbox = diff.getbbox()
+
+            bbox = alpha_bbox or rgb_bbox
+            if alpha_bbox and rgb_bbox:
+                bbox = (
+                    min(alpha_bbox[0], rgb_bbox[0]),
+                    min(alpha_bbox[1], rgb_bbox[1]),
+                    max(alpha_bbox[2], rgb_bbox[2]),
+                    max(alpha_bbox[3], rgb_bbox[3]),
+                )
+            if bbox is None:
+                return None
+            return (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+    except Exception:
+        return None
+
+
+def _crop_rendered_image_bytes(data: bytes, *, padding: int = 8) -> bytes:
+    payload = bytes(data or b"")
+    if not payload:
+        return payload
+    try:
+        from PIL import Image  # type: ignore
+
+        bbox = _detect_content_bbox_in_image_bytes(payload)
+        if bbox is None:
+            return payload
+
+        with Image.open(BytesIO(payload)) as image:
+            image.load()
+            rgba = image.convert("RGBA")
+
+            left = max(0, int(bbox[0]) - int(padding))
+            top = max(0, int(bbox[1]) - int(padding))
+            right = min(rgba.width, int(bbox[2]) + int(padding))
+            bottom = min(rgba.height, int(bbox[3]) + int(padding))
+            if left == 0 and top == 0 and right == rgba.width and bottom == rgba.height:
+                return payload
+
+            cropped = rgba.crop((left, top, right, bottom))
+            rendered = BytesIO()
+            cropped.save(rendered, format="PNG", optimize=True)
+            output = rendered.getvalue()
+            return output or payload
+    except Exception:
+        return payload
+
+def _looks_like_vector_metafile(media_type: str, filename: str = "") -> bool:
+    normalized_media_type = str(media_type or "").strip().lower()
+    normalized_name = str(filename or "").strip().lower()
+    if normalized_name.endswith((".wmf", ".emf")):
+        return True
+    return normalized_media_type in {
+        "image/wmf",
+        "image/x-wmf",
+        "image/emf",
+        "image/x-emf",
+        "application/x-msmetafile",
+    }
+
+
+def _render_vector_metafile_to_png(data: bytes, *, filename: str = "") -> tuple[bytes, str]:
+    payload = bytes(data or b"")
+    if not payload:
+        return payload, "application/octet-stream"
+
+    cache_key = hashlib.sha1((str(filename or "") + "\0").encode("utf-8") + payload).hexdigest()
+    cached = DEBUG_IMAGE_RENDER_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    office = shutil.which("soffice") or shutil.which("libreoffice")
+    if office:
+        try:
+            from rag.documents import _enable_python3_uno_bridge
+
+            if _enable_python3_uno_bridge():
+                import os
+                import random
+                import time
+                import uno
+                import fitz  # type: ignore
+
+                PropertyValue = __import__("com.sun.star.beans", fromlist=["PropertyValue"]).PropertyValue
+                port = str(random.randint(41000, 43999))
+                with tempfile.TemporaryDirectory(prefix="doc_tree_render_") as tmp_dir:
+                    suffix = Path(str(filename or "asset.wmf")).suffix.lower() or ".wmf"
+                    staged_path = Path(tmp_dir) / f"asset{suffix}"
+                    pdf_path = Path(tmp_dir) / "asset.pdf"
+                    staged_path.write_bytes(payload)
+
+                    profile_url = "file://" + os.path.abspath(tmp_dir).replace("\\", "/")
+                    cmd = [
+                        office,
+                        "--headless",
+                        "--invisible",
+                        "--norestore",
+                        "--nodefault",
+                        "--nofirststartwizard",
+                        "--nolockcheck",
+                        "--nologo",
+                        f"-env:UserInstallation={profile_url}",
+                        f"--accept=socket,host=127.0.0.1,port={port};urp;",
+                    ]
+                    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    try:
+                        local = uno.getComponentContext()
+                        resolver = local.ServiceManager.createInstanceWithContext("com.sun.star.bridge.UnoUrlResolver", local)
+                        ctx = None
+                        deadline = time.time() + 30.0
+                        while time.time() < deadline:
+                            try:
+                                ctx = resolver.resolve(f"uno:socket,host=127.0.0.1,port={port};urp;StarOffice.ComponentContext")
+                                break
+                            except Exception:
+                                time.sleep(0.2)
+
+                        if ctx is not None:
+                            desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
+                            writer = desktop.loadComponentFromURL(
+                                "private:factory/swriter",
+                                "_blank",
+                                0,
+                                (PropertyValue("Hidden", 0, True, 0),),
+                            )
+                            if writer is not None:
+                                text = writer.Text
+                                cursor = text.createTextCursor()
+                                graphic = writer.createInstance("com.sun.star.text.TextGraphicObject")
+                                graphic.GraphicURL = uno.systemPathToFileUrl(str(staged_path))
+                                text.insertTextContent(cursor, graphic, False)
+                                writer.storeToURL(
+                                    uno.systemPathToFileUrl(str(pdf_path)),
+                                    (PropertyValue("FilterName", 0, "writer_pdf_Export", 0),),
+                                )
+                                writer.close(True)
+                                if pdf_path.exists():
+                                  with fitz.open(str(pdf_path)) as pdf_doc:
+                                    page = pdf_doc.load_page(0)
+                                    inspect_scale = 6.0
+                                    inspect_pix = page.get_pixmap(matrix=fitz.Matrix(inspect_scale, inspect_scale), alpha=False)
+                                    inspect_png = inspect_pix.tobytes("png")
+                                    bbox = _detect_content_bbox_in_image_bytes(inspect_png)
+
+                                    clip_rect = page.rect
+                                    if bbox is not None:
+                                      clip_rect = fitz.Rect(
+                                        float(bbox[0]) / inspect_scale,
+                                        float(bbox[1]) / inspect_scale,
+                                        float(bbox[2]) / inspect_scale,
+                                        float(bbox[3]) / inspect_scale,
+                                      )
+                                      clip_padding = max(0.5, 4.0 / inspect_scale)
+                                      clip_rect = fitz.Rect(
+                                        max(page.rect.x0, clip_rect.x0 - clip_padding),
+                                        max(page.rect.y0, clip_rect.y0 - clip_padding),
+                                        min(page.rect.x1, clip_rect.x1 + clip_padding),
+                                        min(page.rect.y1, clip_rect.y1 + clip_padding),
+                                      )
+
+                                    content_longest_edge = max(float(clip_rect.width or 0.0), float(clip_rect.height or 0.0), 1.0)
+                                    render_scale = max(6.0, min(96.0, 1600.0 / content_longest_edge))
+                                    pix = page.get_pixmap(
+                                      matrix=fitz.Matrix(render_scale, render_scale),
+                                      clip=clip_rect,
+                                      alpha=False,
+                                    )
+                                    output = _crop_rendered_image_bytes(pix.tobytes("png"), padding=1)
+                                    if output:
+                                      DEBUG_IMAGE_RENDER_CACHE[cache_key] = (output, "image/png")
+                                      return output, "image/png"
+                    finally:
+                        try:
+                            proc.terminate()
+                            proc.wait(timeout=5)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    try:
+        from PIL import Image  # type: ignore
+
+        with Image.open(BytesIO(payload)) as image:
+            image.load()
+            rendered = BytesIO()
+            save_image = image if image.mode in {"RGB", "RGBA", "L"} else image.convert("RGBA")
+            save_image.save(rendered, format="PNG", optimize=True)
+            output = _crop_rendered_image_bytes(rendered.getvalue(), padding=2)
+            if output:
+                DEBUG_IMAGE_RENDER_CACHE[cache_key] = (output, "image/png")
+                return output, "image/png"
+    except Exception:
+        pass
+
+    return payload, mimetypes.guess_type(str(filename or ""))[0] or "application/octet-stream"
+
+
+def _build_debug_image_bytes(
+    data: bytes,
+    media_type: str,
+    *,
+    filename: str = "",
+    preview: bool = False,
+    max_px: int = 360,
+) -> tuple[bytes, str]:
+    payload = bytes(data or b"")
+    resolved_media_type = str(media_type or mimetypes.guess_type(str(filename or ""))[0] or "application/octet-stream").strip() or "application/octet-stream"
+    if payload and _looks_like_vector_metafile(resolved_media_type, filename):
+        rendered_payload, rendered_media_type = _render_vector_metafile_to_png(payload, filename=filename)
+        if rendered_payload and rendered_media_type.startswith("image/"):
+            payload = rendered_payload
+            resolved_media_type = rendered_media_type
     if not preview or not payload or not resolved_media_type.startswith("image/"):
         return payload, resolved_media_type
     try:
@@ -754,7 +997,7 @@ def _build_page_html() -> str:
     .asset-thumb {
       display: block;
       width: 100%;
-      max-height: 180px;
+      max-height: 320px;
       object-fit: contain;
       border-radius: 6px;
       background: rgba(0, 0, 0, 0.22);
@@ -799,9 +1042,8 @@ def _build_page_html() -> str:
     <div class=\"bar\">
       <div class=\"controls\">
         <input id=\"fileInput\" type=\"file\" />
-        <button id=\"buildBtn\" type=\"button\">构建文档树</button>
       </div>
-      <div id=\"status\" class=\"status\">请选择文件后构建</div>
+      <div id=\"status\" class=\"status\">请选择文件，选择后将自动构建</div>
     </div>
 
     <div class=\"meta\" id=\"meta\">尚未构建文档树</div>
@@ -823,17 +1065,19 @@ def _build_page_html() -> str:
 
   <script>
     const fileInput = document.getElementById('fileInput');
-    const buildBtn = document.getElementById('buildBtn');
     const statusEl = document.getElementById('status');
     const treeRoot = document.getElementById('treeRoot');
     const assetsEl = document.getElementById('assets');
     const varsEl = document.getElementById('vars');
     const meta = document.getElementById('meta');
+    const IMAGE_PREVIEW_MAX_PX = 1600;
 
     let payload = null;
     let selectedNodeId = '';
     let buildTimer = null;
     let buildStartTs = 0;
+    let activeBuildToken = 0;
+    const preloadedAssetUrls = new Set();
     const collapsedChapterIds = new Set();
 
     function setStatus(text, isError = false) {
@@ -905,6 +1149,11 @@ def _build_page_html() -> str:
       return /^(image\\/(png|jpe?g|gif|webp|bmp|svg\\+xml))$/.test(text);
     }
 
+    function isServerRenderableMediaType(value) {
+      const text = String(value || '').trim().toLowerCase();
+      return /^(image\\/(wmf|x-wmf|emf|x-emf)|application\\/x-msmetafile)$/.test(text);
+    }
+
     function isLikelyFilePath(value) {
       const text = String(value || '').trim();
       if (!text) return false;
@@ -914,11 +1163,18 @@ def _build_page_html() -> str:
     function isPreviewableImagePath(value) {
       const text = String(value || '').trim().toLowerCase();
       if (!isLikelyFilePath(text)) return false;
-      return /\\.(png|jpe?g|gif|webp|bmp|svg)$/.test(text);
+      return /\\.(png|jpe?g|gif|webp|bmp|svg|wmf|emf)$/.test(text);
     }
 
-    function buildAssetHref(value) {
-      return `/api/asset?path=${encodeURIComponent(String(value || '').trim())}`;
+    function buildAssetHref(value, options = {}) {
+      const params = new URLSearchParams({ path: String(value || '').trim() });
+      if (options.preview) {
+        params.set('preview', '1');
+      }
+      if (options.maxPx) {
+        params.set('max_px', String(options.maxPx));
+      }
+      return `/api/asset?${params.toString()}`;
     }
 
     function buildAssetObjectHref(value, options = {}) {
@@ -966,48 +1222,32 @@ def _build_page_html() -> str:
         const mediaType = String(asset.media_type || '').trim();
         const byteSize = Number(asset.byte_size || 0);
         const source = String(asset.source || '').trim();
-        const canPreviewInBrowser = isBrowserPreviewableMediaType(mediaType) || /\\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(filename);
+        const canPreviewInBrowser = (
+          isBrowserPreviewableMediaType(mediaType)
+          || isServerRenderableMediaType(mediaType)
+          || /\\.(png|jpe?g|gif|webp|bmp|svg|wmf|emf)$/i.test(filename)
+        );
 
         if (hasBinary && mediaType.startsWith('image/')) {
           const box = document.createElement('div');
           box.className = 'asset-media-item';
+
+          if (canPreviewInBrowser) {
+            const img = document.createElement('img');
+            img.className = 'asset-thumb';
+            img.loading = 'eager';
+            img.decoding = 'async';
+            img.alt = filename;
+            img.src = buildAssetObjectHref(asset, { preview: true, maxPx: IMAGE_PREVIEW_MAX_PX });
+            box.appendChild(img);
+          }
 
           const controls = document.createElement('div');
           controls.className = 'asset-path';
           controls.textContent = [filename, mediaType, byteSize ? `${byteSize} bytes` : '', source].filter(Boolean).join('\\n');
           box.appendChild(controls);
 
-          if (canPreviewInBrowser) {
-            const previewBtn = document.createElement('button');
-            previewBtn.type = 'button';
-            previewBtn.className = 'asset-link';
-            previewBtn.textContent = '加载预览';
-            previewBtn.onclick = (event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              if (box.querySelector('img.asset-thumb')) {
-                return;
-              }
-              previewBtn.disabled = true;
-              previewBtn.textContent = '预览加载中...';
-              const img = document.createElement('img');
-              img.className = 'asset-thumb';
-              img.loading = 'lazy';
-              img.decoding = 'async';
-              img.alt = filename;
-              img.src = buildAssetObjectHref(asset, { preview: true, maxPx: 360 });
-              img.onload = () => {
-                previewBtn.textContent = '预览已加载';
-              };
-              img.onerror = () => {
-                previewBtn.disabled = false;
-                previewBtn.textContent = '预览失败，重试';
-                img.remove();
-              };
-              box.insertBefore(img, controls);
-            };
-            box.appendChild(previewBtn);
-          } else {
+          if (!canPreviewInBrowser) {
             const unsupported = document.createElement('div');
             unsupported.className = 'asset-empty';
             unsupported.textContent = `当前浏览器不支持直接预览 ${mediaType || '该格式'}，请打开原图查看。`;
@@ -1044,8 +1284,9 @@ def _build_page_html() -> str:
 
         const img = document.createElement('img');
         img.className = 'asset-thumb';
-        img.loading = 'lazy';
-        img.src = buildAssetHref(text);
+        img.loading = 'eager';
+        img.decoding = 'async';
+        img.src = buildAssetHref(text, { preview: true, maxPx: IMAGE_PREVIEW_MAX_PX });
         img.alt = text.split(/[\\/]/).pop() || 'asset image';
         link.appendChild(img);
 
@@ -1346,10 +1587,78 @@ def _build_page_html() -> str:
       treeRoot.appendChild(build(nodes || []));
     }
 
+    function collectPreviewUrls(nodes) {
+      const urls = [];
+      const seen = new Set();
+
+      function pushUrl(url) {
+        const text = String(url || '').trim();
+        if (!text || seen.has(text) || preloadedAssetUrls.has(text)) {
+          return;
+        }
+        seen.add(text);
+        urls.push(text);
+      }
+
+      const stack = Array.isArray(nodes) ? [...nodes] : [];
+      while (stack.length > 0) {
+        const current = stack.pop();
+        if (!current || typeof current !== 'object') {
+          continue;
+        }
+        const payload = getLocalAssetPayload(current);
+        for (const item of toList(payload.images)) {
+          if (isImageAssetObject(item)) {
+            pushUrl(buildAssetObjectHref(item, { preview: true, maxPx: IMAGE_PREVIEW_MAX_PX }));
+            continue;
+          }
+          const text = String(item || '').trim();
+          if (isPreviewableImagePath(text)) {
+            pushUrl(buildAssetHref(text, { preview: true, maxPx: IMAGE_PREVIEW_MAX_PX }));
+          }
+        }
+        for (const child of Array.isArray(current.children) ? current.children : []) {
+          stack.push(child);
+        }
+      }
+      return urls;
+    }
+
+    async function preloadImagesForPayload(nodes, buildToken) {
+      const urls = collectPreviewUrls(nodes);
+      if (urls.length === 0) {
+        return { total: 0, loaded: 0 };
+      }
+
+      let loaded = 0;
+      const concurrency = 6;
+
+      async function loadSingle(url) {
+        try {
+          const resp = await fetch(url, { cache: 'force-cache' });
+          if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+          }
+          await resp.blob();
+          preloadedAssetUrls.add(url);
+          loaded += 1;
+        } catch (_) {
+          // Ignore individual preview failures so the tree remains usable.
+        }
+      }
+
+      for (let index = 0; index < urls.length; index += concurrency) {
+        if (buildToken !== activeBuildToken) {
+          break;
+        }
+        const batch = urls.slice(index, index + concurrency);
+        await Promise.all(batch.map((url) => loadSingle(url)));
+      }
+      return { total: urls.length, loaded };
+    }
+
     function beginBuildUi(fileName) {
       buildStartTs = Date.now();
-      buildBtn.disabled = true;
-      buildBtn.textContent = '构建中...';
       setStatus(`正在构建: ${fileName}（文档较大时可能需要几十秒）`);
       if (buildTimer) {
         clearInterval(buildTimer);
@@ -1366,8 +1675,6 @@ def _build_page_html() -> str:
         clearInterval(buildTimer);
         buildTimer = null;
       }
-      buildBtn.disabled = false;
-      buildBtn.textContent = '构建文档树';
     }
 
     async function buildDocTree() {
@@ -1377,6 +1684,8 @@ def _build_page_html() -> str:
         return;
       }
 
+      activeBuildToken += 1;
+      const buildToken = activeBuildToken;
       beginBuildUi(file.name || '已选文件');
       const form = new FormData();
       form.append('file', file);
@@ -1427,29 +1736,33 @@ def _build_page_html() -> str:
         if (assetsEl) assetsEl.innerHTML = '';
         if (varsEl) varsEl.innerHTML = '';
       }
+      const preloadResult = await preloadImagesForPayload(payload.tree || [], buildToken);
+      if (buildToken !== activeBuildToken) {
+        return;
+      }
       if (aligned) {
-        setStatus(`构建完成，页数已对齐（mono=${payload.mono_page_count || 0}, leaf=${payload.leaf_mono_page_count || 0}）`);
+        setStatus(`构建完成，页数已对齐（mono=${payload.mono_page_count || 0}, leaf=${payload.leaf_mono_page_count || 0}，图片缓存 ${preloadResult.loaded}/${preloadResult.total}）`);
       } else if (Number(payload.native_page_count || 0) <= 0) {
-        setStatus(`构建完成，节点数: ${nodes.length}（未获取物理页数）`);
+        setStatus(`构建完成，节点数: ${nodes.length}（未获取物理页数，图片缓存 ${preloadResult.loaded}/${preloadResult.total}）`);
       }
     }
 
-    fileInput.addEventListener('change', () => {
+    fileInput.addEventListener('change', async () => {
       const file = fileInput.files && fileInput.files[0];
       if (!file) {
-        setStatus('请选择文件后构建');
+        setStatus('请选择文件，选择后将自动构建');
         return;
       }
-      setStatus(`已选择文件: ${file.name}，点击“构建文档树”开始`);
-    });
-
-    buildBtn.addEventListener('click', async () => {
+      const requestToken = activeBuildToken + 1;
+      setStatus(`已选择文件: ${file.name}，即将自动构建`);
       try {
         await buildDocTree();
       } catch (err) {
         setStatus(`构建失败: ${err.message || err}`, true);
       } finally {
-        endBuildUi();
+        if (requestToken === activeBuildToken) {
+          endBuildUi();
+        }
       }
     });
   </script>
@@ -1481,9 +1794,26 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     @app.get("/api/asset")
-    async def asset(path: str) -> FileResponse:
+    async def asset(path: str, preview: int = 0, max_px: int = 360) -> Response:
       resolved = _resolve_workspace_asset_path(path)
-      return FileResponse(resolved)
+      guessed_media_type = str(mimetypes.guess_type(str(resolved))[0] or "application/octet-stream").strip()
+      preview_mode = bool(int(preview or 0))
+      if not preview_mode and not _looks_like_vector_metafile(guessed_media_type, resolved.name):
+        return FileResponse(resolved, headers={"Cache-Control": "public, max-age=3600"})
+      data = resolved.read_bytes()
+      data, media_type = _build_debug_image_bytes(
+          data,
+          guessed_media_type,
+          filename=resolved.name,
+          preview=preview_mode,
+          max_px=max(64, min(1200, int(max_px or 360))),
+      )
+      filename = resolved.name.replace('"', "")
+      headers = {
+          "Content-Disposition": f'inline; filename="{filename}"',
+          "Cache-Control": "public, max-age=3600",
+      }
+      return Response(content=data, media_type=media_type, headers=headers)
 
     @app.get("/api/asset-object")
     async def asset_object(asset_id: str, preview: int = 0, max_px: int = 360) -> Response:
@@ -1491,11 +1821,15 @@ def create_app() -> FastAPI:
       data, media_type = _build_debug_image_bytes(
           data,
           media_type,
+          filename=str(getattr(asset, "filename", "") or "asset.bin"),
           preview=bool(int(preview or 0)),
           max_px=max(64, min(1200, int(max_px or 360))),
       )
       filename = str(getattr(asset, "filename", "") or "asset.bin").replace('"', "")
-      headers = {"Content-Disposition": f'inline; filename="{filename}"'}
+      headers = {
+          "Content-Disposition": f'inline; filename="{filename}"',
+          "Cache-Control": "public, max-age=3600",
+      }
       return Response(content=data, media_type=media_type, headers=headers)
 
     return app

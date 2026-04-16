@@ -1569,11 +1569,32 @@ class RAG_DB_Document(Chapter, ABC):
         if first_hit_index > 0:
             prefix_text = "\n".join(lines[:first_hit_index]).strip()
             if prefix_text:
+                prefix_title = current_title
+                prefix_path = current_path
+                first_hit = dict(hits[0])
+                first_hit_order = int(first_hit.get("order", 0) or 0)
+                preceding_marker: Optional[Dict[str, Any]] = None
+                for order, item in enumerate(list(markers or [])):
+                    marker = dict(item)
+                    marker_order = int(marker.get("order", order) or order)
+                    marker_start = int(self._coerce_positive_int(marker.get("start")) or 0)
+                    if marker_order >= first_hit_order or marker_start <= 0 or marker_start > physical_page:
+                        continue
+                    preceding_marker = marker
+
+                if preceding_marker is not None:
+                    prefix_title = str(preceding_marker.get("title") or prefix_title).strip() or prefix_title
+                    prefix_path = str(preceding_marker.get("section_path") or prefix_title).strip().replace(">", "/") or prefix_path
+                else:
+                    first_hit_path = str(first_hit.get("section_path") or "").strip().replace(">", "/")
+                    if "/" in first_hit_path:
+                        prefix_path = first_hit_path.rsplit("/", 1)[0].strip()
+                        prefix_title = prefix_path.rsplit("/", 1)[-1].strip() if prefix_path else prefix_title
                 segments.append(
                     {
                         "text": prefix_text,
-                        "section_title": current_title,
-                        "section_path": current_path,
+                        "section_title": prefix_title,
+                        "section_path": prefix_path,
                         "marker": None,
                     }
                 )
@@ -2073,7 +2094,7 @@ class RAG_DB_Document(Chapter, ABC):
 
         def _select_chapter_from_page_path(page: MonoPage) -> Optional[Chapter]:
             resolver = str(page.metadata.get("section_resolver") or "").strip().lower()
-            if resolver != "main_section_map":
+            if resolver not in {"main_section_map", "intra_page_split"}:
                 return None
             path_parts = _split_section_path(page.metadata.get("resolved_section_path") or page.metadata.get("section_path") or page.title)
             if not path_parts:

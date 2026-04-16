@@ -141,23 +141,26 @@ with tempfile.TemporaryDirectory(prefix="lo_uno_profile_") as profile_dir:
             raise SystemExit(0)
         try:
             cursor = doc.getCurrentController().getViewCursor()
-            if not cursor.jumpToPage(1):
-                print(0)
-                raise SystemExit(0)
             page_count = 0
-            seen = set()
-            while True:
-                current = int(cursor.getPage() or 0)
-                if current <= 0 or current in seen:
-                    break
-                seen.add(current)
-                page_count += 1
-                try:
-                    moved = bool(cursor.jumpToNextPage())
-                except Exception:
-                    moved = False
-                if not moved:
-                    break
+            try:
+                cursor.jumpToLastPage()
+                page_count = int(cursor.getPage() or 0)
+            except Exception:
+                page_count = 0
+            if page_count <= 0 and cursor.jumpToPage(1):
+                seen = set()
+                while True:
+                    current = int(cursor.getPage() or 0)
+                    if current <= 0 or current in seen:
+                        break
+                    seen.add(current)
+                    page_count = max(page_count, current)
+                    try:
+                        moved = bool(cursor.jumpToNextPage())
+                    except Exception:
+                        moved = False
+                    if not moved:
+                        break
         except Exception:
             page_count = 0
         print(page_count if page_count > 0 else 0)
@@ -174,19 +177,28 @@ with tempfile.TemporaryDirectory(prefix="lo_uno_profile_") as profile_dir:
 """.strip()
 
     try:
-        proc = subprocess.run(
-            [str(sys.executable), "-c", script, file_path],
-            capture_output=True,
-            text=True,
-            timeout=40,
-            check=False,
-        )
-        if proc.returncode != 0:
-            logger.debug("LibreOffice page probe subprocess failed for %s: rc=%s stderr=%s", file_path, proc.returncode, str(proc.stderr or "").strip())
-            return 0
-        text = str(proc.stdout or "").strip()
-        value = int(float(text)) if text else 0
-        return value if value > 0 else 0
+        for attempt in range(3):
+            proc = subprocess.run(
+                [str(sys.executable), "-c", script, file_path],
+                capture_output=True,
+                text=True,
+                timeout=40,
+                check=False,
+            )
+            if proc.returncode != 0:
+                logger.debug(
+                    "LibreOffice page probe subprocess failed for %s on attempt %s: rc=%s stderr=%s",
+                    file_path,
+                    attempt + 1,
+                    proc.returncode,
+                    str(proc.stderr or "").strip(),
+                )
+                continue
+            text = str(proc.stdout or "").strip()
+            value = int(float(text)) if text else 0
+            if value > 0:
+                return value
+        return 0
     except Exception as exc:
         logger.debug("Failed to probe LibreOffice page count for %s: %s", file_path, exc)
         return 0
@@ -268,36 +280,93 @@ with tempfile.TemporaryDirectory(prefix="lo_uno_pages_") as profile_dir:
             raise SystemExit(0)
         try:
             vc = doc.getCurrentController().getViewCursor()
-            page_texts = []
-            if not vc.jumpToPage(1):
+
+            def _goto_page(target):
+                try:
+                    vc.jumpToPage(int(target))
+                except Exception:
+                    pass
+                try:
+                    current = int(vc.getPage() or 0)
+                except Exception:
+                    current = 0
+                correction = 0
+                while current > 0 and current < int(target) and correction < 3:
+                    try:
+                        moved = bool(vc.jumpToNextPage())
+                    except Exception:
+                        moved = False
+                    if not moved:
+                        break
+                    try:
+                        next_current = int(vc.getPage() or 0)
+                    except Exception:
+                        next_current = current
+                    if next_current <= current:
+                        break
+                    current = next_current
+                    correction += 1
+                return current
+
+            try:
+                vc.jumpToLastPage()
+                total_pages = int(vc.getPage() or 0)
+            except Exception:
+                total_pages = 0
+            if total_pages <= 0:
                 print("")
                 raise SystemExit(0)
-            seen = set()
-            while True:
-                current_page = int(vc.getPage() or 0)
-                if current_page <= 0 or current_page in seen:
+
+            page_texts = []
+            target_page = 1
+            while target_page <= total_pages:
+                current_page = _goto_page(target_page)
+                if current_page <= 0:
+                    page_texts.extend([""] * (total_pages - len(page_texts)))
                     break
-                seen.add(current_page)
+                if current_page > target_page:
+                    page_texts.extend([""] * (current_page - target_page))
+                    target_page = current_page
+                if current_page < target_page:
+                    page_texts.append("")
+                    target_page += 1
+                    continue
+
                 text = ""
-                moved = False
+                boundary_page = current_page
                 try:
                     vc.jumpToStartOfPage()
                     start = vc.getStart()
-                    moved = bool(vc.jumpToNextPage())
-                    if moved:
-                        vc.jumpToStartOfPage()
-                        end = vc.getStart()
-                    else:
-                        end = doc.Text.getEnd()
-                    cursor = doc.Text.createTextCursorByRange(start)
-                    cursor.gotoRange(end, True)
-                    text = str(cursor.getString() or "")
+                except Exception:
+                    start = None
+
+                next_target = current_page + 1
+                while next_target <= total_pages and boundary_page <= current_page:
+                    boundary_page = _goto_page(next_target)
+                    if boundary_page <= current_page:
+                        next_target += 1
+
+                try:
+                    if start is not None:
+                        if boundary_page > current_page:
+                            vc.jumpToStartOfPage()
+                            end = vc.getStart()
+                        else:
+                            end = doc.Text.getEnd()
+                        cursor = doc.Text.createTextCursorByRange(start)
+                        cursor.gotoRange(end, True)
+                        text = str(cursor.getString() or "")
                 except Exception:
                     text = ""
+
                 page_texts.append(text.strip())
-                if not moved:
-                    break
-            print("\\n\\f\\n".join(page_texts).strip())
+                if boundary_page > current_page + 1:
+                    page_texts.extend([""] * (boundary_page - current_page - 1))
+                target_page = boundary_page if boundary_page > current_page else current_page + 1
+
+            if len(page_texts) < total_pages:
+                page_texts.extend([""] * (total_pages - len(page_texts)))
+            print("\\n\\f\\n".join(page_texts[:total_pages]).strip())
         finally:
             try:
                 doc.close(True)
@@ -312,25 +381,28 @@ with tempfile.TemporaryDirectory(prefix="lo_uno_pages_") as profile_dir:
 """.strip()
 
     try:
-        proc = subprocess.run(
-            [str(sys.executable), "-c", script, file_path],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        if proc.returncode != 0:
-            logger.debug(
-                "UNO page text extraction failed for %s: rc=%s stderr=%s",
-                file_path,
-                proc.returncode,
-                str(proc.stderr or "").strip(),
+        for attempt in range(3):
+            proc = subprocess.run(
+                [str(sys.executable), "-c", script, file_path],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
             )
-            return "", False
-        text = str(proc.stdout or "").strip()
-        if not text:
-            return "", False
-        return text, ("\f" in text)
+            if proc.returncode != 0:
+                logger.debug(
+                    "UNO page text extraction failed for %s on attempt %s: rc=%s stderr=%s",
+                    file_path,
+                    attempt + 1,
+                    proc.returncode,
+                    str(proc.stderr or "").strip(),
+                )
+                continue
+            text = str(proc.stdout or "").strip()
+            if not text:
+                continue
+            return text, ("\f" in text)
+        return "", False
     except Exception as exc:
         logger.debug("UNO page text extraction exception for %s: %s", file_path, exc)
         return "", False
@@ -500,6 +572,316 @@ def _append_missing_tail_pages(primary_pages: Sequence[str], secondary_pages: Se
     return base + tail
 
 
+def _page_alignment_signature(text: str) -> str:
+    parts: List[str] = []
+    for raw in str(text or "").splitlines():
+        normalized = RAG_DB_Document._normalized_heading_text(str(raw or "").strip())
+        if not normalized:
+            continue
+        parts.append(normalized[:80])
+        if len(parts) >= 2:
+            break
+    if parts:
+        return "|".join(parts)
+    return ""
+
+
+def _page_alignment_signature_matches(source_sig: str, target_sig: str) -> bool:
+    left = str(source_sig or "").strip()
+    right = str(target_sig or "").strip()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+
+    left_head = left.split("|", 1)[0]
+    right_head = right.split("|", 1)[0]
+    if left_head and right_head and left_head == right_head:
+        return True
+    if left_head and (left_head == right or left_head == right_head):
+        return True
+    if right_head and (right_head == left or right_head == left_head):
+        return True
+    if len(left_head) >= 6 and len(right_head) >= 6:
+        if left_head == right_head or left_head in right or right_head in left:
+            return True
+    if len(left) >= 12 and len(right) >= 12 and (left in right or right in left):
+        return True
+    return False
+
+
+def _trim_spurious_leading_blank_office_page(
+    reference_text: str,
+    target_page_texts: Sequence[str],
+) -> tuple[List[str], int]:
+    reference_pages = _split_native_pages(reference_text)
+    target_pages = [str(item or "") for item in list(target_page_texts or [])]
+    removed = 0
+    while len(reference_pages) >= 2 and len(target_pages) >= 3:
+        if str(target_pages[1] or "").strip():
+            break
+
+        reference_first_sig = _page_alignment_signature(reference_pages[0])
+        reference_second_sig = _page_alignment_signature(reference_pages[1])
+        target_first_sig = _page_alignment_signature(target_pages[0])
+        target_third_sig = _page_alignment_signature(target_pages[2])
+        if not reference_second_sig or not target_third_sig:
+            break
+        if reference_first_sig and target_first_sig and not _page_alignment_signature_matches(reference_first_sig, target_first_sig):
+            break
+        if not _page_alignment_signature_matches(reference_second_sig, target_third_sig):
+            break
+
+        target_pages = [target_pages[0]] + target_pages[2:]
+        removed += 1
+    return target_pages, removed
+
+
+def _trim_trailing_blank_office_pages(target_page_texts: Sequence[str]) -> tuple[List[str], int]:
+    target_pages = [str(item or "") for item in list(target_page_texts or [])]
+    removed = 0
+    while target_pages and not str(target_pages[-1] or "").strip():
+        target_pages.pop()
+        removed += 1
+    return target_pages, removed
+
+
+def _normalize_office_uno_pages(
+    reference_text: str,
+    target_page_texts: Sequence[str],
+    *,
+    raw_native_page_count: int = 0,
+) -> tuple[List[str], int, int]:
+    normalized_pages, removed_leading_blanks = _trim_spurious_leading_blank_office_page(
+        reference_text,
+        target_page_texts,
+    )
+    normalized_pages, _ = _trim_trailing_blank_office_pages(normalized_pages)
+    effective_native_page_count = int(raw_native_page_count or 0)
+    if (
+        removed_leading_blanks > 0
+        and effective_native_page_count > len(normalized_pages)
+        and effective_native_page_count >= len(normalized_pages) + removed_leading_blanks
+    ):
+        effective_native_page_count -= removed_leading_blanks
+    if effective_native_page_count <= 0:
+        effective_native_page_count = len(normalized_pages)
+    return normalized_pages, effective_native_page_count, removed_leading_blanks
+
+
+def _materialize_effective_office_pages(
+    reference_text: str,
+    primary_pages: Sequence[str],
+    secondary_pages: Sequence[str],
+) -> List[str]:
+    normalized_pages, _, _ = _normalize_office_uno_pages(
+        reference_text,
+        primary_pages,
+        raw_native_page_count=0,
+    )
+    materialized_pages = _append_missing_tail_pages(normalized_pages, secondary_pages)
+    materialized_pages, _ = _trim_trailing_blank_office_pages(materialized_pages)
+    return [str(item or "") for item in materialized_pages]
+
+
+def _map_source_pages_to_target_pages(source_pages: Sequence[str], target_pages: Sequence[str]) -> Dict[int, int]:
+    source_signatures = [_page_alignment_signature(text) for text in list(source_pages or [])]
+    target_signatures = [_page_alignment_signature(text) for text in list(target_pages or [])]
+    if not source_signatures or not target_signatures:
+        return {}
+
+    mapping: Dict[int, int] = {}
+    src_idx = 0
+    tgt_idx = 0
+    matched = 0
+    while src_idx < len(source_signatures) and tgt_idx < len(target_signatures):
+        source_sig = source_signatures[src_idx]
+        target_sig = target_signatures[tgt_idx]
+
+        if not target_sig:
+            tgt_idx += 1
+            continue
+        if not source_sig:
+            mapping[src_idx + 1] = min(len(target_signatures), tgt_idx + 1)
+            src_idx += 1
+            continue
+        if _page_alignment_signature_matches(source_sig, target_sig):
+            mapping[src_idx + 1] = tgt_idx + 1
+            matched += 1
+            src_idx += 1
+            tgt_idx += 1
+            continue
+
+        next_target_sig = target_signatures[tgt_idx + 1] if tgt_idx + 1 < len(target_signatures) else ""
+        if next_target_sig and _page_alignment_signature_matches(source_sig, next_target_sig):
+            tgt_idx += 1
+            continue
+
+        next_source_sig = source_signatures[src_idx + 1] if src_idx + 1 < len(source_signatures) else ""
+        if next_source_sig and _page_alignment_signature_matches(next_source_sig, target_sig):
+            src_idx += 1
+            continue
+
+        mapping[src_idx + 1] = min(len(target_signatures), tgt_idx + 1)
+        src_idx += 1
+        tgt_idx += 1
+
+    if matched <= 0 or not mapping:
+        return {}
+
+    ordered = sorted(mapping.items())
+    last_source, last_target = ordered[-1]
+    offset = int(last_target) - int(last_source)
+    for source_page in range(1, len(source_signatures) + 1):
+        mapping.setdefault(source_page, max(1, min(len(target_signatures), source_page + offset)))
+    return mapping
+
+
+def _project_page_number_by_mapping(
+    source_page: int,
+    page_mapping: Dict[int, int],
+    *,
+    target_page_count: int,
+) -> int:
+    if source_page <= 0 or target_page_count <= 0:
+        return 0
+    mapped = int(page_mapping.get(int(source_page)) or 0)
+    if mapped > 0:
+        return max(1, min(int(target_page_count), mapped))
+    if not page_mapping:
+        return max(1, min(int(target_page_count), int(source_page)))
+
+    ordered = sorted((int(src), int(dst)) for src, dst in page_mapping.items() if int(src) > 0 and int(dst) > 0)
+    if not ordered:
+        return max(1, min(int(target_page_count), int(source_page)))
+    if source_page <= ordered[0][0]:
+        offset = ordered[0][1] - ordered[0][0]
+        return max(1, min(int(target_page_count), int(source_page) + int(offset)))
+    if source_page >= ordered[-1][0]:
+        offset = ordered[-1][1] - ordered[-1][0]
+        return max(1, min(int(target_page_count), int(source_page) + int(offset)))
+
+    for index in range(len(ordered) - 1):
+        left_source, left_target = ordered[index]
+        right_source, right_target = ordered[index + 1]
+        if left_source <= source_page <= right_source:
+            if right_source <= left_source:
+                return max(1, min(int(target_page_count), int(left_target)))
+            ratio = float(int(source_page) - int(left_source)) / float(int(right_source) - int(left_source))
+            mapped = int(round(float(left_target) + ratio * float(int(right_target) - int(left_target))))
+            return max(1, min(int(target_page_count), mapped))
+    return max(1, min(int(target_page_count), int(source_page)))
+
+
+def _align_office_structured_payload_with_uno_pages(
+    *,
+    source_text: str,
+    target_page_texts: Sequence[str],
+    source_page_assets: Sequence[Dict[str, Any]],
+    source_sections: Sequence[Dict[str, Any]],
+) -> Dict[str, Any]:
+    source_pages = _split_native_pages(source_text)
+    target_pages = [str(item or "") for item in list(target_page_texts or [])]
+    target_page_count = len(target_pages)
+    if not source_pages or not target_pages:
+        return {
+            "page_assets": [dict(item) for item in list(source_page_assets or []) if isinstance(item, dict)],
+            "structured_sections": [dict(item) for item in list(source_sections or []) if isinstance(item, dict)],
+        }
+    if len(target_pages) <= len(source_pages):
+        return {
+            "page_assets": [dict(item) for item in list(source_page_assets or []) if isinstance(item, dict)],
+            "structured_sections": [dict(item) for item in list(source_sections or []) if isinstance(item, dict)],
+        }
+    if not any(not str(text or "").strip() for text in target_pages):
+        return {
+            "page_assets": [dict(item) for item in list(source_page_assets or []) if isinstance(item, dict)],
+            "structured_sections": [dict(item) for item in list(source_sections or []) if isinstance(item, dict)],
+        }
+
+    page_mapping = _map_source_pages_to_target_pages(source_pages, target_pages)
+    if not page_mapping or not any(int(target) != int(source) for source, target in page_mapping.items()):
+        return {
+            "page_assets": [dict(item) for item in list(source_page_assets or []) if isinstance(item, dict)],
+            "structured_sections": [dict(item) for item in list(source_sections or []) if isinstance(item, dict)],
+        }
+
+    projected_assets: List[Dict[str, Any]] = [
+        {"page": page_number, "headers": [], "footers": [], "page_number": "", "images": []}
+        for page_number in range(1, target_page_count + 1)
+    ]
+    for index, item in enumerate(list(source_page_assets or []), start=1):
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        source_page = int(RAG_DB_Document.coerce_page_number(row.get("page")) or index)
+        target_page = _project_page_number_by_mapping(source_page, page_mapping, target_page_count=target_page_count)
+        if target_page <= 0:
+            continue
+        target_row = projected_assets[target_page - 1]
+        target_row["headers"] = _dedupe_text_items(list(target_row.get("headers") or []) + list(row.get("headers") or []))
+        target_row["footers"] = _dedupe_text_items(list(target_row.get("footers") or []) + list(row.get("footers") or []))
+        if not str(target_row.get("page_number") or "").strip():
+            target_row["page_number"] = str(row.get("page_number") or "").strip()
+        target_row["images"] = _dedupe_image_items(list(target_row.get("images") or []) + list(row.get("images") or []))
+
+    projected_sections: List[Dict[str, Any]] = []
+    for item in list(source_sections or []):
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        source_page = int(RAG_DB_Document.coerce_page_number(row.get("page")) or 0)
+        if source_page > 0:
+            row["page"] = _project_page_number_by_mapping(source_page, page_mapping, target_page_count=target_page_count)
+        projected_sections.append(row)
+
+    return {
+        "page_assets": projected_assets,
+        "structured_sections": projected_sections,
+    }
+
+
+def _stage_office_cli_source(file_path: str, work_dir: str) -> str:
+    source_path = os.path.abspath(file_path)
+    suffix = os.path.splitext(source_path)[1].lower() or ".bin"
+    staged_path = os.path.join(work_dir, f"input{suffix}")
+    try:
+        shutil.copyfile(source_path, staged_path)
+        return staged_path
+    except Exception:
+        return source_path
+
+
+def _probe_effective_native_page_count(file_path: str) -> int:
+    file_path = os.path.abspath(file_path)
+    ext = os.path.splitext(file_path)[1].lower()
+    raw_count = int(_probe_libreoffice_physical_page_count(file_path) or 0)
+    if ext not in {".doc", ".docx"}:
+        return raw_count
+
+    try:
+        if ext == ".doc":
+            payload = _extract_doc_structured_payload_via_converted_docx(file_path)
+        else:
+            payload = _extract_docx_structured_payload(file_path)
+    except Exception:
+        payload = {}
+
+    reference_text = str(payload.get("text_with_breaks") or "")
+    uno_text, uno_has_breaks = _extract_office_text_by_uno_pages(file_path)
+    office_text, office_has_breaks = _extract_office_text_with_page_breaks(file_path)
+    uno_pages = _split_native_pages(uno_text) if uno_has_breaks and uno_text else []
+    fallback_pages = _split_native_pages(office_text) if office_has_breaks and office_text else []
+    materialized_pages = _materialize_effective_office_pages(
+        reference_text or office_text,
+        uno_pages,
+        fallback_pages,
+    )
+    if materialized_pages:
+        return len(materialized_pages)
+    return raw_count
+
+
 def _extract_doc_with_command(command: List[str]) -> str:
     process = subprocess.run(
         command,
@@ -530,6 +912,7 @@ def _convert_office_to_docx(file_path: str) -> str:
     if not office:
         return ""
     with tempfile.TemporaryDirectory() as tmp_dir:
+        staged_source = _stage_office_cli_source(file_path, tmp_dir)
         command = [
             office,
             "--headless",
@@ -537,11 +920,11 @@ def _convert_office_to_docx(file_path: str) -> str:
             "docx",
             "--outdir",
             tmp_dir,
-            file_path,
+            staged_source,
         ]
         try:
             subprocess.run(command, capture_output=True, timeout=120, check=False)
-            docx_path = os.path.join(tmp_dir, f"{os.path.splitext(os.path.basename(file_path))[0]}.docx")
+            docx_path = os.path.join(tmp_dir, f"{os.path.splitext(os.path.basename(staged_source))[0]}.docx")
             if not os.path.isfile(docx_path):
                 candidates = [
                     os.path.join(tmp_dir, name)
@@ -563,6 +946,7 @@ def _extract_office_text_with_page_breaks(file_path: str) -> tuple[str, bool]:
     if not office:
         return "", False
     with tempfile.TemporaryDirectory() as tmp_dir:
+        staged_source = _stage_office_cli_source(file_path, tmp_dir)
         command = [
             office,
             "--headless",
@@ -570,11 +954,11 @@ def _extract_office_text_with_page_breaks(file_path: str) -> tuple[str, bool]:
             "txt:Text",
             "--outdir",
             tmp_dir,
-            file_path,
+            staged_source,
         ]
         try:
             subprocess.run(command, capture_output=True, timeout=60, check=False)
-            txt_name = f"{os.path.splitext(os.path.basename(file_path))[0]}.txt"
+            txt_name = f"{os.path.splitext(os.path.basename(staged_source))[0]}.txt"
             txt_path = os.path.join(tmp_dir, txt_name)
             if not os.path.isfile(txt_path):
                 return "", False
@@ -598,6 +982,7 @@ def _extract_office_text_by_pdf_pages(
     if not office:
         return "", 0, [], []
     with tempfile.TemporaryDirectory() as tmp_dir:
+        staged_source = _stage_office_cli_source(file_path, tmp_dir)
         command = [
             office,
             "--headless",
@@ -605,11 +990,11 @@ def _extract_office_text_by_pdf_pages(
             "pdf",
             "--outdir",
             tmp_dir,
-            file_path,
+            staged_source,
         ]
         try:
             subprocess.run(command, capture_output=True, timeout=120, check=False)
-            expected_pdf = os.path.join(tmp_dir, f"{os.path.splitext(os.path.basename(file_path))[0]}.pdf")
+            expected_pdf = os.path.join(tmp_dir, f"{os.path.splitext(os.path.basename(staged_source))[0]}.pdf")
             pdf_path = expected_pdf
             if not os.path.isfile(pdf_path):
                 candidates = [
@@ -1364,6 +1749,7 @@ def _extract_doc_catalog_metadata(file_path: str) -> Dict[str, List[Dict[str, An
         return {"native_catalog": [], "style_catalog": [], "font_catalog": []}
 
     with tempfile.TemporaryDirectory() as tmp_dir:
+        staged_source = _stage_office_cli_source(file_path, tmp_dir)
         command = [
             office,
             "--headless",
@@ -1371,11 +1757,11 @@ def _extract_doc_catalog_metadata(file_path: str) -> Dict[str, List[Dict[str, An
             "docx",
             "--outdir",
             tmp_dir,
-            file_path,
+            staged_source,
         ]
         try:
             subprocess.run(command, capture_output=True, timeout=120, check=False)
-            expected_docx = os.path.join(tmp_dir, f"{os.path.splitext(os.path.basename(file_path))[0]}.docx")
+            expected_docx = os.path.join(tmp_dir, f"{os.path.splitext(os.path.basename(staged_source))[0]}.docx")
             docx_path = expected_docx
             if not os.path.isfile(docx_path):
                 candidates = [
@@ -1412,6 +1798,7 @@ def _extract_doc_structured_payload_via_converted_docx(file_path: str) -> Dict[s
         }
 
     with tempfile.TemporaryDirectory() as tmp_dir:
+        staged_source = _stage_office_cli_source(file_path, tmp_dir)
         command = [
             office,
             "--headless",
@@ -1419,11 +1806,11 @@ def _extract_doc_structured_payload_via_converted_docx(file_path: str) -> Dict[s
             "docx",
             "--outdir",
             tmp_dir,
-            file_path,
+            staged_source,
         ]
         try:
             subprocess.run(command, capture_output=True, timeout=120, check=False)
-            expected_docx = os.path.join(tmp_dir, f"{os.path.splitext(os.path.basename(file_path))[0]}.docx")
+            expected_docx = os.path.join(tmp_dir, f"{os.path.splitext(os.path.basename(staged_source))[0]}.docx")
             docx_path = expected_docx
             if not os.path.isfile(docx_path):
                 candidates = [
@@ -1483,57 +1870,50 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
             doc_page_assets = list(doc_payload.get("page_assets") or [])
             uno_text, uno_has_breaks = _extract_office_text_by_uno_pages(file_path)
             office_text, has_native_breaks = _extract_office_text_with_page_breaks(file_path)
-            pdf_text, pdf_page_count, pdf_page_layouts, pdf_native_catalog = _extract_office_text_by_pdf_pages(
-                file_path,
-                include_images=False,
+            raw_uno_pages = _split_native_pages(uno_text) if uno_has_breaks and uno_text else []
+            fallback_pages = _split_native_pages(office_text) if has_native_breaks and office_text else []
+            reference_text = xml_text if xml_has_breaks and xml_text else office_text
+            uno_pages = _materialize_effective_office_pages(reference_text, raw_uno_pages, fallback_pages)
+            if uno_pages:
+                uno_text = "\n\f\n".join(uno_pages).strip()
+                uno_has_breaks = len(uno_pages) > 1
+            aligned_doc_payload = _align_office_structured_payload_with_uno_pages(
+                source_text=reference_text,
+                target_page_texts=uno_pages,
+                source_page_assets=doc_page_assets,
+                source_sections=doc_structured_sections,
             )
-            uno_pages = _split_native_pages(uno_text) if uno_has_breaks and uno_text else []
-            pdf_reference_pages = _split_native_pages(pdf_text)
-            uno_pdf_gap = max(0, len(pdf_reference_pages) - len(uno_pages))
-            use_pdf_tail_fallback = bool(
-                uno_pages
-                and pdf_reference_pages
-                and uno_pdf_gap >= max(8, max(1, len(uno_pages) // 5))
-            )
-            effective_uno_pages = _append_missing_tail_pages(uno_pages, pdf_reference_pages) if use_pdf_tail_fallback else list(uno_pages)
-            effective_uno_text = "\n\f\n".join(effective_uno_pages).strip() if effective_uno_pages else uno_text
-            native_page_count = _require_libreoffice_physical_page_count(
+            doc_page_assets = list(aligned_doc_payload.get("page_assets") or doc_page_assets)
+            doc_structured_sections = list(aligned_doc_payload.get("structured_sections") or doc_structured_sections)
+            raw_native_page_count = _require_libreoffice_physical_page_count(
                 file_path,
                 ext=".doc",
                 fallback_counts=[
-                    len(effective_uno_pages),
+                    len(uno_pages),
                     len(xml_text.split("\f")) if xml_has_breaks and xml_text else 0,
                     len(office_text.split("\f")) if has_native_breaks and office_text else 0,
-                    int(pdf_page_count or 0),
                 ],
             )
-            effective_native_page_count = max(int(native_page_count or 0), len(effective_uno_pages), int(pdf_page_count or 0))
-            doc_native_catalog = _prefer_richer_catalog(doc_catalogs.get("native_catalog") or [], pdf_native_catalog)
-            doc_page_layout = _merge_page_layouts(
-                doc_page_assets,
-                pdf_page_layouts,
-                total_pages=int(effective_native_page_count or pdf_page_count or 0),
-            )
+            effective_native_page_count = len(uno_pages) if uno_pages else int(raw_native_page_count or 0)
+            doc_page_layout = _merge_page_layouts(doc_page_assets, [], total_pages=int(effective_native_page_count or 0))
             doc_common_metadata = {
                 "file_name": file_path,
                 "source_extension": ".doc",
                 "native_page_count": int(effective_native_page_count or 0),
-                "native_catalog": doc_native_catalog,
+                "native_catalog": doc_catalogs.get("native_catalog") or [],
                 "style_catalog": doc_catalogs.get("style_catalog") or [],
                 "font_catalog": doc_catalogs.get("font_catalog") or [],
                 "structured_sections": doc_structured_sections,
                 "structured_page_assets": doc_page_assets,
                 "page_layout": doc_page_layout,
-                "pdf_reference_catalog": list(pdf_native_catalog or []),
-                "pdf_reference_pages": pdf_reference_pages,
                 "txt_reference_pages": _split_native_pages(office_text),
             }
             if uno_text and uno_has_breaks:
                 return Document(
-                    text=effective_uno_text,
+                    text=uno_text,
                     metadata={
                         **doc_common_metadata,
-                        "doc_parser": "libreoffice-uno-pages+pdf-tail-fallback" if use_pdf_tail_fallback else "libreoffice-uno-pages",
+                        "doc_parser": "libreoffice-uno-pages",
                         "native_pagination": True,
                     },
                     doc_id=file_path,
@@ -1606,25 +1986,41 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
             docx_page_assets = list(docx_payload.get("page_assets") or [])
             uno_text, uno_has_breaks = _extract_office_text_by_uno_pages(file_path)
             office_text, has_native_breaks = _extract_office_text_with_page_breaks(file_path)
-            native_page_count = _require_libreoffice_physical_page_count(
+            raw_uno_pages = _split_native_pages(uno_text) if uno_has_breaks and uno_text else []
+            fallback_pages = _split_native_pages(office_text) if has_native_breaks and office_text else []
+            reference_text = xml_text if xml_has_breaks and xml_text else office_text
+            uno_pages = _materialize_effective_office_pages(reference_text, raw_uno_pages, fallback_pages)
+            if uno_pages:
+                uno_text = "\n\f\n".join(uno_pages).strip()
+                uno_has_breaks = len(uno_pages) > 1
+            aligned_docx_payload = _align_office_structured_payload_with_uno_pages(
+                source_text=reference_text,
+                target_page_texts=uno_pages,
+                source_page_assets=docx_page_assets,
+                source_sections=docx_structured_sections,
+            )
+            docx_page_assets = list(aligned_docx_payload.get("page_assets") or docx_page_assets)
+            docx_structured_sections = list(aligned_docx_payload.get("structured_sections") or docx_structured_sections)
+            raw_native_page_count = _require_libreoffice_physical_page_count(
                 file_path,
                 ext=".docx",
                 fallback_counts=[
-                    len(uno_text.split("\f")) if uno_has_breaks and uno_text else 0,
+                    len(uno_pages),
                     len(xml_text.split("\f")) if xml_has_breaks and xml_text else 0,
                     len(office_text.split("\f")) if has_native_breaks and office_text else 0,
                 ],
             )
+            effective_native_page_count = len(uno_pages) if uno_pages else int(raw_native_page_count or 0)
             docx_common_metadata = {
                 "file_name": file_path,
                 "source_extension": ".docx",
-                "native_page_count": int(native_page_count or 0),
+                "native_page_count": int(effective_native_page_count or 0),
                 "native_catalog": docx_catalogs.get("native_catalog") or [],
                 "style_catalog": docx_catalogs.get("style_catalog") or [],
                 "font_catalog": docx_catalogs.get("font_catalog") or [],
                 "structured_sections": docx_structured_sections,
                 "structured_page_assets": docx_page_assets,
-                "page_layout": _merge_page_layouts(docx_page_assets, [], total_pages=int(native_page_count or 0)),
+                "page_layout": _merge_page_layouts(docx_page_assets, [], total_pages=int(effective_native_page_count or 0)),
                 "txt_reference_pages": _split_native_pages(office_text),
             }
             if uno_text and uno_has_breaks:
