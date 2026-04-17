@@ -302,12 +302,35 @@ class DocxRAGDocument(RAG_DB_Document):
         if not manual_markers and self.cleaned_text.strip():
             manual_markers = self._extract_markers_from_manual_toc([self.cleaned_text])
 
+        style_markers = self._extract_markers_from_metadata(["style_catalog"])
+        font_markers = self._extract_markers_from_metadata(["font_catalog"])
+        style_levels = {
+            int(self.coerce_page_number(item.get("level")) or 1)
+            for item in list(style_markers or [])
+            if int(self.coerce_page_number(item.get("level")) or 1) > 1
+        }
+        prefer_style_hierarchy = bool(style_levels)
+
         candidate_sets: List[tuple[str, List[Dict[str, Any]]]] = [
             ("native_catalog", self._extract_markers_from_metadata(["native_catalog"])),
-            ("manual_toc", manual_markers),
-            ("style_catalog", self._extract_markers_from_metadata(["style_catalog"])),
-            ("font_catalog", self._extract_markers_from_metadata(["font_catalog"])),
         ]
+        if prefer_style_hierarchy:
+            candidate_sets.extend(
+                [
+                    ("style_catalog", style_markers),
+                    ("font_catalog", font_markers),
+                    ("manual_toc", manual_markers),
+                ]
+            )
+        else:
+            candidate_sets.extend(
+                [
+                    ("manual_toc", manual_markers),
+                    ("style_catalog", style_markers),
+                    ("font_catalog", font_markers),
+                ]
+            )
+
         for source_name, raw_markers in candidate_sets:
             markers = [dict(item) for item in list(raw_markers or [])]
             if not markers:

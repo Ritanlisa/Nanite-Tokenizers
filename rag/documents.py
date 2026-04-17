@@ -1480,9 +1480,22 @@ def _extract_docx_text_from_paragraph(paragraph: ET.Element, ns: Dict[str, str])
 
 def _docx_heading_level_from_style(style_id: str, style_name: str) -> Optional[int]:
     source = f"{style_id} {style_name}".lower()
-    match = re.search(r"(?:heading|标题|toc)\s*([1-9])", source)
-    if match:
-        return max(1, min(int(match.group(1)), 6))
+    # TOC styles are catalogue rows, not real content headings.
+    if "toc" in source or "目录" in source:
+        return None
+
+    # Chinese Word style hierarchy should be: 标题 > 标题1 > 标题2 > 标题3 ...
+    if re.search(r"(?:^|\s)标题(?:$|\s)", source):
+        return 1
+    match_cn = re.search(r"标题\s*([1-9])", source)
+    if match_cn:
+        # Shift by +1 so 标题1 becomes level-2 under 标题.
+        return max(1, min(int(match_cn.group(1)) + 1, 6))
+
+    # Keep default English Heading semantics for compatibility.
+    match_en = re.search(r"heading\s*([1-9])", source)
+    if match_en:
+        return max(1, min(int(match_en.group(1)), 6))
     return None
 
 

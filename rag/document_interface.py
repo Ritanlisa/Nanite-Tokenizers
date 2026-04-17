@@ -2972,11 +2972,56 @@ class RAG_DB_Document(Chapter, ABC):
         return self.catalog_payload()
 
     def catalog_payload(self) -> List[Dict[str, Any]]:
+        def _chapter_page_span(chapter: Chapter) -> tuple[int, int]:
+            chapter_meta = dict(getattr(chapter, "metadata", {}) or {})
+            start = self.coerce_page_number(chapter_meta.get("section_start_page"))
+            end = self.coerce_page_number(chapter_meta.get("section_end_page"))
+            if start is not None and end is not None:
+                return int(start), int(end)
+
+            page_numbers: List[int] = []
+            for mono in chapter.flatten_mono_pages():
+                mono_meta = dict(getattr(mono, "metadata", {}) or {})
+                page = self.coerce_page_number(mono_meta.get("page"))
+                if page is not None and int(page) > 0:
+                    page_numbers.append(int(page))
+            if page_numbers:
+                return int(min(page_numbers)), int(max(page_numbers))
+            return 1, 1
+
+        catalog: List[Dict[str, Any]] = []
+
+        def _walk(nodes: Sequence[Page], *, level: int, parent_title: Optional[str]) -> None:
+            for node in list(nodes or []):
+                if isinstance(node, Chapter):
+                    title = str(node.title or "").strip()
+                    if title:
+                        start_page, end_page = _chapter_page_span(node)
+                        catalog.append(
+                            {
+                                "title": title,
+                                "page": int(start_page),
+                                "end_page": int(end_page),
+                                "category": node.category,
+                                "level": int(level),
+                                "parent_title": parent_title,
+                            }
+                        )
+                    _walk(
+                        list(getattr(node, "SubContent", []) or []),
+                        level=int(level) + 1,
+                        parent_title=title or parent_title,
+                    )
+
+        _walk(self.get_page_nodes(), level=1, parent_title=None)
+        if catalog:
+            return catalog
+
         pages = self.get_mono_pages()
         if not pages:
             return list(getattr(self, "catalog", []))
 
-        catalog: List[Dict[str, Any]] = []
+        # Fallback for documents without chapter tree: keep page-level catalog.
         for idx, mono_page in enumerate(pages, start=1):
             metadata = dict(mono_page.metadata or {})
             start_page = self.coerce_page_number(metadata.get("section_start_page"))
@@ -2991,6 +3036,8 @@ class RAG_DB_Document(Chapter, ABC):
                     "page": resolved_start,
                     "end_page": resolved_end,
                     "category": mono_page.category,
+                    "level": 1,
+                    "parent_title": None,
                 }
             )
         return catalog
