@@ -1551,10 +1551,7 @@ class RAG_DB_Document(Chapter, ABC):
             if image_index is not None and image_index > 0:
                 referenced_indexes.add(int(image_index))
 
-        if referenced_indexes:
-            return base
-
-        if base:
+        if base and not referenced_indexes:
             if len(real_images) != 1 or not self._has_inline_figure_reference(base):
                 return base
             real_images = real_images[:1]
@@ -2157,26 +2154,18 @@ class RAG_DB_Document(Chapter, ABC):
         return len(payload)
 
     def _filter_section_images_for_captions(self, images: Sequence[Any], caption_count: int) -> List[Any]:
-        items = [item for item in list(images or []) if _normalize_image_asset(item) is not None]
-        if caption_count <= 0 or len(items) <= caption_count:
-            return items
-
-        removable_indexes = [
-            idx
-            for idx, image in enumerate(items)
-            if self._image_asset_byte_size(image) < 16384
-        ]
-        remove_limit = max(0, len(items) - int(caption_count))
-        if remove_limit <= 0 or not removable_indexes:
-            return items
-        removable = set(removable_indexes[:remove_limit])
-        return [image for idx, image in enumerate(items) if idx not in removable]
+        # Keep all extracted images (including tiny assets). Caption matching can choose
+        # preferred images, but source assets should not be dropped by byte-size heuristics.
+        return [item for item in list(images or []) if _normalize_image_asset(item) is not None]
 
     def _score_section_image_for_caption(self, caption: str, image: Any) -> int:
         label = self._normalized_heading_text(caption)
         media_type = str(getattr(image, "media_type", "") or "").strip().lower()
         filename = str(getattr(image, "filename", "") or "").strip().lower()
         size = self._image_asset_byte_size(image)
+        width = max(0, int(getattr(image, "width", 0) or 0))
+        height = max(0, int(getattr(image, "height", 0) or 0))
+        area = width * height
         is_vector = media_type in {"image/wmf", "image/emf", "image/svg+xml"} or filename.endswith((".wmf", ".emf", ".svg"))
         is_jpeg = media_type in {"image/jpeg", "image/jpg"} or filename.endswith((".jpeg", ".jpg"))
         is_png = media_type == "image/png" or filename.endswith(".png")
@@ -2184,6 +2173,10 @@ class RAG_DB_Document(Chapter, ABC):
         score = 0
         if size < 16384:
             score -= 200
+        if area <= 1024:
+            score -= 260
+        elif area >= 20000:
+            score += 40
 
         if any(keyword in label for keyword in ["架构", "结构", "原理", "框图"]):
             if is_vector or is_png:
@@ -2241,10 +2234,11 @@ class RAG_DB_Document(Chapter, ABC):
                 for image_idx, image in enumerate(remaining)
             ]
             best_score, best_image_idx, best_image = max(scored, key=lambda item: (item[0], -item[1]))
-            if best_score <= 0 and len(remaining) > max(0, len(caption_list) - idx):
-                continue
             groups[idx].append(best_image)
             remaining.pop(best_image_idx)
+        if remaining:
+            # Preserve unassigned assets instead of dropping them.
+            groups[max(0, len(groups) - 1)].extend(list(remaining))
         return groups
 
     @staticmethod
@@ -2434,8 +2428,9 @@ class RAG_DB_Document(Chapter, ABC):
                 ]
                 image_target_indexes = preferred_indexes or target_indexes
 
+            existing_images_by_page: Dict[int, List[Any]] = {}
             for page_idx in target_indexes:
-                pages[page_idx].assets.images = []
+                existing_images_by_page[int(page_idx)] = list(getattr(pages[page_idx].assets, "images", []) or [])
                 pages[page_idx].metadata["page_image_indexes"] = []
                 pages[page_idx].metadata["image_count"] = 0
 
@@ -2458,9 +2453,8 @@ class RAG_DB_Document(Chapter, ABC):
 
             for page_idx in target_indexes:
                 group = list(assigned_by_page.get(int(page_idx)) or [])
-                if group:
-                    for image in group:
-                        pages[page_idx].add_image(image)
+                merged_group = _dedupe_image_values(list(group) + list(existing_images_by_page.get(int(page_idx), [])))
+                pages[page_idx].assets.images = list(merged_group)
                 pages[page_idx].metadata["selected_figure_captions"] = list(selected_captions_by_page.get(int(page_idx)) or [])
                 pages[page_idx].metadata["page_image_indexes"] = list(range(1, len(list(pages[page_idx].assets.images or [])) + 1))
                 pages[page_idx].metadata["image_count"] = len(list(pages[page_idx].assets.images or []))

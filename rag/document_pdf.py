@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from llama_index.core import Document
 
-from rag.document_interface import ImageAsset, MonoPage, PageAssets, RAG_DB_Document
+from rag.document_interface import ImageAsset, MonoPage, PageAssets, RAG_DB_Document, _dedupe_image_values
 from rag.preprocessor import clean_document
 
 try:
@@ -280,14 +280,16 @@ class PDFRAGDocument(RAG_DB_Document):
                         ext = str(image_info.get("ext") or "png").strip().lower() or "png"
                         if not image_bytes:
                             continue
+                        width = int(image_info.get("width") or 0)
+                        height = int(image_info.get("height") or 0)
                         filename = f"page-{page_idx + 1:04d}-xref-{xref}.{ext}"
                         results[page_idx].append(
                             ImageAsset.from_bytes(
                                 data=bytes(image_bytes),
                                 filename=filename,
                                 media_type=f"image/{ext}",
-                                width=int(image_info.get("width") or 0),
-                                height=int(image_info.get("height") or 0),
+                                width=width,
+                                height=height,
                                 source=f"{os.path.basename(file_path)}#page={page_idx + 1};xref={xref}",
                                 page=page_idx + 1,
                             )
@@ -423,25 +425,166 @@ class PDFRAGDocument(RAG_DB_Document):
             )
         return ranges
 
+    @staticmethod
+    def _catalog_marker_quality(markers: List[Dict[str, Any]]) -> tuple[int, int, int, int]:
+        if not markers:
+            return (0, 0, 0, 0)
+
+        pages = [
+            int(RAG_DB_Document.coerce_page_number(item.get("page")) or 0)
+            for item in list(markers or [])
+            if int(RAG_DB_Document.coerce_page_number(item.get("page")) or 0) > 0
+        ]
+        if not pages:
+            return (0, 0, 0, 0)
+
+        top_levels = sum(
+            1
+            for item in list(markers or [])
+            if int(RAG_DB_Document.coerce_page_number(item.get("level")) or 1) == 1
+        )
+        return (
+            max(pages),
+            len(pages),
+            len(set(pages)),
+            top_levels,
+        )
+
+    def _select_tool_catalog_markers(
+        self,
+        metadata_markers: List[Dict[str, Any]],
+        toc_markers: List[Dict[str, Any]],
+        page_texts: List[str],
+    ) -> tuple[str, List[Dict[str, Any]]]:
+        if toc_markers and self._catalog_marker_quality(toc_markers) >= self._catalog_marker_quality(metadata_markers):
+            return "tool_toc", list(toc_markers)
+        if metadata_markers:
+            return "native_catalog", list(metadata_markers)
+        return "main_compatible", self._extract_main_compatible_markers(page_texts)
+
+    def _finalize_catalog_markers(
+        self,
+        markers: List[Dict[str, Any]],
+        page_texts: List[str],
+        marker_source: str,
+    ) -> List[Dict[str, Any]]:
+        rows = [dict(item) for item in list(markers or []) if isinstance(item, dict)]
+        if not rows:
+            return []
+
+        # `toc_items` already carry physical PDF pages. Re-mapping them with heading hits
+        # pulls front-matter catalogue pages into正文章节并破坏同页边界。
+        if marker_source != "tool_toc":
+            rows = self._remap_markers_with_text_hits(rows, page_texts, len(page_texts))
+        else:
+            rows = self._remap_tool_toc_markers_with_local_heading_hits(rows, page_texts)
+        rows = self._prune_unmatched_tail_markers(rows, page_texts)
+        return rows
+
+    def _reorder_page_images_by_captions(self, page_text: str, images: List[Any]) -> List[Any]:
+        ordered = list(images or [])
+        if not ordered:
+            return ordered
+        captions = [str(item or "").strip() for item in list(self._extract_figure_captions(page_text) or []) if str(item or "").strip()]
+        if not captions:
+            return ordered
+        groups = self._assign_section_images_to_captions(ordered, captions)
+        if not groups:
+            return ordered
+        flattened: List[Any] = []
+        for group in groups:
+            flattened.extend(list(group or []))
+        merged = flattened + ordered
+        return [item for item in _dedupe_image_values(merged)]
+
+    def _page_has_heading_hit(self, page_text: str, title: str) -> bool:
+        title_clean = self._clean_heading_title(str(title or ""))
+        key_full = self._normalized_heading_text(title_clean)
+        title_core = re.sub(
+            r"^(?:第[一二三四五六七八九十百千万0-9]+[章节部分篇]|\d+(?:\.\d+){0,5}|附录[一二三四五六七八九十百千万A-Za-z0-9]+)\s*",
+            "",
+            title_clean,
+            flags=re.IGNORECASE,
+        )
+        key_core = self._normalized_heading_text(title_core)
+        if not key_full and not key_core:
+            return False
+        lines = [str(line or "").strip() for line in str(page_text or "").splitlines() if str(line or "").strip()]
+        for line in lines[:32]:
+            if self._heading_level(line) is None:
+                continue
+            line_key = self._normalized_heading_text(self._clean_heading_title(line))
+            if not line_key:
+                continue
+            full_hit = bool(
+                key_full and (line_key == key_full or line_key.startswith(key_full) or (len(line_key) >= 8 and key_full.startswith(line_key)))
+            )
+            core_hit = bool(
+                key_core and (line_key == key_core or line_key.startswith(key_core) or (len(line_key) >= 8 and key_core.startswith(line_key)))
+            )
+            if full_hit or core_hit:
+                return True
+        return False
+
+    def _remap_tool_toc_markers_with_local_heading_hits(
+        self,
+        markers: List[Dict[str, Any]],
+        page_texts: List[str],
+    ) -> List[Dict[str, Any]]:
+        if not markers or not page_texts:
+            return markers
+
+        total_pages = len(page_texts)
+        rows: List[Dict[str, Any]] = [dict(item) for item in list(markers or []) if isinstance(item, dict)]
+        for idx, row in enumerate(rows):
+            title = str(row.get("title") or "").strip()
+            page = int(self.coerce_page_number(row.get("page")) or 0)
+            level = int(self.coerce_page_number(row.get("level")) or 1)
+            if not title or page <= 0:
+                continue
+            if self._is_catalogue_keyword(title):
+                continue
+            if page > total_pages:
+                row["page"] = total_pages
+                continue
+            if self._page_has_heading_hit(page_texts[page - 1], title):
+                continue
+
+            next_boundary = total_pages
+            for probe in range(idx + 1, len(rows)):
+                probe_level = int(self.coerce_page_number(rows[probe].get("level")) or level)
+                probe_page = int(self.coerce_page_number(rows[probe].get("page")) or 0)
+                if probe_page <= 0:
+                    continue
+                if probe_level <= level:
+                    next_boundary = max(page, probe_page - 1)
+                    break
+
+            upper = min(total_pages, max(page, min(page + 2, next_boundary)))
+            for probe_page in range(page + 1, upper + 1):
+                if self._page_has_heading_hit(page_texts[probe_page - 1], title):
+                    row["page"] = probe_page
+                    break
+
+        return rows
+
     def build(self) -> RAG_DB_Document:
         tool_pages = self._extract_with_pymupdf4llm()
         if tool_pages is not None:
             page_texts = [str(item.get("text") or "") for item in tool_pages]
             metadata_markers = self._extract_markers_from_metadata(["native_catalog"])
             toc_markers = self._extract_toc_item_markers(tool_pages)
-            marker_source = "native_catalog" if metadata_markers else ("tool_toc" if toc_markers else "main_compatible")
-            markers = list(metadata_markers) if metadata_markers else (list(toc_markers) if toc_markers else self._extract_main_compatible_markers(page_texts))
-            markers = self._remap_markers_with_text_hits(markers, page_texts, len(page_texts))
-            markers = self._prune_unmatched_tail_markers(markers, page_texts)
+            marker_source, markers = self._select_tool_catalog_markers(metadata_markers, toc_markers, page_texts)
+            markers = self._finalize_catalog_markers(markers, page_texts, marker_source)
             ranges = self.derive_catalog_ranges(markers, len(page_texts))
-            main_section_map = self._extract_main_page_section_map(page_texts) if not metadata_markers and not toc_markers else {}
+            main_section_map = self._extract_main_page_section_map(page_texts) if marker_source == "main_compatible" else {}
             range_source = marker_source
             if not ranges:
                 fallback_markers = self.extract_multilevel_catalog_markers(
                     page_texts,
                     metadata_keys=["native_catalog", "style_catalog", "font_catalog"],
                 )
-                fallback_markers = self._remap_markers_with_text_hits(fallback_markers, page_texts, len(page_texts))
+                fallback_markers = self._finalize_catalog_markers(fallback_markers, page_texts, "fallback_multilevel")
                 markers = list(fallback_markers)
                 ranges = self.derive_catalog_ranges(fallback_markers, len(page_texts))
                 range_source = "fallback_multilevel"
@@ -461,7 +604,6 @@ class PDFRAGDocument(RAG_DB_Document):
             page_images = self._extract_pdf_page_images(len(tool_pages))
 
             page_nodes: List[MonoPage] = []
-            chunks: List[Document] = []
             for fallback_idx, item in enumerate(tool_pages, start=1):
                 page_text = str(item.get("text") or "")
                 metadata_raw = item.get("metadata")
@@ -509,11 +651,14 @@ class PDFRAGDocument(RAG_DB_Document):
                     body_text,
                     page_images[fallback_idx - 1] if fallback_idx - 1 < len(page_images) else [],
                 )
+                images = self._reorder_page_images_by_captions(body_text, images)
                 assets = PageAssets(
-                    headers=headers,
-                    footers=footers,
-                    page_numbers=[page_number_hint] if page_number_hint else [],
-                    images=images,
+                    list(headers),
+                    list(footers),
+                    [],
+                    [],
+                    [page_number_hint] if page_number_hint else [],
+                    list(images),
                 )
                 page_meta["image_count"] = len(images)
                 page_markdown = self._render_plaintext_page_to_markdown(
@@ -533,22 +678,30 @@ class PDFRAGDocument(RAG_DB_Document):
                 node.add_page_number(page_idx)
                 page_nodes.append(node)
 
-                for chunk_idx, chunk_text in enumerate(self._split_text_chunks(page_markdown), start=1):
-                    chunk_meta = dict(page_meta)
+            leaf_page_nodes = self.split_mono_pages_by_section_markers(page_nodes, ranges)
+            chunks: List[Document] = []
+            for leaf_index, leaf_page in enumerate(leaf_page_nodes, start=1):
+                leaf_meta = dict(getattr(leaf_page, "metadata", {}) or {})
+                leaf_page_no = int(self.coerce_page_number(leaf_meta.get("page")) or leaf_index)
+                for chunk_idx, chunk_text in enumerate(self._split_text_chunks(str(getattr(leaf_page, "markdown_text", "") or "")), start=1):
+                    if not str(chunk_text or "").strip():
+                        continue
+                    chunk_meta = dict(leaf_meta)
                     chunk_meta["chunk_index"] = chunk_idx
                     chunks.append(
                         Document(
                             text=chunk_text,
                             metadata=chunk_meta,
-                            doc_id=f"{self.doc_name}::pdf-page::{page_idx}::chunk::{chunk_idx}",
+                            doc_id=f"{self.doc_name}::pdf-page::{leaf_page_no}::chunk::{chunk_idx}",
                         )
                     )
 
             self.set_build_trace(
                 page_layout_count=len(page_layouts),
                 physical_page_count=len(page_nodes),
+                leaf_page_count=len(leaf_page_nodes),
             )
-            self.set_page_nodes(self.build_catalog_tree(page_nodes, ranges))
+            self.set_page_nodes(self.build_catalog_tree(leaf_page_nodes, ranges))
             self.chunk_documents = chunks
             self.page_count = len(page_nodes)
             self.pagination_mode = "pdf-page-tree-tool"
@@ -571,8 +724,7 @@ class PDFRAGDocument(RAG_DB_Document):
         metadata_markers = self._extract_markers_from_metadata(["native_catalog"])
         marker_source = "native_catalog" if metadata_markers else "main_compatible"
         markers = list(metadata_markers) if metadata_markers else self._extract_main_compatible_markers(page_texts)
-        markers = self._remap_markers_with_text_hits(markers, page_texts, len(page_texts))
-        markers = self._prune_unmatched_tail_markers(markers, page_texts)
+        markers = self._finalize_catalog_markers(markers, page_texts, marker_source)
         ranges = self.derive_catalog_ranges(markers, len(page_texts))
         main_section_map = self._extract_main_page_section_map(page_texts)
         range_source = marker_source
@@ -581,6 +733,7 @@ class PDFRAGDocument(RAG_DB_Document):
                 page_texts,
                 metadata_keys=["native_catalog", "style_catalog", "font_catalog"],
             )
+            fallback_markers = self._finalize_catalog_markers(fallback_markers, page_texts, "fallback_multilevel")
             markers = list(fallback_markers)
             ranges = self.derive_catalog_ranges(fallback_markers, len(page_texts))
             range_source = "fallback_multilevel"
@@ -597,7 +750,6 @@ class PDFRAGDocument(RAG_DB_Document):
         )
 
         page_nodes: List[MonoPage] = []
-        chunks: List[Document] = []
         for page_idx, page_text in enumerate(page_texts, start=1):
             mapped_path = str(main_section_map.get(int(page_idx)) or "").strip()
             if mapped_path:
@@ -635,19 +787,29 @@ class PDFRAGDocument(RAG_DB_Document):
             node.add_page_number(page_idx)
             page_nodes.append(node)
 
-            for chunk_idx, chunk_text in enumerate(self._split_text_chunks(page_text), start=1):
-                chunk_meta = dict(page_meta)
+        leaf_page_nodes = self.split_mono_pages_by_section_markers(page_nodes, ranges)
+        chunks: List[Document] = []
+        for leaf_index, leaf_page in enumerate(leaf_page_nodes, start=1):
+            leaf_meta = dict(getattr(leaf_page, "metadata", {}) or {})
+            leaf_page_no = int(self.coerce_page_number(leaf_meta.get("page")) or leaf_index)
+            for chunk_idx, chunk_text in enumerate(self._split_text_chunks(str(getattr(leaf_page, "markdown_text", "") or "")), start=1):
+                if not str(chunk_text or "").strip():
+                    continue
+                chunk_meta = dict(leaf_meta)
                 chunk_meta["chunk_index"] = chunk_idx
                 chunks.append(
                     Document(
                         text=chunk_text,
                         metadata=chunk_meta,
-                        doc_id=f"{self.doc_name}::pdf-page::{page_idx}::chunk::{chunk_idx}",
+                        doc_id=f"{self.doc_name}::pdf-page::{leaf_page_no}::chunk::{chunk_idx}",
                     )
                 )
 
-            self.set_build_trace(physical_page_count=len(page_nodes))
-        self.set_page_nodes(self.build_catalog_tree(page_nodes, ranges))
+        self.set_build_trace(
+            physical_page_count=len(page_nodes),
+            leaf_page_count=len(leaf_page_nodes),
+        )
+        self.set_page_nodes(self.build_catalog_tree(leaf_page_nodes, ranges))
         self.chunk_documents = chunks
         self.page_count = len(page_nodes)
         self.pagination_mode = "pdf-page-tree"
