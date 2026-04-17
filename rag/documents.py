@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import glob
 import hashlib
 import logging
 import shutil
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from llama_index.core import Document
@@ -28,6 +30,282 @@ _UNO_BRIDGE_READY = False
 _NATIVE_PAGE_COUNT_ERROR_PREFIX = "NATIVE_PAGE_COUNT_ERROR:"
 
 
+def _expand_existing_paths(
+    candidates: Sequence[str],
+    *,
+    want_dir: bool = False,
+    want_file: bool = False,
+    executable_only: bool = False,
+) -> List[str]:
+    resolved: List[str] = []
+    seen: Set[str] = set()
+    for raw in list(candidates or []):
+        value = str(raw or "").strip()
+        if not value:
+            continue
+        expanded = os.path.expanduser(value)
+        matches = glob.glob(expanded) if any(char in expanded for char in "*?[") else [expanded]
+        for match in matches:
+            normalized = os.path.realpath(os.path.abspath(match))
+            if normalized in seen:
+                continue
+            if want_dir and not os.path.isdir(normalized):
+                continue
+            if want_file and not os.path.isfile(normalized):
+                continue
+            if executable_only and not os.access(normalized, os.X_OK):
+                continue
+            seen.add(normalized)
+            resolved.append(normalized)
+    return resolved
+
+
+def _libreoffice_program_dir(office: str) -> str:
+    value = str(office or "").strip()
+    if not value:
+        return ""
+    return os.path.dirname(os.path.realpath(os.path.abspath(value)))
+
+
+def _libreoffice_writer_component_paths(office: str) -> List[str]:
+    program_dir = _libreoffice_program_dir(office)
+    if not program_dir or not os.path.isdir(program_dir):
+        return []
+
+    candidates: List[str] = []
+    seen: Set[str] = set()
+    for pattern in ("libsw*.so", "libsw*.dylib", "sw*.dll"):
+        for path in sorted(glob.glob(os.path.join(program_dir, pattern))):
+            normalized = os.path.realpath(os.path.abspath(path))
+            name = os.path.basename(normalized).lower()
+            if "writerperfect" in name:
+                continue
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            candidates.append(normalized)
+    return candidates
+
+
+def _libreoffice_has_writer_support(office: str) -> bool:
+    return bool(_libreoffice_writer_component_paths(office))
+
+
+@lru_cache(maxsize=128)
+def _probe_file_description(file_path: str) -> str:
+    file_cmd = shutil.which("file")
+    if not file_cmd:
+        return ""
+    try:
+        proc = subprocess.run(
+            [file_cmd, "-b", os.path.abspath(file_path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return str(proc.stdout or proc.stderr or "").strip()
+
+
+def _probe_file_creator_application(file_path: str) -> str:
+    description = _probe_file_description(file_path)
+    match = re.search(r"Name of Creating Application:\s*([^,]+)", description, flags=re.IGNORECASE)
+    if match is None:
+        return ""
+    return str(match.group(1) or "").strip()
+
+
+def _probe_file_reported_page_count(file_path: str) -> int:
+    description = _probe_file_description(file_path)
+    match = re.search(r"Number of Pages:\s*(\d+)", description, flags=re.IGNORECASE)
+    if match is None:
+        return 0
+    try:
+        return max(0, int(match.group(1)))
+    except Exception:
+        return 0
+
+
+def _build_office_document_failure_message(file_path: str, *, ext: str) -> str:
+    office = _get_libreoffice_executable()
+    creator_app = _probe_file_creator_application(file_path)
+    reported_pages = _probe_file_reported_page_count(file_path)
+
+    if ext == ".doc" and creator_app and "visio" in creator_app.lower():
+        return (
+            f"检测到该 {ext} 文件由 {creator_app} 创建，不是 Word 文档；"
+            "当前项目仅支持 Word .doc/.docx，不支持将 Visio 复合文档按 Word 文档解析。"
+        )
+
+    if not office:
+        return (
+            f"无法获取 {ext} 文档的 LibreOffice 物理页数。"
+            "请确认系统已安装 python3-uno 且 LibreOffice 可用；"
+            "如为手动安装，可通过 LIBREOFFICE_PATH/SOFFICE_PATH 与 "
+            "LIBREOFFICE_PROGRAM_PATH/UNO_PATH 指定路径；"
+            "当前已禁用该场景下的自动回退，以避免错误分类。"
+        )
+
+    if not _libreoffice_has_writer_support(office):
+        message = (
+            f"已定位到 LibreOffice 可执行文件 {office}，但其安装缺少 Writer 核心组件，"
+            "当前无法加载 Word 文档。"
+            "请安装完整的 libreoffice-writer，或将 LIBREOFFICE_PATH 指向包含 Writer 组件的 soffice。"
+        )
+        if creator_app:
+            message += f" 文件元数据显示创建程序为 {creator_app}。"
+        if reported_pages > 0:
+            message += f" `file` 元数据显示页数约为 {reported_pages}。"
+        return message
+
+    if creator_app:
+        message = f"已定位到 LibreOffice，但仍无法加载该 {ext} 文档；文件元数据显示创建程序为 {creator_app}。"
+        if reported_pages > 0:
+            message += f" `file` 元数据显示页数约为 {reported_pages}。"
+        message += " 这通常表示当前 LibreOffice 缺少相应导入过滤器，或该文件本身并非 Writer 可打开的文档。"
+        return message
+
+    return (
+        f"无法获取 {ext} 文档的 LibreOffice 物理页数。"
+        "请确认系统已安装 python3-uno 且 LibreOffice 可用；"
+        "如为手动安装，可通过 LIBREOFFICE_PATH/SOFFICE_PATH 与 "
+        "LIBREOFFICE_PROGRAM_PATH/UNO_PATH 指定路径；"
+        "当前已禁用该场景下的自动回退，以避免错误分类。"
+    )
+
+
+@lru_cache(maxsize=1)
+def _resolve_libreoffice_runtime() -> Tuple[str, Tuple[str, ...]]:
+    env_executable_candidates: List[str] = []
+    auto_executable_candidates: List[str] = []
+    program_hints: List[str] = []
+
+    for env_key in ("LIBREOFFICE_PATH", "SOFFICE_PATH"):
+        value = str(os.environ.get(env_key) or "").strip()
+        if value:
+            env_executable_candidates.append(value)
+
+    for env_key in ("LIBREOFFICE_PROGRAM_PATH", "UNO_PATH"):
+        value = str(os.environ.get(env_key) or "").strip()
+        if not value:
+            continue
+        program_hints.append(value)
+        env_executable_candidates.extend(
+            [
+                os.path.join(value, "soffice"),
+                os.path.join(value, "libreoffice"),
+            ]
+        )
+
+    for name in ("soffice", "libreoffice"):
+        found = shutil.which(name)
+        if found:
+            auto_executable_candidates.append(found)
+
+    auto_executable_candidates.extend(
+        [
+            "/usr/bin/soffice",
+            "/usr/bin/libreoffice",
+            "/usr/local/bin/soffice",
+            "/usr/local/bin/libreoffice",
+            "/snap/bin/libreoffice",
+            "/snap/bin/soffice",
+            "/opt/libreoffice*/program/soffice",
+            "/opt/libreoffice*/program/libreoffice",
+            "/usr/local/lib/libreoffice*/program/soffice",
+            "/usr/local/lib/libreoffice*/program/libreoffice",
+        ]
+    )
+
+    env_office_candidates = _expand_existing_paths(env_executable_candidates, want_file=True, executable_only=True)
+    if env_office_candidates:
+        office = env_office_candidates[0]
+    else:
+        auto_office_candidates = _expand_existing_paths(auto_executable_candidates, want_file=True, executable_only=True)
+        office = next((path for path in auto_office_candidates if _libreoffice_has_writer_support(path)), "")
+        if not office:
+            office = auto_office_candidates[0] if auto_office_candidates else ""
+
+    bridge_candidates: List[str] = [
+        *program_hints,
+        "/usr/lib/python3/dist-packages",
+        "/usr/lib/libreoffice/program",
+        "/usr/local/lib/libreoffice/program",
+        "/opt/libreoffice/program",
+        "/snap/libreoffice/current/usr/lib/libreoffice/program",
+        "/var/lib/snapd/snap/libreoffice/current/usr/lib/libreoffice/program",
+        "/opt/libreoffice*/program",
+        "/usr/local/lib/libreoffice*/program",
+    ]
+    if office:
+        executable_dir = os.path.dirname(office)
+        bridge_candidates.extend(
+            [
+                executable_dir,
+                os.path.join(os.path.dirname(executable_dir), "program"),
+            ]
+        )
+
+    bridge_paths = tuple(_expand_existing_paths(bridge_candidates, want_dir=True))
+    return office, bridge_paths
+
+
+def _get_libreoffice_executable() -> str:
+    office, _ = _resolve_libreoffice_runtime()
+    return office
+
+
+def _build_uno_subprocess_env() -> Dict[str, str]:
+    env = dict(os.environ)
+    office, bridge_paths = _resolve_libreoffice_runtime()
+
+    merged_pythonpath: List[str] = []
+    seen: Set[str] = set()
+    for path in list(bridge_paths) + [part for part in str(env.get("PYTHONPATH") or "").split(os.pathsep) if part.strip()]:
+        value = str(path or "").strip()
+        if not value:
+            continue
+        normalized = os.path.realpath(os.path.abspath(os.path.expanduser(value))) if os.path.exists(value) else value
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        merged_pythonpath.append(normalized)
+    if merged_pythonpath:
+        env["PYTHONPATH"] = os.pathsep.join(merged_pythonpath)
+
+    if office:
+        office_dir = os.path.dirname(office)
+        merged_path: List[str] = []
+        seen_path: Set[str] = set()
+        for path in [office_dir] + [part for part in str(env.get("PATH") or "").split(os.pathsep) if part.strip()]:
+            value = str(path or "").strip()
+            if not value:
+                continue
+            normalized = os.path.realpath(os.path.abspath(os.path.expanduser(value))) if os.path.exists(value) else value
+            if normalized in seen_path:
+                continue
+            seen_path.add(normalized)
+            merged_path.append(normalized)
+        if merged_path:
+            env["PATH"] = os.pathsep.join(merged_path)
+
+    program_dir = ""
+    if office:
+        office_dir = os.path.dirname(office)
+        if os.path.basename(office_dir) == "program" and office_dir in bridge_paths:
+            program_dir = office_dir
+    if not program_dir:
+        program_dir = next((path for path in bridge_paths if os.path.basename(path) == "program"), "")
+    if program_dir:
+        env.setdefault("UNO_PATH", program_dir)
+
+    return env
+
+
 def _enable_python3_uno_bridge() -> bool:
     global _UNO_BRIDGE_READY
     if _UNO_BRIDGE_READY:
@@ -41,11 +319,8 @@ def _enable_python3_uno_bridge() -> bool:
     except Exception:
         pass
 
-    bridge_paths = [
-        "/usr/lib/python3/dist-packages",
-        "/usr/lib/libreoffice/program",
-    ]
-    existing_paths = [path for path in bridge_paths if os.path.isdir(path)]
+    _, bridge_paths = _resolve_libreoffice_runtime()
+    existing_paths = list(bridge_paths)
     if not existing_paths:
         return False
 
@@ -80,7 +355,7 @@ def _enable_python3_uno_bridge() -> bool:
 
 
 def _probe_libreoffice_physical_page_count(file_path: str) -> int:
-    office = shutil.which("soffice") or shutil.which("libreoffice")
+    office = _get_libreoffice_executable()
     if not office:
         return 0
     if not _enable_python3_uno_bridge():
@@ -95,12 +370,13 @@ import random
 import subprocess
 import tempfile
 
-path = sys.argv[1]
+office = sys.argv[1]
+path = sys.argv[2]
 port = str(random.randint(20020, 22999))
 with tempfile.TemporaryDirectory(prefix="lo_uno_profile_") as profile_dir:
     profile_url = "file://" + os.path.abspath(profile_dir).replace("\\\\", "/")
     cmd = [
-        "soffice",
+        office,
         "--headless",
         "--invisible",
         "--norestore",
@@ -179,11 +455,12 @@ with tempfile.TemporaryDirectory(prefix="lo_uno_profile_") as profile_dir:
     try:
         for attempt in range(3):
             proc = subprocess.run(
-                [str(sys.executable), "-c", script, file_path],
+                [str(sys.executable), "-c", script, office, file_path],
                 capture_output=True,
                 text=True,
                 timeout=40,
                 check=False,
+                env=_build_uno_subprocess_env(),
             )
             if proc.returncode != 0:
                 logger.debug(
@@ -214,14 +491,12 @@ def _require_libreoffice_physical_page_count(file_path: str, *, ext: str, fallba
             return count
     raise RuntimeError(
         f"{_NATIVE_PAGE_COUNT_ERROR_PREFIX} "
-        f"无法获取 {ext} 文档的 LibreOffice 物理页数。"
-        "请确认系统已安装 python3-uno 且 soffice 可用；"
-        "当前已禁用该场景下的自动回退，以避免错误分类。"
+        f"{_build_office_document_failure_message(file_path, ext=ext)}"
     )
 
 
 def _extract_office_text_by_uno_pages(file_path: str) -> tuple[str, bool]:
-    office = shutil.which("soffice") or shutil.which("libreoffice")
+    office = _get_libreoffice_executable()
     if not office:
         return "", False
     if not _enable_python3_uno_bridge():
@@ -235,12 +510,13 @@ import random
 import subprocess
 import tempfile
 
-path = sys.argv[1]
+office = sys.argv[1]
+path = sys.argv[2]
 port = str(random.randint(23000, 25999))
 with tempfile.TemporaryDirectory(prefix="lo_uno_pages_") as profile_dir:
     profile_url = "file://" + os.path.abspath(profile_dir).replace("\\\\", "/")
     cmd = [
-        "soffice",
+        office,
         "--headless",
         "--invisible",
         "--norestore",
@@ -383,11 +659,12 @@ with tempfile.TemporaryDirectory(prefix="lo_uno_pages_") as profile_dir:
     try:
         for attempt in range(3):
             proc = subprocess.run(
-                [str(sys.executable), "-c", script, file_path],
+                [str(sys.executable), "-c", script, office, file_path],
                 capture_output=True,
                 text=True,
                 timeout=120,
                 check=False,
+                env=_build_uno_subprocess_env(),
             )
             if proc.returncode != 0:
                 logger.debug(
@@ -908,7 +1185,7 @@ def _extract_docx_markdown_with_mammoth(file_path: str) -> str:
 
 
 def _convert_office_to_docx(file_path: str) -> str:
-    office = shutil.which("soffice") or shutil.which("libreoffice")
+    office = _get_libreoffice_executable()
     if not office:
         return ""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -942,7 +1219,7 @@ def _convert_office_to_docx(file_path: str) -> str:
 
 
 def _extract_office_text_with_page_breaks(file_path: str) -> tuple[str, bool]:
-    office = shutil.which("soffice") or shutil.which("libreoffice")
+    office = _get_libreoffice_executable()
     if not office:
         return "", False
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -978,7 +1255,7 @@ def _extract_office_text_by_pdf_pages(
     *,
     include_images: bool = True,
 ) -> tuple[str, int, List[Dict[str, Any]], List[Dict[str, Any]]]:
-    office = shutil.which("soffice") or shutil.which("libreoffice")
+    office = _get_libreoffice_executable()
     if not office:
         return "", 0, [], []
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1744,7 +2021,7 @@ def _extract_docx_catalog_metadata(file_path: str) -> Dict[str, List[Dict[str, A
 
 
 def _extract_doc_catalog_metadata(file_path: str) -> Dict[str, List[Dict[str, Any]]]:
-    office = shutil.which("soffice") or shutil.which("libreoffice")
+    office = _get_libreoffice_executable()
     if not office:
         return {"native_catalog": [], "style_catalog": [], "font_catalog": []}
 
@@ -1787,7 +2064,7 @@ def _extract_doc_text_via_converted_docx(file_path: str) -> Tuple[str, bool, Dic
 
 
 def _extract_doc_structured_payload_via_converted_docx(file_path: str) -> Dict[str, Any]:
-    office = shutil.which("soffice") or shutil.which("libreoffice")
+    office = _get_libreoffice_executable()
     if not office:
         return {
             "text_with_breaks": "",

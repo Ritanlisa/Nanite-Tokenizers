@@ -473,13 +473,15 @@ class Chapter(Page):
     def merged_markdown(self) -> str:
         parts: List[str] = []
         for item in self.SubContent:
-            content = item.markdown_text.strip()
+            if isinstance(item, Chapter):
+                content = item.merged_markdown().strip()
+            else:
+                content = item.markdown_text.strip()
             if content:
                 parts.append(content)
-        own_text = self.markdown_text.strip()
-        if own_text and not parts:
-            parts.append(own_text)
-        return "\n\n".join(parts)
+        if parts:
+            return "\n\n".join(parts).strip()
+        return self.markdown_text.strip()
 
     def collect_assets(self) -> PageAssets:
         # Avoid virtual getter recursion by reading local asset fields directly.
@@ -1379,6 +1381,20 @@ class RAG_DB_Document(Chapter, ABC):
             captions.append(line)
         return captions
 
+    @staticmethod
+    def _has_inline_figure_reference(text: str) -> bool:
+        for raw in str(text or "").splitlines():
+            line = str(raw or "").strip()
+            if not line or len(line) > 400:
+                continue
+            if re.search(
+                r"(?:如图|见图|下图|上图|如下图|见下图|figure|fig\.?)\s*[A-Za-z0-9一二三四五六七八九十百千万]+(?:\s*[-‐‑–—.]\s*[A-Za-z0-9一二三四五六七八九十百千万]+)*",
+                line,
+                flags=re.IGNORECASE,
+            ):
+                return True
+        return False
+
     def resolve_page_images(self, page_text: str, existing_images: Optional[Sequence[Any]] = None) -> List[Any]:
         resolved = _dedupe_image_values(list(existing_images or []))
 
@@ -1401,6 +1417,82 @@ class RAG_DB_Document(Chapter, ABC):
         if text.startswith("data:image/"):
             return True
         return bool(re.search(r"(?:^|/|\\)([^/\\]+)\.(?:png|jpe?g|gif|bmp|webp|tiff?|svg|wmf|emf)$", text, flags=re.IGNORECASE))
+
+    @staticmethod
+    def _image_markdown_alt_text(value: Any, index: int) -> str:
+        normalized = _normalize_image_asset(value)
+        text = ""
+        if isinstance(normalized, ImageAsset):
+            text = str(normalized.caption or normalized.filename or "").strip()
+        else:
+            raw = str(normalized or "").strip()
+            if raw:
+                text = os.path.basename(raw)
+        text = re.sub(r"\s+", " ", text or "").strip()
+        if not text:
+            text = f"image-{index}"
+        return text.replace("[", "(").replace("]", ")")
+
+    def _append_missing_page_image_tokens(
+        self,
+        markdown_text: str,
+        *,
+        page_images: Optional[Sequence[Any]] = None,
+        page_number: Optional[int] = None,
+        page_image_indexes: Optional[Sequence[int]] = None,
+    ) -> str:
+        page_no = self.coerce_page_number(page_number)
+        base = str(markdown_text or "").strip()
+        if page_no is None or page_no <= 0:
+            return base
+
+        real_images = [
+            item
+            for item in list(page_images or [])
+            if self._looks_like_real_image_asset(item)
+        ]
+        if not real_images:
+            return base
+
+        referenced_indexes: Set[int] = set()
+        for match in re.finditer(r"!\[[^\]]*\]\(([^)]+)\)", base):
+            target = str(match.group(1) or "").strip()
+            page_match = re.fullmatch(rf"image://page-{int(page_no)}/(\d+)", target, flags=re.IGNORECASE)
+            if page_match is None:
+                continue
+            image_index = self.coerce_page_number(page_match.group(1))
+            if image_index is not None and image_index > 0:
+                referenced_indexes.add(int(image_index))
+
+        if referenced_indexes:
+            return base
+
+        if base:
+            if len(real_images) != 1 or not self._has_inline_figure_reference(base):
+                return base
+            real_images = real_images[:1]
+
+        normalized_page_indexes = [
+            int(page_index)
+            for page_index in [self.coerce_page_number(item) for item in list(page_image_indexes or [])]
+            if page_index is not None and int(page_index) > 0
+        ]
+
+        missing_tokens: List[str] = []
+        for fallback_index, image in enumerate(real_images, start=1):
+            image_index = normalized_page_indexes[fallback_index - 1] if fallback_index - 1 < len(normalized_page_indexes) else fallback_index
+            if image_index in referenced_indexes:
+                continue
+            alt = self._image_markdown_alt_text(image, image_index)
+            missing_tokens.append(f"![{alt}](image://page-{int(page_no)}/{image_index})")
+
+        if not missing_tokens:
+            return base
+
+        suffix = "\n\n".join(missing_tokens).strip()
+        if not base:
+            return suffix
+        return f"{base}\n\n{suffix}".strip()
 
     def get_page_layouts(self) -> List[Dict[str, Any]]:
         raw_layouts = self.metadata.get("page_layout")
@@ -1541,6 +1633,8 @@ class RAG_DB_Document(Chapter, ABC):
                     raw_text,
                     start_markers=page_markers,
                     page_number=physical_page,
+                    page_images=page.get_images(),
+                    page_image_indexes=list(range(1, len(page.get_images()) + 1)),
                 )
             )
             page.metadata.setdefault("physical_page", physical_page)
@@ -1555,6 +1649,8 @@ class RAG_DB_Document(Chapter, ABC):
                     raw_text,
                     start_markers=[start_marker],
                     page_number=physical_page,
+                    page_images=page.get_images(),
+                    page_image_indexes=list(range(1, len(page.get_images()) + 1)),
                 )
             )
             page.metadata.setdefault("physical_page", physical_page)
@@ -1620,6 +1716,7 @@ class RAG_DB_Document(Chapter, ABC):
             return [page]
 
         page_images = list(page.get_images() or [])
+        page_image_indexes = list(range(1, len(page_images) + 1))
         caption_target_indexes = [
             idx
             for idx, item in enumerate(segments)
@@ -1627,6 +1724,7 @@ class RAG_DB_Document(Chapter, ABC):
         ]
         image_target_indexes = caption_target_indexes or list(range(len(segments)))
         image_groups = self._group_items_evenly(page_images, len(image_target_indexes)) if image_target_indexes else []
+        image_index_groups = self._group_items_evenly(page_image_indexes, len(image_target_indexes)) if image_target_indexes else []
 
         fragments: List[MonoPage] = []
         fragment_count = len(segments)
@@ -1652,11 +1750,14 @@ class RAG_DB_Document(Chapter, ABC):
                 page_numbers=list(page.assets.page_numbers) if index == fragment_count else [],
                 images=[],
             )
+            fragment_image_indexes: List[int] = []
             if image_target_indexes:
                 for target_offset, target_index in enumerate(image_target_indexes):
                     if target_index != index - 1:
                         continue
                     assets.images.extend(image_groups[target_offset])
+                    fragment_image_indexes.extend(int(item) for item in image_index_groups[target_offset])
+            fragment_meta["page_image_indexes"] = list(fragment_image_indexes)
 
             fragment_text = str(segment.get("text") or "")
             marker = segment.get("marker")
@@ -1664,6 +1765,8 @@ class RAG_DB_Document(Chapter, ABC):
                 fragment_text,
                 start_markers=[dict(marker)] if isinstance(marker, dict) else None,
                 page_number=physical_page,
+                page_images=assets.images,
+                page_image_indexes=fragment_image_indexes,
             )
             fragments.append(
                 SemiPage(
@@ -1692,16 +1795,26 @@ class RAG_DB_Document(Chapter, ABC):
         *,
         start_markers: Optional[Sequence[Dict[str, Any]]] = None,
         page_number: Optional[int] = None,
+        page_images: Optional[Sequence[Any]] = None,
+        page_image_indexes: Optional[Sequence[int]] = None,
     ) -> str:
         markers = [dict(item) for item in list(start_markers or []) if str(item.get("title") or "").strip()]
         figure_captions = self._extract_figure_captions(text)
+        normalized_page_image_indexes = [
+            int(page_index)
+            for page_index in [self.coerce_page_number(item) for item in list(page_image_indexes or [])]
+            if page_index is not None and int(page_index) > 0
+        ]
 
         def _marker_key(item: Dict[str, Any]) -> str:
             return self._normalized_heading_text(self._clean_heading_title(str(item.get("title") or "")))
 
         marker_keys = {_marker_key(item): item for item in markers if _marker_key(item)}
         figure_keys = {
-            self._normalized_heading_text(caption): (idx, caption)
+            self._normalized_heading_text(caption): (
+                normalized_page_image_indexes[idx - 1] if idx - 1 < len(normalized_page_image_indexes) else idx,
+                caption,
+            )
             for idx, caption in enumerate(figure_captions, start=1)
             if self._normalized_heading_text(caption)
         }
@@ -1780,7 +1893,12 @@ class RAG_DB_Document(Chapter, ABC):
 
             out.append(line)
             i += 1
-        return "\n".join(out)
+        return self._append_missing_page_image_tokens(
+            "\n".join(out),
+            page_images=page_images,
+            page_number=page_number,
+            page_image_indexes=page_image_indexes,
+        )
 
     @staticmethod
     def _is_markdown_table_block(block: str) -> bool:
@@ -2662,6 +2780,7 @@ class RAG_DB_Document(Chapter, ABC):
 
         notes = self._unique_nonempty(chapter.get_annotations())
         own_markdown = str(getattr(chapter, "markdown_text", "") or "").strip()
+        merged_children_markdown = chapter.merged_markdown().strip() if chapter.SubContent else ""
         children_markdown = [
             self._compose_page_markdown(child, heading_level=min(level + 1, 6), visited=visited_ids)
             for child in chapter.SubContent
@@ -2674,7 +2793,7 @@ class RAG_DB_Document(Chapter, ABC):
         if notes:
             parts.append("注释:")
             parts.extend([f"- {item}" for item in notes])
-        if own_markdown:
+        if own_markdown and (not children_markdown or own_markdown != merged_children_markdown):
             parts.append("正文:")
             parts.append(own_markdown)
         if children_markdown:

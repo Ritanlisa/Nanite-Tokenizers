@@ -83,7 +83,12 @@ class DocRAGDocument(RAG_DB_Document):
                 page_text,
                 list(page_layout.get("images") or []),
             )
-            page_markdown = self._render_plaintext_page_to_markdown(page_text, page_number=page_idx)
+            page_markdown = self._render_plaintext_page_to_markdown(
+                page_text,
+                page_number=page_idx,
+                page_images=images,
+                page_image_indexes=list(range(1, len(images) + 1)),
+            )
             page_number_hint = str(page_layout.get("page_number") or "").strip()
             if not page_number_hint:
                 page_number_hint = str(signal.get("page_number_hint") or "").strip()
@@ -109,6 +114,7 @@ class DocRAGDocument(RAG_DB_Document):
                 "page_number_hint": page_number_hint,
                 "image_count": len(images),
                 "physical_page": page_idx,
+                "page_image_indexes": list(range(1, len(images) + 1)),
                 "raw_page_text": page_text,
             }
             node = self.create_mono_page_node(

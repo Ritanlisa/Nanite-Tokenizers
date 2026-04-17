@@ -516,7 +516,12 @@ class PDFRAGDocument(RAG_DB_Document):
                     images=images,
                 )
                 page_meta["image_count"] = len(images)
-                page_markdown = self._render_plaintext_page_to_markdown(body_text, page_number=int(page_idx))
+                page_markdown = self._render_plaintext_page_to_markdown(
+                    body_text,
+                    page_number=int(page_idx),
+                    page_images=images,
+                    page_image_indexes=list(range(1, len(images) + 1)),
+                )
 
                 node = self.create_mono_page_node(
                     page_number=int(page_idx),

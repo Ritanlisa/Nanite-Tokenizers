@@ -7,14 +7,12 @@ from io import BytesIO
 import json
 import mimetypes
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 import uuid
 import webbrowser
 from pathlib import Path
-from urllib.parse import quote
 from typing import Any, Dict, Optional, Set
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -180,69 +178,15 @@ def _local_asset_payload(page: Any) -> Dict[str, Any]:
     }
 
 
-def _build_debug_markdown_image_tokens(images: Any) -> list[str]:
-    tokens: list[str] = []
-    for index, item in enumerate(list(images or []), start=1):
-        if isinstance(item, dict):
-            asset_id = str(item.get("asset_id") or "").strip()
-            if not asset_id:
-                continue
-            alt = str(item.get("caption") or item.get("filename") or f"image-{index}").strip() or f"image-{index}"
-            tokens.append(f"![{alt}](debug-image://asset/{asset_id})")
-            continue
-        text = str(item or "").strip()
-        if not text:
-            continue
-        alt = Path(text).name or f"image-{index}"
-        tokens.append(f"![{alt}](debug-image://path/{quote(text, safe='')})")
-    return tokens
-
-
-def _inject_missing_debug_image_tokens(markdown_text: str, image_tokens: list[str]) -> str:
-    base = str(markdown_text or "").strip()
-    tokens = [str(item or "").strip() for item in list(image_tokens or []) if str(item or "").strip()]
-    if not tokens:
-        return base
-
-    existing_targets = re.findall(r"!\[[^\]]*\]\(([^)]+)\)", base)
-    missing_tokens = tokens[len(existing_targets):]
-    if not missing_tokens:
-        return base
-    if not base:
-        return "\n\n".join(missing_tokens)
-
-    blocks = [part.strip() for part in re.split(r"\n{2,}", base) if part.strip()]
-    if len(blocks) <= 1:
-        blocks = [line.strip() for line in base.splitlines() if line.strip()]
-    if not blocks:
-        return "\n\n".join([base] + missing_tokens).strip()
-
-    insert_after: Dict[int, list[str]] = {}
-    total_blocks = len(blocks)
-    total_missing = len(missing_tokens)
-    for index, token in enumerate(missing_tokens, start=1):
-        block_index = min(total_blocks - 1, max(0, int(round(index * total_blocks / (total_missing + 1))) - 1))
-        insert_after.setdefault(block_index, []).append(token)
-
-    output_blocks: list[str] = []
-    for block_index, block in enumerate(blocks):
-        output_blocks.append(block)
-        output_blocks.extend(insert_after.get(block_index, []))
-    return "\n\n".join(output_blocks).strip()
-
-
 def _build_debug_render_markdown_text(page: Any) -> str:
-    payload: Dict[str, Any] = {}
+  if hasattr(page, "merged_markdown"):
     try:
-        if hasattr(page, "to_payload"):
-            payload = dict(getattr(page, "to_payload")() or {})
+      merged = str(getattr(page, "merged_markdown")() or "")
+      if merged.strip():
+        return merged
     except Exception:
-        payload = {}
-
-    base_markdown = str(payload.get("markdown_text") or getattr(page, "markdown_text", "") or "")
-    images = list(payload.get("images") or _local_asset_payload(page).get("images") or [])
-    image_tokens = _build_debug_markdown_image_tokens(images)
-    return _inject_missing_debug_image_tokens(base_markdown, image_tokens)
+      pass
+  return str(getattr(page, "markdown_text", "") or "")
 
 
 def _snapshot_attr_value(key: str, value: Any) -> Any:
@@ -723,114 +667,113 @@ def _render_vector_metafile_to_png(data: bytes, *, filename: str = "") -> tuple[
     if cached is not None:
         return cached
 
-    office = shutil.which("soffice") or shutil.which("libreoffice")
-    if office:
-        try:
-            from rag.documents import _enable_python3_uno_bridge
+    try:
+      from rag.documents import _enable_python3_uno_bridge, _get_libreoffice_executable
 
-            if _enable_python3_uno_bridge():
-                import os
-                import random
-                import time
-                import uno
-                import fitz  # type: ignore
+      office = _get_libreoffice_executable()
+      if office and _enable_python3_uno_bridge():
+        import os
+        import random
+        import time
+        import uno
+        import fitz  # type: ignore
 
-                PropertyValue = __import__("com.sun.star.beans", fromlist=["PropertyValue"]).PropertyValue
-                port = str(random.randint(41000, 43999))
-                with tempfile.TemporaryDirectory(prefix="doc_tree_render_") as tmp_dir:
-                    suffix = Path(str(filename or "asset.wmf")).suffix.lower() or ".wmf"
-                    staged_path = Path(tmp_dir) / f"asset{suffix}"
-                    pdf_path = Path(tmp_dir) / "asset.pdf"
-                    staged_path.write_bytes(payload)
+        PropertyValue = __import__("com.sun.star.beans", fromlist=["PropertyValue"]).PropertyValue
+        port = str(random.randint(41000, 43999))
+        with tempfile.TemporaryDirectory(prefix="doc_tree_render_") as tmp_dir:
+          suffix = Path(str(filename or "asset.wmf")).suffix.lower() or ".wmf"
+          staged_path = Path(tmp_dir) / f"asset{suffix}"
+          pdf_path = Path(tmp_dir) / "asset.pdf"
+          staged_path.write_bytes(payload)
 
-                    profile_url = "file://" + os.path.abspath(tmp_dir).replace("\\", "/")
-                    cmd = [
-                        office,
-                        "--headless",
-                        "--invisible",
-                        "--norestore",
-                        "--nodefault",
-                        "--nofirststartwizard",
-                        "--nolockcheck",
-                        "--nologo",
-                        f"-env:UserInstallation={profile_url}",
-                        f"--accept=socket,host=127.0.0.1,port={port};urp;",
-                    ]
-                    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    try:
-                        local = uno.getComponentContext()
-                        resolver = local.ServiceManager.createInstanceWithContext("com.sun.star.bridge.UnoUrlResolver", local)
-                        ctx = None
-                        deadline = time.time() + 30.0
-                        while time.time() < deadline:
-                            try:
-                                ctx = resolver.resolve(f"uno:socket,host=127.0.0.1,port={port};urp;StarOffice.ComponentContext")
-                                break
-                            except Exception:
-                                time.sleep(0.2)
+          profile_url = "file://" + os.path.abspath(tmp_dir).replace("\\", "/")
+          cmd = [
+            office,
+            "--headless",
+            "--invisible",
+            "--norestore",
+            "--nodefault",
+            "--nofirststartwizard",
+            "--nolockcheck",
+            "--nologo",
+            f"-env:UserInstallation={profile_url}",
+            f"--accept=socket,host=127.0.0.1,port={port};urp;",
+          ]
+          proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+          try:
+            local = uno.getComponentContext()
+            resolver = local.ServiceManager.createInstanceWithContext("com.sun.star.bridge.UnoUrlResolver", local)
+            ctx = None
+            deadline = time.time() + 30.0
+            while time.time() < deadline:
+              try:
+                ctx = resolver.resolve(f"uno:socket,host=127.0.0.1,port={port};urp;StarOffice.ComponentContext")
+                break
+              except Exception:
+                time.sleep(0.2)
 
-                        if ctx is not None:
-                            desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
-                            writer = desktop.loadComponentFromURL(
-                                "private:factory/swriter",
-                                "_blank",
-                                0,
-                                (PropertyValue("Hidden", 0, True, 0),),
-                            )
-                            if writer is not None:
-                                text = writer.Text
-                                cursor = text.createTextCursor()
-                                graphic = writer.createInstance("com.sun.star.text.TextGraphicObject")
-                                graphic.GraphicURL = uno.systemPathToFileUrl(str(staged_path))
-                                text.insertTextContent(cursor, graphic, False)
-                                writer.storeToURL(
-                                    uno.systemPathToFileUrl(str(pdf_path)),
-                                    (PropertyValue("FilterName", 0, "writer_pdf_Export", 0),),
-                                )
-                                writer.close(True)
-                                if pdf_path.exists():
-                                  with fitz.open(str(pdf_path)) as pdf_doc:
-                                    page = pdf_doc.load_page(0)
-                                    inspect_scale = 6.0
-                                    inspect_pix = page.get_pixmap(matrix=fitz.Matrix(inspect_scale, inspect_scale), alpha=False)
-                                    inspect_png = inspect_pix.tobytes("png")
-                                    bbox = _detect_content_bbox_in_image_bytes(inspect_png)
+            if ctx is not None:
+              desktop = ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", ctx)
+              writer = desktop.loadComponentFromURL(
+                "private:factory/swriter",
+                "_blank",
+                0,
+                (PropertyValue("Hidden", 0, True, 0),),
+              )
+              if writer is not None:
+                text = writer.Text
+                cursor = text.createTextCursor()
+                graphic = writer.createInstance("com.sun.star.text.TextGraphicObject")
+                graphic.GraphicURL = uno.systemPathToFileUrl(str(staged_path))
+                text.insertTextContent(cursor, graphic, False)
+                writer.storeToURL(
+                  uno.systemPathToFileUrl(str(pdf_path)),
+                  (PropertyValue("FilterName", 0, "writer_pdf_Export", 0),),
+                )
+                writer.close(True)
+                if pdf_path.exists():
+                  with fitz.open(str(pdf_path)) as pdf_doc:
+                    page = pdf_doc.load_page(0)
+                    inspect_scale = 6.0
+                    inspect_pix = page.get_pixmap(matrix=fitz.Matrix(inspect_scale, inspect_scale), alpha=False)
+                    inspect_png = inspect_pix.tobytes("png")
+                    bbox = _detect_content_bbox_in_image_bytes(inspect_png)
 
-                                    clip_rect = page.rect
-                                    if bbox is not None:
-                                      clip_rect = fitz.Rect(
-                                        float(bbox[0]) / inspect_scale,
-                                        float(bbox[1]) / inspect_scale,
-                                        float(bbox[2]) / inspect_scale,
-                                        float(bbox[3]) / inspect_scale,
-                                      )
-                                      clip_padding = max(0.5, 4.0 / inspect_scale)
-                                      clip_rect = fitz.Rect(
-                                        max(page.rect.x0, clip_rect.x0 - clip_padding),
-                                        max(page.rect.y0, clip_rect.y0 - clip_padding),
-                                        min(page.rect.x1, clip_rect.x1 + clip_padding),
-                                        min(page.rect.y1, clip_rect.y1 + clip_padding),
-                                      )
+                    clip_rect = page.rect
+                    if bbox is not None:
+                      clip_rect = fitz.Rect(
+                        float(bbox[0]) / inspect_scale,
+                        float(bbox[1]) / inspect_scale,
+                        float(bbox[2]) / inspect_scale,
+                        float(bbox[3]) / inspect_scale,
+                      )
+                      clip_padding = max(0.5, 4.0 / inspect_scale)
+                      clip_rect = fitz.Rect(
+                        max(page.rect.x0, clip_rect.x0 - clip_padding),
+                        max(page.rect.y0, clip_rect.y0 - clip_padding),
+                        min(page.rect.x1, clip_rect.x1 + clip_padding),
+                        min(page.rect.y1, clip_rect.y1 + clip_padding),
+                      )
 
-                                    content_longest_edge = max(float(clip_rect.width or 0.0), float(clip_rect.height or 0.0), 1.0)
-                                    render_scale = max(6.0, min(96.0, 1600.0 / content_longest_edge))
-                                    pix = page.get_pixmap(
-                                      matrix=fitz.Matrix(render_scale, render_scale),
-                                      clip=clip_rect,
-                                      alpha=False,
-                                    )
-                                    output = _crop_rendered_image_bytes(pix.tobytes("png"), padding=1)
-                                    if output:
-                                      DEBUG_IMAGE_RENDER_CACHE[cache_key] = (output, "image/png")
-                                      return output, "image/png"
-                    finally:
-                        try:
-                            proc.terminate()
-                            proc.wait(timeout=5)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+                    content_longest_edge = max(float(clip_rect.width or 0.0), float(clip_rect.height or 0.0), 1.0)
+                    render_scale = max(6.0, min(96.0, 1600.0 / content_longest_edge))
+                    pix = page.get_pixmap(
+                      matrix=fitz.Matrix(render_scale, render_scale),
+                      clip=clip_rect,
+                      alpha=False,
+                    )
+                    output = _crop_rendered_image_bytes(pix.tobytes("png"), padding=1)
+                    if output:
+                      DEBUG_IMAGE_RENDER_CACHE[cache_key] = (output, "image/png")
+                      return output, "image/png"
+          finally:
+            try:
+              proc.terminate()
+              proc.wait(timeout=5)
+            except Exception:
+              pass
+    except Exception:
+      pass
 
     try:
         from PIL import Image  # type: ignore
@@ -1383,6 +1326,7 @@ def _build_page_html() -> str:
 
     function collectNodeImageLookup(node) {
       const byPage = new Map();
+      const seenByPage = new Map();
       const byAssetId = new Map();
       const stack = [node];
       while (stack.length > 0) {
@@ -1392,19 +1336,39 @@ def _build_page_html() -> str:
         }
         const metadata = current.metadata && typeof current.metadata === 'object' ? current.metadata : {};
         const pageNo = Number(metadata.page || metadata.physical_page || 0);
+        const pageImageIndexes = toList(metadata.page_image_indexes)
+          .map((item) => Number(item || 0))
+          .filter((item) => Number.isFinite(item) && item > 0);
         const payload = getLocalAssetPayload(current);
-        const pageImages = [];
-        for (const item of toList(payload.images)) {
+        const pageImages = pageNo > 0 ? (byPage.get(pageNo) || []) : [];
+        const seenPageImages = pageNo > 0 ? (seenByPage.get(pageNo) || new Set()) : new Set();
+        for (const [index, item] of toList(payload.images).entries()) {
           if (isImageAssetObject(item)) {
             byAssetId.set(String(item.asset_id || '').trim(), item);
+          }
+          const key = item && typeof item === 'object'
+            ? String(item.asset_id || item.source || item.filename || JSON.stringify(item))
+            : String(item || '').trim();
+          if (!key || seenPageImages.has(key)) {
+            continue;
+          }
+          seenPageImages.add(key);
+          const pageImageIndex = Number(pageImageIndexes[index] || 0);
+          if (pageImageIndex > 0) {
+            if (!pageImages[pageImageIndex - 1]) {
+              pageImages[pageImageIndex - 1] = item;
+            }
+            continue;
           }
           pageImages.push(item);
         }
         if (pageNo > 0 && pageImages.length > 0) {
           byPage.set(pageNo, pageImages);
+          seenByPage.set(pageNo, seenPageImages);
         }
-        for (const child of Array.isArray(current.children) ? current.children : []) {
-          stack.push(child);
+        const children = Array.isArray(current.children) ? current.children : [];
+        for (let index = children.length - 1; index >= 0; index -= 1) {
+          stack.push(children[index]);
         }
       }
       return { byPage, byAssetId };
@@ -1836,14 +1800,20 @@ def _build_page_html() -> str:
         if (!current || typeof current !== 'object') {
           continue;
         }
+        const metadata = current.metadata && typeof current.metadata === 'object' ? current.metadata : {};
         const payload = getLocalAssetPayload(current);
         pushUniqueText(payload.headers, seenHeaders, headers);
         pushUniqueText(payload.footers, seenFooters, footers);
-        pushUniqueText(payload.page_numbers, seenPageNumbers, pageNumbers);
+        const localPageNumbers = toList(payload.page_numbers);
+        if (localPageNumbers.length > 0) {
+          pushUniqueText(localPageNumbers, seenPageNumbers, pageNumbers);
+        } else {
+          pushUniqueText(toList(metadata.page_number_hint || metadata.page), seenPageNumbers, pageNumbers);
+        }
         pushUniqueImage(payload.images);
         const children = Array.isArray(current.children) ? current.children : [];
-        for (const child of children) {
-          stack.push(child);
+        for (let index = children.length - 1; index >= 0; index -= 1) {
+          stack.push(children[index]);
         }
       }
 
@@ -1995,7 +1965,10 @@ def _build_page_html() -> str:
           const badge = isChapter
             ? '<span class="badge chapter">Chapter</span>'
             : (isMonoPageNode(n) ? '<span class="badge mono">MonoPage</span>' : '');
-          btn.innerHTML = `<div>${n.title || 'Untitled'} ${badge}</div>`;
+          const titleText = String(n.title || '');
+          const safeTitle = escapeHtml(titleText);
+          const titleMarkup = `${safeTitle}${safeTitle && badge ? ' ' : ''}${badge}`;
+          btn.innerHTML = `<div>${titleMarkup}</div>`;
           sub.textContent = `${n.class_name || 'Page'} | ${n.category || 'unknown'}`;
           btn.appendChild(sub);
           btn.onclick = () => {
