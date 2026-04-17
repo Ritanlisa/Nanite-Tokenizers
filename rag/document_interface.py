@@ -314,17 +314,93 @@ class Page(ABC):
             images=list(self.assets.images),
         )
 
+    @staticmethod
+    def _serialize_image_items(items: Sequence[Any]) -> List[Any]:
+        return [item.to_payload() if isinstance(item, ImageAsset) else str(item or "") for item in list(items or [])]
+
+    @staticmethod
+    def _coerce_positive_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        try:
+            text = str(value).strip()
+            if not text:
+                return None
+            number = int(float(text))
+        except Exception:
+            return None
+        if number <= 0:
+            return None
+        return number
+
+    @classmethod
+    def _extract_markdown_image_targets(cls, markdown_text: str) -> List[tuple[int, int]]:
+        targets: List[tuple[int, int]] = []
+        for match in re.finditer(r"!\[[^\]]*\]\(([^)]+)\)", str(markdown_text or "")):
+            target = str(match.group(1) or "").strip()
+            page_match = re.fullmatch(r"image://page-(\d+)/(\d+)", target, flags=re.IGNORECASE)
+            if page_match is None:
+                continue
+            page_no = cls._coerce_positive_int(page_match.group(1))
+            image_index = cls._coerce_positive_int(page_match.group(2))
+            if page_no is None or image_index is None:
+                continue
+            targets.append((page_no, image_index))
+        return targets
+
+    def _payload_markdown_text(self) -> str:
+        return str(self.markdown_text or "")
+
+    def _payload_image_lookup(self) -> Dict[tuple[int, int], Any]:
+        page_no = self._coerce_positive_int(self.metadata.get("page"))
+        if page_no is None:
+            page_no = self._coerce_positive_int(self.metadata.get("physical_page"))
+        if page_no is None:
+            page_no = self._coerce_positive_int(self.metadata.get("section_start_page"))
+        if page_no is None:
+            return {}
+
+        page_image_indexes = [
+            int(page_index)
+            for page_index in [self._coerce_positive_int(item) for item in list(self.metadata.get("page_image_indexes") or [])]
+            if page_index is not None
+        ]
+
+        lookup: Dict[tuple[int, int], Any] = {}
+        for local_index, item in enumerate(list(self.assets.images or []), start=1):
+            image_index = page_image_indexes[local_index - 1] if local_index - 1 < len(page_image_indexes) else local_index
+            if image_index <= 0:
+                continue
+            lookup[(int(page_no), int(image_index))] = item
+        return lookup
+
+    def _payload_image_items(self, markdown_text: Optional[str] = None) -> List[Any]:
+        text = self._payload_markdown_text() if markdown_text is None else str(markdown_text or "")
+        targets = self._extract_markdown_image_targets(text)
+        if not targets:
+            return []
+        lookup = self._payload_image_lookup()
+        resolved: List[Any] = []
+        for key in targets:
+            item = lookup.get(key)
+            if item is not None:
+                resolved.append(item)
+        return resolved
+
     def to_payload(self) -> Dict[str, Any]:
+        payload_markdown = self._payload_markdown_text()
         return {
             "title": self.title,
             "category": self.category,
-            "markdown_text": self.markdown_text,
-            "headers": self.get_headers(),
-            "footers": self.get_footers(),
-            "annotations": self.get_annotations(),
-            "citations": self.get_citations(),
-            "page_numbers": self.get_page_numbers(),
-            "images": [item.to_payload() if isinstance(item, ImageAsset) else str(item or "") for item in self.get_images()],
+            "markdown_text": payload_markdown,
+            "headers": list(self.assets.headers),
+            "footers": list(self.assets.footers),
+            "annotations": list(self.assets.annotations),
+            "citations": list(self.assets.citations),
+            "page_numbers": list(self.assets.page_numbers),
+            "images": self._serialize_image_items(self._payload_image_items(payload_markdown)),
             "metadata": dict(self.metadata),
         }
 
@@ -513,6 +589,17 @@ class Chapter(Page):
 
     def get_images(self) -> List[Any]:
         return self.collect_assets().images
+
+    def _payload_markdown_text(self) -> str:
+        return self.merged_markdown()
+
+    def _payload_image_lookup(self) -> Dict[tuple[int, int], Any]:
+        lookup: Dict[tuple[int, int], Any] = {}
+        for mono_page in self.flatten_mono_pages():
+            for key, value in mono_page._payload_image_lookup().items():
+                if key not in lookup:
+                    lookup[key] = value
+        return lookup
 
     def to_payload(self) -> Dict[str, Any]:
         payload = super().to_payload()
@@ -1797,13 +1884,47 @@ class RAG_DB_Document(Chapter, ABC):
         page_number: Optional[int] = None,
         page_images: Optional[Sequence[Any]] = None,
         page_image_indexes: Optional[Sequence[int]] = None,
+        selected_figure_captions: Optional[Sequence[str]] = None,
     ) -> str:
         markers = [dict(item) for item in list(start_markers or []) if str(item.get("title") or "").strip()]
         figure_captions = self._extract_figure_captions(text)
+        ordered_figure_captions: List[str] = []
+        requested_figure_keys = [
+            self._normalized_heading_text(caption)
+            for caption in list(selected_figure_captions or [])
+            if self._normalized_heading_text(caption)
+        ]
+        if requested_figure_keys:
+            seen_requested: Set[str] = set()
+            for requested_key in requested_figure_keys:
+                if requested_key in seen_requested:
+                    continue
+                matched_caption = next(
+                    (
+                        caption
+                        for caption in figure_captions
+                        if self._normalized_heading_text(caption) == requested_key
+                    ),
+                    "",
+                )
+                if matched_caption:
+                    ordered_figure_captions.append(matched_caption)
+                    seen_requested.add(requested_key)
+        if not ordered_figure_captions:
+            ordered_figure_captions = list(figure_captions)
+        real_page_images = [
+            item
+            for item in list(page_images or [])
+            if self._looks_like_real_image_asset(item)
+        ]
         normalized_page_image_indexes = [
             int(page_index)
             for page_index in [self.coerce_page_number(item) for item in list(page_image_indexes or [])]
             if page_index is not None and int(page_index) > 0
+        ]
+        resolved_real_image_indexes = [
+            normalized_page_image_indexes[idx - 1] if idx - 1 < len(normalized_page_image_indexes) else idx
+            for idx, _ in enumerate(real_page_images, start=1)
         ]
 
         def _marker_key(item: Dict[str, Any]) -> str:
@@ -1812,10 +1933,10 @@ class RAG_DB_Document(Chapter, ABC):
         marker_keys = {_marker_key(item): item for item in markers if _marker_key(item)}
         figure_keys = {
             self._normalized_heading_text(caption): (
-                normalized_page_image_indexes[idx - 1] if idx - 1 < len(normalized_page_image_indexes) else idx,
+                resolved_real_image_indexes[idx - 1],
                 caption,
             )
-            for idx, caption in enumerate(figure_captions, start=1)
+            for idx, caption in enumerate(ordered_figure_captions[: len(resolved_real_image_indexes)], start=1)
             if self._normalized_heading_text(caption)
         }
         consumed: Set[str] = set()
@@ -2015,6 +2136,159 @@ class RAG_DB_Document(Chapter, ABC):
             groups[min(slots - 1, idx % slots)].append(item)
         return groups
 
+    @staticmethod
+    def _group_items_contiguously(values: Sequence[Any], slots: int) -> List[List[Any]]:
+        if slots <= 0:
+            return []
+        items = [value for value in list(values or []) if _normalize_image_asset(value) is not None or str(value or "").strip()]
+        if not items:
+            return [[] for _ in range(slots)]
+        groups: List[List[Any]] = []
+        total = len(items)
+        for idx in range(slots):
+            start = int(round(idx * total / max(1, slots)))
+            end = int(round((idx + 1) * total / max(1, slots)))
+            groups.append(list(items[start:end]))
+        return groups
+
+    @staticmethod
+    def _image_asset_byte_size(value: Any) -> int:
+        payload = bytes(getattr(value, "data", b"") or b"")
+        return len(payload)
+
+    def _filter_section_images_for_captions(self, images: Sequence[Any], caption_count: int) -> List[Any]:
+        items = [item for item in list(images or []) if _normalize_image_asset(item) is not None]
+        if caption_count <= 0 or len(items) <= caption_count:
+            return items
+
+        removable_indexes = [
+            idx
+            for idx, image in enumerate(items)
+            if self._image_asset_byte_size(image) < 16384
+        ]
+        remove_limit = max(0, len(items) - int(caption_count))
+        if remove_limit <= 0 or not removable_indexes:
+            return items
+        removable = set(removable_indexes[:remove_limit])
+        return [image for idx, image in enumerate(items) if idx not in removable]
+
+    def _score_section_image_for_caption(self, caption: str, image: Any) -> int:
+        label = self._normalized_heading_text(caption)
+        media_type = str(getattr(image, "media_type", "") or "").strip().lower()
+        filename = str(getattr(image, "filename", "") or "").strip().lower()
+        size = self._image_asset_byte_size(image)
+        is_vector = media_type in {"image/wmf", "image/emf", "image/svg+xml"} or filename.endswith((".wmf", ".emf", ".svg"))
+        is_jpeg = media_type in {"image/jpeg", "image/jpg"} or filename.endswith((".jpeg", ".jpg"))
+        is_png = media_type == "image/png" or filename.endswith(".png")
+
+        score = 0
+        if size < 16384:
+            score -= 200
+
+        if any(keyword in label for keyword in ["架构", "结构", "原理", "框图"]):
+            if is_vector or is_png:
+                score += 120
+            if is_jpeg:
+                score -= 20
+        if "指示灯" in label:
+            if is_jpeg and size >= 150000:
+                score += 220
+            elif is_jpeg and size >= 100000:
+                score += 140
+            elif is_jpeg:
+                score += 60
+        if "面板" in label and is_jpeg and size >= 100000:
+            score += 80
+        if "插框" in label or ("刀片" in label and all(keyword not in label for keyword in ["面板", "指示灯", "架构", "结构"])):
+            if is_jpeg and size < 150000:
+                score += 80
+        if any(keyword in label for keyword in ["前面板", "后面板"]):
+            if is_png and 20000 <= size <= 80000:
+                score += 100
+            if is_jpeg:
+                score -= 10
+        if "正面" in label:
+            if (is_png or is_jpeg) and 30000 <= size <= 90000:
+                score += 60
+            if is_png or is_jpeg:
+                score += 20
+        if "内部组件" in label:
+            if is_png and size >= 100000:
+                score += 120
+        if "安装步骤" in label or ("安装" in label and "步骤" in label):
+            if is_png and size >= 80000:
+                score += 120
+        if "面板" in label and is_png:
+            score += 30
+        if "组件" in label and is_png:
+            score += 30
+        if "步骤" in label and is_png:
+            score += 30
+        return score
+
+    def _assign_section_images_to_captions(self, images: Sequence[Any], captions: Sequence[str]) -> List[List[Any]]:
+        caption_list = [str(caption or "").strip() for caption in list(captions or []) if str(caption or "").strip()]
+        if not caption_list:
+            return []
+
+        remaining = list(self._filter_section_images_for_captions(images, len(caption_list)))
+        groups: List[List[Any]] = [[] for _ in caption_list]
+        for idx, caption in enumerate(caption_list):
+            if not remaining:
+                break
+            scored = [
+                (self._score_section_image_for_caption(caption, image), image_idx, image)
+                for image_idx, image in enumerate(remaining)
+            ]
+            best_score, best_image_idx, best_image = max(scored, key=lambda item: (item[0], -item[1]))
+            if best_score <= 0 and len(remaining) > max(0, len(caption_list) - idx):
+                continue
+            groups[idx].append(best_image)
+            remaining.pop(best_image_idx)
+        return groups
+
+    @staticmethod
+    def _strip_standalone_markdown_image_tokens(text: str) -> str:
+        lines: List[str] = []
+        for raw in str(text or "").splitlines():
+            if re.fullmatch(r"\s*!\[[^\]]*\]\(([^)]+)\)\s*", str(raw or "")):
+                continue
+            lines.append(str(raw or "").rstrip())
+        return "\n".join(lines).strip()
+
+    def _refresh_page_markdown_for_assets(self, page: MonoPage) -> None:
+        page_meta = dict(getattr(page, "metadata", {}) or {})
+        page_no = self.coerce_page_number(page_meta.get("page")) or self.coerce_page_number(page_meta.get("physical_page"))
+        if page_no is None or page_no <= 0:
+            return
+
+        page_assets = getattr(page, "assets", None)
+        page_images = list(page_assets.images or []) if page_assets is not None else []
+
+        base_text = self._strip_standalone_markdown_image_tokens(str(getattr(page, "markdown_text", "") or ""))
+        if not base_text:
+            base_text = str(page_meta.get("raw_page_text") or "")
+
+        page_image_indexes = list(page_meta.get("page_image_indexes") or [])
+        if not page_image_indexes and page_images:
+            page_image_indexes = list(range(1, len(page_images) + 1))
+            page.metadata["page_image_indexes"] = list(page_image_indexes)
+
+        selected_figure_captions = [
+            str(item or "").strip()
+            for item in list(page_meta.get("selected_figure_captions") or [])
+            if str(item or "").strip()
+        ]
+
+        refreshed = self._render_plaintext_page_to_markdown(
+            base_text,
+            page_number=int(page_no),
+            page_images=page_images,
+            page_image_indexes=page_image_indexes,
+            selected_figure_captions=selected_figure_captions,
+        )
+        page.set_markdown(refreshed)
+
     def _apply_structured_section_fallback(
         self,
         pages: Sequence[MonoPage],
@@ -2033,7 +2307,12 @@ class RAG_DB_Document(Chapter, ABC):
             if not key:
                 continue
             blocks = [str(item or "").strip() for item in list(row.get("blocks") or []) if str(item or "").strip()]
-            images = [str(item or "").strip() for item in list(row.get("images") or []) if str(item or "").strip()]
+            images = [
+                normalized
+                for item in list(row.get("images") or [])
+                for normalized in [_normalize_image_asset(item)]
+                if normalized is not None
+            ]
             current_score = len(blocks) + len(images)
             old = section_lookup.get(key)
             old_score = 0
@@ -2045,6 +2324,24 @@ class RAG_DB_Document(Chapter, ABC):
                     "blocks": blocks,
                     "images": images,
                 }
+
+        def _page_caption_positions(page: MonoPage) -> List[tuple[int, str]]:
+            page_meta = dict(getattr(page, "metadata", {}) or {})
+            source_text = str(page_meta.get("raw_page_text") or getattr(page, "markdown_text", "") or "")
+            positions: List[tuple[int, str]] = []
+            seen: Set[str] = set()
+            for line_index, raw in enumerate(source_text.splitlines()):
+                line = str(raw or "").strip()
+                if not line or len(line) > 160:
+                    continue
+                if not re.match(r"^(?:图|figure)\s*[A-Za-z0-9一二三四五六七八九十百千万\-‐‑–—.]*\s*[:：]?\s*.+$", line, flags=re.IGNORECASE):
+                    continue
+                key = self._normalized_heading_text(line)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                positions.append((int(line_index), line))
+            return positions
 
         sorted_ranges = sorted(
             list(ranges or []),
@@ -2102,27 +2399,72 @@ class RAG_DB_Document(Chapter, ABC):
             images = [item for item in list(section.get("images") or []) if self._looks_like_real_image_asset(item)]
             if not images:
                 continue
-            preferred_indexes = [
-                idx
-                for idx in target_indexes
-                if re.search(r"image://page-|^(?:图|figure)\b", str(getattr(pages[idx], "markdown_text", "") or ""), flags=re.IGNORECASE | re.MULTILINE)
-            ]
-            image_target_indexes = preferred_indexes or target_indexes
-            image_groups = self._group_values_evenly(images, len(image_target_indexes))
-            for page_idx, group in zip(image_target_indexes, image_groups):
-                if group:
-                    pages[page_idx].assets.images = [
-                        item
-                        for item in list(pages[page_idx].assets.images or [])
-                        if self._looks_like_real_image_asset(item)
-                    ]
-                existing = set(pages[page_idx].get_images())
-                for image in group:
-                    if image in existing:
+            caption_targets: Dict[str, tuple[int, int, int, str]] = {}
+            caption_order: List[str] = []
+            for idx in target_indexes:
+                caption_positions = _page_caption_positions(pages[idx])
+                page_caption_count = len(caption_positions)
+                for line_index, caption in caption_positions:
+                    key = self._normalized_heading_text(caption)
+                    if not key:
                         continue
-                    pages[page_idx].add_image(image)
-                    existing.add(image)
-                pages[page_idx].metadata["image_count"] = len(pages[page_idx].get_images())
+                    if key not in caption_targets:
+                        caption_targets[key] = (idx, page_caption_count, line_index, caption)
+                        caption_order.append(key)
+                        continue
+                    old_idx, old_page_caption_count, old_line_index, _old_caption = caption_targets[key]
+                    if (
+                        int(page_caption_count) < int(old_page_caption_count)
+                        or (
+                            int(page_caption_count) == int(old_page_caption_count)
+                            and (
+                                int(line_index) < int(old_line_index)
+                                or (int(line_index) == int(old_line_index) and int(idx) < int(old_idx))
+                            )
+                        )
+                    ):
+                        caption_targets[key] = (idx, page_caption_count, line_index, caption)
+
+            image_target_indexes = [caption_targets[key][0] for key in caption_order if key in caption_targets]
+            if not image_target_indexes:
+                preferred_indexes = [
+                    idx
+                    for idx in target_indexes
+                    if re.search(r"image://page-|^(?:图|figure)\b", str(getattr(pages[idx], "markdown_text", "") or ""), flags=re.IGNORECASE | re.MULTILINE)
+                ]
+                image_target_indexes = preferred_indexes or target_indexes
+
+            for page_idx in target_indexes:
+                pages[page_idx].assets.images = []
+                pages[page_idx].metadata["page_image_indexes"] = []
+                pages[page_idx].metadata["image_count"] = 0
+
+            assigned_by_page: Dict[int, List[Any]] = {}
+            selected_captions_by_page: Dict[int, List[str]] = {}
+            caption_texts = [caption_targets[key][3] for key in caption_order if key in caption_targets]
+            caption_image_groups = self._assign_section_images_to_captions(images, caption_texts)
+            if caption_image_groups:
+                for page_idx, caption_text, group in zip(image_target_indexes, caption_texts, caption_image_groups):
+                    if not group:
+                        continue
+                    assigned_by_page.setdefault(int(page_idx), []).extend(group)
+                    selected_captions_by_page.setdefault(int(page_idx), []).append(str(caption_text or "").strip())
+            else:
+                image_groups = self._group_items_contiguously(images, len(image_target_indexes))
+                for page_idx, group in zip(image_target_indexes, image_groups):
+                    if not group:
+                        continue
+                    assigned_by_page.setdefault(int(page_idx), []).extend(group)
+
+            for page_idx in target_indexes:
+                group = list(assigned_by_page.get(int(page_idx)) or [])
+                if group:
+                    for image in group:
+                        pages[page_idx].add_image(image)
+                pages[page_idx].metadata["selected_figure_captions"] = list(selected_captions_by_page.get(int(page_idx)) or [])
+                pages[page_idx].metadata["page_image_indexes"] = list(range(1, len(list(pages[page_idx].assets.images or [])) + 1))
+                pages[page_idx].metadata["image_count"] = len(list(pages[page_idx].assets.images or []))
+                self._refresh_page_markdown_for_assets(pages[page_idx])
 
     def create_mono_page_node(
         self,

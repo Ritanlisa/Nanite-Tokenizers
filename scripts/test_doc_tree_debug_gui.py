@@ -178,6 +178,28 @@ def _local_asset_payload(page: Any) -> Dict[str, Any]:
     }
 
 
+def _page_to_payload_snapshot(page: Any) -> Dict[str, Any]:
+    to_payload = getattr(page, "to_payload", None)
+    if not callable(to_payload):
+        return _local_asset_payload(page)
+
+    try:
+        payload_raw = to_payload()
+    except Exception:
+        return _local_asset_payload(page)
+
+    if not isinstance(payload_raw, dict):
+        return _local_asset_payload(page)
+
+    payload: Dict[str, Any] = dict(payload_raw)
+    payload.pop("SubContent", None)
+    payload.pop("title", None)
+    payload.pop("category", None)
+    payload.pop("metadata", None)
+    payload.pop("markdown_text", None)
+    return payload
+
+
 def _build_debug_render_markdown_text(page: Any) -> str:
   if hasattr(page, "merged_markdown"):
     try:
@@ -223,7 +245,7 @@ def _page_variable_snapshot(page: Any) -> Dict[str, Any]:
         "render_markdown_text": render_markdown_text,
         "metadata": _metadata_snapshot(getattr(page, "metadata", {}) or {}),
         "assets": _json_safe(getattr(page, "assets", None), max_depth=3),
-        "to_payload": _local_asset_payload(page),
+      "to_payload": _page_to_payload_snapshot(page),
     }
 
     for key, value in attrs.items():
@@ -345,6 +367,43 @@ def _collect_chapter_boundary_debug(tree: list[Dict[str, Any]]) -> list[Dict[str
     return chapter_rows
 
 
+def _count_markdown_image_tokens(text: Any) -> int:
+    count = 0
+    for match in re.finditer(r"!\[[^\]]*\]\(([^)]+)\)", str(text or "")):
+        target = str(match.group(1) or "").strip()
+        if re.fullmatch(r"image://page-\d+/\d+", target, flags=re.IGNORECASE):
+            count += 1
+    return count
+
+
+def _collect_image_alignment_debug(tree: list[Dict[str, Any]]) -> Dict[str, Any]:
+    rows: list[Dict[str, Any]] = []
+
+    def _walk(nodes: list[Dict[str, Any]]) -> None:
+        for node in nodes:
+            vars_ = dict(node.get("variables") or {})
+            payload = dict(vars_.get("to_payload") or {}) if isinstance(vars_.get("to_payload"), dict) else {}
+            markdown_text = str(vars_.get("render_markdown_text") or vars_.get("markdown_text") or "")
+            token_count = _count_markdown_image_tokens(markdown_text)
+            image_count = len(list(payload.get("images") or []))
+            row = {
+                "title": str(node.get("title") or ""),
+                "category": str(node.get("category") or ""),
+                "page": (node.get("metadata") or {}).get("page"),
+                "token_count": token_count,
+                "image_count": image_count,
+            }
+            if token_count != image_count:
+                rows.append(row)
+            _walk(list(node.get("children") or []))
+
+    _walk(list(tree or []))
+    return {
+        "mismatch_count": len(rows),
+        "mismatches": rows,
+    }
+
+
 def _build_pipeline_debug(rag_doc: Any) -> Dict[str, Any]:
     debug: Dict[str, Any] = {
         "doc_parser": str(getattr(rag_doc, "metadata", {}).get("doc_parser") or ""),
@@ -427,6 +486,7 @@ def _build_payload_and_rag_doc_from_file(
     emit_summary: bool = False,
     emit_tree: bool = False,
     emit_boundary_debug: bool = False,
+  assert_image_alignment: bool = False,
 ) -> tuple[Dict[str, Any], Any]:
     from rag.documents import load_rag_documents_from_paths, _probe_effective_native_page_count
 
@@ -462,6 +522,7 @@ def _build_payload_and_rag_doc_from_file(
         print(line)
 
     chapter_boundary_debug = _collect_chapter_boundary_debug(tree)
+    image_alignment_debug = _collect_image_alignment_debug(tree)
     if emit_boundary_debug and chapter_boundary_debug:
       print("\n[DocTreeDebug] Chapter Boundary Diagnostics")
       for row in chapter_boundary_debug:
@@ -492,6 +553,7 @@ def _build_payload_and_rag_doc_from_file(
       "variables": _page_variable_snapshot(rag_doc),
       "tree": tree,
       "chapter_boundary_debug": chapter_boundary_debug,
+      "image_alignment_debug": image_alignment_debug,
     }
     if include_build_debug:
       payload["build_debug"] = _build_pipeline_debug(rag_doc)
@@ -508,6 +570,14 @@ def _build_payload_and_rag_doc_from_file(
         f"native_page_count={native_page_count}, runtime_native_page_count={runtime_native_page_count}, "
         f"expected_page_count={expected_pages}, aligned={is_aligned}"
       )
+      print(
+        "[DocTreeDebug] Image Alignment: "
+        f"mismatch_count={int(image_alignment_debug.get('mismatch_count') or 0)}"
+      )
+
+    if bool(assert_image_alignment) and int(image_alignment_debug.get("mismatch_count") or 0) > 0:
+      head = list(image_alignment_debug.get("mismatches") or [])[:10]
+      raise AssertionError(f"Image alignment mismatch: {json.dumps(head, ensure_ascii=False)}")
 
     return payload, rag_doc
 
@@ -1093,6 +1163,10 @@ def _build_page_html() -> str:
       background: transparent;
       padding: 0;
     }
+    .markdown-table-wrap {
+      overflow-x: auto;
+      margin: 0 0 12px;
+    }
     .markdown-render table {
       width: 100%;
       border-collapse: collapse;
@@ -1324,10 +1398,97 @@ def _build_page_html() -> str:
       return html;
     }
 
+    function isBlankLine(line) {
+      return String(line || '').trim() === '';
+    }
+
+    function splitMarkdownTableRow(line) {
+      const source = String(line || '').trim();
+      if (!source || !source.includes('|')) {
+        return [];
+      }
+      const backslash = String.fromCharCode(92);
+      let text = source;
+      if (text.startsWith('|')) {
+        text = text.slice(1);
+      }
+      if (text.endsWith('|')) {
+        text = text.slice(0, -1);
+      }
+
+      const cells = [];
+      let current = '';
+      for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        const nextChar = index + 1 < text.length ? text[index + 1] : '';
+        if (char === backslash && (nextChar === '|' || nextChar === backslash)) {
+          current += nextChar;
+          index += 1;
+          continue;
+        }
+        if (char === '|') {
+          cells.push(current.trim());
+          current = '';
+          continue;
+        }
+        current += char;
+      }
+      cells.push(current.trim());
+      return cells;
+    }
+
+    function parseTableAlignment(cell) {
+      const value = String(cell || '').trim();
+      if (!value) {
+        return '';
+      }
+      if (value.startsWith(':') && value.endsWith(':')) {
+        return 'center';
+      }
+      if (value.endsWith(':')) {
+        return 'right';
+      }
+      if (value.startsWith(':')) {
+        return 'left';
+      }
+      return '';
+    }
+
+    function getMarkdownTableInfo(lines, startIndex) {
+      const headerLine = String(lines[startIndex] || '').trim();
+      const headerCells = splitMarkdownTableRow(headerLine);
+      if (headerCells.length < 2) {
+        return null;
+      }
+
+      let separatorIndex = startIndex + 1;
+      while (separatorIndex < lines.length && isBlankLine(lines[separatorIndex])) {
+        separatorIndex += 1;
+      }
+      if (separatorIndex >= lines.length) {
+        return null;
+      }
+
+      const separatorLine = String(lines[separatorIndex] || '').trim();
+      const separatorCells = splitMarkdownTableRow(separatorLine);
+      if (separatorCells.length !== headerCells.length) {
+        return null;
+      }
+      if (!separatorCells.every((cell) => /^:?-{3,}:?$/.test(String(cell || '').trim()))) {
+        return null;
+      }
+
+      return {
+        headerCells,
+        separatorIndex,
+        alignments: separatorCells.map((cell) => parseTableAlignment(cell)),
+      };
+    }
+
     function collectNodeImageLookup(node) {
       const byPage = new Map();
-      const seenByPage = new Map();
       const byAssetId = new Map();
+      const looseImages = [];
       const stack = [node];
       while (stack.length > 0) {
         const current = stack.pop();
@@ -1341,22 +1502,23 @@ def _build_page_html() -> str:
           .filter((item) => Number.isFinite(item) && item > 0);
         const payload = getLocalAssetPayload(current);
         const pageImages = pageNo > 0 ? (byPage.get(pageNo) || []) : [];
-        const seenPageImages = pageNo > 0 ? (seenByPage.get(pageNo) || new Set()) : new Set();
         for (const [index, item] of toList(payload.images).entries()) {
           if (isImageAssetObject(item)) {
             byAssetId.set(String(item.asset_id || '').trim(), item);
           }
-          const key = item && typeof item === 'object'
-            ? String(item.asset_id || item.source || item.filename || JSON.stringify(item))
-            : String(item || '').trim();
-          if (!key || seenPageImages.has(key)) {
+          if (pageNo <= 0) {
+            looseImages.push(item);
             continue;
           }
-          seenPageImages.add(key);
           const pageImageIndex = Number(pageImageIndexes[index] || 0);
           if (pageImageIndex > 0) {
+            while (pageImages.length < pageImageIndex) {
+              pageImages.push(null);
+            }
             if (!pageImages[pageImageIndex - 1]) {
               pageImages[pageImageIndex - 1] = item;
+            } else {
+              pageImages.push(item);
             }
             continue;
           }
@@ -1364,14 +1526,24 @@ def _build_page_html() -> str:
         }
         if (pageNo > 0 && pageImages.length > 0) {
           byPage.set(pageNo, pageImages);
-          seenByPage.set(pageNo, seenPageImages);
         }
         const children = Array.isArray(current.children) ? current.children : [];
         for (let index = children.length - 1; index >= 0; index -= 1) {
           stack.push(children[index]);
         }
       }
-      return { byPage, byAssetId };
+
+      const images = [];
+      const orderedPages = Array.from(byPage.keys()).sort((a, b) => a - b);
+      for (const pageNo of orderedPages) {
+        for (const item of byPage.get(pageNo) || []) {
+          if (item) {
+            images.push(item);
+          }
+        }
+      }
+      images.push(...looseImages);
+      return { byPage, byAssetId, images, imageCount: images.length };
     }
 
     function resolveMarkdownImageTarget(target, node, lookup) {
@@ -1445,14 +1617,6 @@ def _build_page_html() -> str:
       const lines = markdown.replace(/\\r\\n/g, '\\n').split('\\n');
       let index = 0;
 
-      function isBlank(line) {
-        return String(line || '').trim() === '';
-      }
-
-      function isTableSeparator(line) {
-        return /^\\|?(\\s*:?-{3,}:?\\s*\\|)+\\s*:?-{3,}:?\\|?\\s*$/.test(String(line || '').trim());
-      }
-
       function appendParagraph(blockLines) {
         const paragraph = document.createElement('p');
         paragraph.innerHTML = blockLines.map((line) => applyInlineMarkdown(line)).join('<br/>');
@@ -1497,7 +1661,8 @@ def _build_page_html() -> str:
             figure.appendChild(link);
           }
           const nextLine = String(lines[index + 1] || '').trim();
-          const captionText = nextLine && !/^(!\\[|#{1,6}\\s|[-*]\\s|\\d+\\.\\s|\\|)/.test(nextLine) ? nextLine : altText;
+          const nextLineStartsTable = Boolean(getMarkdownTableInfo(lines, index + 1));
+          const captionText = nextLine && !nextLineStartsTable && !/^(!\\[|#{1,6}\\s|[-*]\\s|\\d+\\.\\s|\\|)/.test(nextLine) ? nextLine : altText;
           if (captionText) {
             const caption = document.createElement('figcaption');
             caption.innerHTML = applyInlineMarkdown(captionText);
@@ -1508,29 +1673,47 @@ def _build_page_html() -> str:
           continue;
         }
 
-        if (trimmed.startsWith('|') && index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
+        const tableInfo = getMarkdownTableInfo(lines, index);
+        if (tableInfo) {
+          const columnCount = tableInfo.headerCells.length;
+          const tableWrap = document.createElement('div');
+          tableWrap.className = 'markdown-table-wrap';
           const table = document.createElement('table');
           const thead = document.createElement('thead');
           const tbody = document.createElement('tbody');
-          const headerCells = trimmed.split('|').slice(1, -1).map((cell) => cell.trim());
           const headerRow = document.createElement('tr');
-          for (const cell of headerCells) {
+          for (const [cellIndex, cell] of tableInfo.headerCells.entries()) {
             const th = document.createElement('th');
+            const alignment = tableInfo.alignments[cellIndex] || '';
+            if (alignment) {
+              th.style.textAlign = alignment;
+            }
             th.innerHTML = applyInlineMarkdown(cell);
             headerRow.appendChild(th);
           }
           thead.appendChild(headerRow);
           table.appendChild(thead);
-          index += 2;
+          index = tableInfo.separatorIndex + 1;
           while (index < lines.length) {
             const rowLine = String(lines[index] || '').trim();
-            if (!rowLine.startsWith('|')) {
+            if (!rowLine) {
+              break;
+            }
+            const cells = splitMarkdownTableRow(rowLine);
+            if (cells.length < 2) {
               break;
             }
             const row = document.createElement('tr');
-            const cells = rowLine.split('|').slice(1, -1).map((cell) => cell.trim());
-            for (const cell of cells) {
+            const normalizedCells = cells.slice(0, columnCount);
+            while (normalizedCells.length < columnCount) {
+              normalizedCells.push('');
+            }
+            for (const [cellIndex, cell] of normalizedCells.entries()) {
               const td = document.createElement('td');
+              const alignment = tableInfo.alignments[cellIndex] || '';
+              if (alignment) {
+                td.style.textAlign = alignment;
+              }
               td.innerHTML = applyInlineMarkdown(cell);
               row.appendChild(td);
             }
@@ -1538,7 +1721,8 @@ def _build_page_html() -> str:
             index += 1;
           }
           table.appendChild(tbody);
-          renderMarkdownEl.appendChild(table);
+          tableWrap.appendChild(table);
+          renderMarkdownEl.appendChild(tableWrap);
           continue;
         }
 
@@ -1571,7 +1755,7 @@ def _build_page_html() -> str:
           if (/^(#{1,6})\\s+/.test(currentTrimmed) || /^!\\[[^\\]]*\\]\\(([^)]+)\\)$/.test(currentTrimmed) || /^([-*]|\\d+\\.)\\s+/.test(currentTrimmed)) {
             break;
           }
-          if (currentTrimmed.startsWith('|') && index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
+          if (getMarkdownTableInfo(lines, index)) {
             break;
           }
           paragraphLines.push(currentTrimmed);
@@ -1839,13 +2023,13 @@ def _build_page_html() -> str:
       }
 
       const metadata = node.metadata && typeof node.metadata === 'object' ? node.metadata : {};
-      const isChapter = String(node.category || '').toLowerCase() === 'chapter';
-      const assets = collectNodeAssets(node, { includeLists: true, imageStoreLimit: isChapter ? 24 : 48 });
-
-      const headers = assets.headers.length > 0 ? assets.headers : toList(metadata.headers || metadata.header_text);
-      const footers = assets.footers.length > 0 ? assets.footers : toList(metadata.footers || metadata.footer_text);
-      const pageNumbers = assets.pageNumbers.length > 0 ? assets.pageNumbers : toList(metadata.page_number_hint || metadata.page);
-      const images = assets.images;
+  const payload = getLocalAssetPayload(node);
+  const headers = toList(payload.headers).length > 0 ? toList(payload.headers) : toList(metadata.headers || metadata.header_text);
+  const footers = toList(payload.footers).length > 0 ? toList(payload.footers) : toList(metadata.footers || metadata.footer_text);
+  const localPageNumbers = toList(payload.page_numbers);
+  const pageNumbers = localPageNumbers.length > 0 ? localPageNumbers : toList(metadata.page_number_hint || metadata.page);
+  const images = toList(payload.images);
+  const imageCount = images.length;
 
       const summary = document.createElement('div');
       summary.className = 'asset-card';
@@ -1856,10 +2040,10 @@ def _build_page_html() -> str:
       const kv = document.createElement('div');
       kv.className = 'asset-kv';
       const rows = [
-        ['Headers', String(assets.headerCount || headers.length)],
-        ['Footers', String(assets.footerCount || footers.length)],
-        ['Page No.', String(assets.pageNumberCount || pageNumbers.length)],
-        ['Images', String(assets.imageCount || Number(metadata.image_count || 0))],
+        ['Headers', String(headers.length)],
+        ['Footers', String(footers.length)],
+        ['Page No.', String(pageNumbers.length)],
+        ['Images', String(imageCount)],
       ];
       for (const [k, v] of rows) {
         const kEl = document.createElement('div');
@@ -1873,12 +2057,6 @@ def _build_page_html() -> str:
       summary.appendChild(kv);
 
       assetsEl.appendChild(summary);
-      if (isChapter && assets.imageCount > images.length) {
-        const note = document.createElement('div');
-        note.className = 'asset-empty';
-        note.textContent = `Chapter 已汇总子页图片，当前仅展示前 ${images.length} 张，完整数量为 ${assets.imageCount}。`;
-        assetsEl.appendChild(note);
-      }
       assetsEl.appendChild(renderAssetList('页眉 Header', headers));
       assetsEl.appendChild(renderAssetList('页脚 Footer', footers));
       assetsEl.appendChild(renderAssetList('页码 Page Number', pageNumbers));
@@ -2257,6 +2435,7 @@ def main() -> None:
   parser.add_argument("--output-dir", default="", help="配合 --input-files 使用：将每个文件的 JSON/Markdown 写入该目录")
   parser.add_argument("--print-tree", action="store_true", help="配合 --input-file 使用：在终端打印 catalog 树")
   parser.add_argument("--include-build-debug", action="store_true", help="配合 --input-file 使用：输出构建过程中的 marker/range/section-map 调试信息")
+  parser.add_argument("--assert-image-alignment", action="store_true", help="断言每个节点的 markdown 图片 token 数与 to_payload.images 数量一致")
   args = parser.parse_args()
 
   input_files = [str(item or "").strip() for item in list(args.input_files or []) if str(item or "").strip()]
@@ -2270,6 +2449,7 @@ def main() -> None:
         emit_summary=True,
         emit_tree=False,
         emit_boundary_debug=False,
+        assert_image_alignment=bool(args.assert_image_alignment),
       )
       stem = _sanitize_filename(Path(file_path).stem)
       json_path = output_dir / f"{stem}.json"
@@ -2288,6 +2468,7 @@ def main() -> None:
       emit_summary=True,
       emit_tree=bool(args.print_tree),
       emit_boundary_debug=bool(args.print_tree),
+      assert_image_alignment=bool(args.assert_image_alignment),
     )
     output_json = str(args.output_json or "").strip()
     if output_json:
