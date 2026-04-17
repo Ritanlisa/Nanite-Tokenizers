@@ -43,6 +43,8 @@ DEBUG_JSON_DIR.mkdir(parents=True, exist_ok=True)
 
 DEBUG_IMAGE_STORE: Dict[str, Any] = {}
 DEBUG_IMAGE_RENDER_CACHE: Dict[str, tuple[bytes, str]] = {}
+DEBUG_PREVIEW_IMAGE_MAX_PX = 960
+DEBUG_PREVIEW_WEBP_QUALITY = 72
 HEAVY_METADATA_KEYS: Set[str] = {
   "structured_page_assets",
   "page_layout",
@@ -85,24 +87,105 @@ def _json_safe(value: Any, *, depth: int = 0, max_depth: int = 8) -> Any:
     return str(value)
 
 
+def _asset_field(asset: Any, key: str, default: Any = None) -> Any:
+  if isinstance(asset, dict):
+    return asset.get(key, default)
+  return getattr(asset, key, default)
+
+
 def _refresh_debug_image_store(rag_doc: Any) -> None:
-    DEBUG_IMAGE_STORE.clear()
-    pages = []
-    if hasattr(rag_doc, "get_mono_pages"):
+  DEBUG_IMAGE_STORE.clear()
+  pages = []
+  if hasattr(rag_doc, "get_mono_pages"):
+    try:
+      pages = list(getattr(rag_doc, "get_mono_pages")() or [])
+    except Exception:
+      pages = []
+  for page in pages:
+    try:
+      images = list(getattr(page, "get_images")() or [])
+    except Exception:
+      images = []
+    for image in images:
+      asset_id = str(getattr(image, "asset_id", "") or "").strip()
+      if not asset_id:
+        continue
+      raw_data = bytes(getattr(image, "data", b"") or b"")
+      media_type = str(getattr(image, "media_type", "") or "application/octet-stream").strip()
+      filename = str(getattr(image, "filename", "") or f"{asset_id}.bin").strip()
+      preview_data = raw_data
+      preview_media_type = media_type
+      if raw_data and media_type.startswith("image/"):
         try:
-            pages = list(getattr(rag_doc, "get_mono_pages")() or [])
+          compressed, compressed_media_type = _build_debug_image_bytes(
+            raw_data,
+            media_type,
+            filename=filename,
+            preview=True,
+            max_px=DEBUG_PREVIEW_IMAGE_MAX_PX,
+          )
+          if compressed:
+            preview_data = compressed
+            preview_media_type = compressed_media_type or media_type
         except Exception:
-            pages = []
-    for page in pages:
-        try:
-            images = list(getattr(page, "get_images")() or [])
-        except Exception:
-            images = []
-        for image in images:
-            asset_id = str(getattr(image, "asset_id", "") or "").strip()
-            if not asset_id:
-                continue
-            DEBUG_IMAGE_STORE[asset_id] = image
+          preview_data = raw_data
+          preview_media_type = media_type
+      DEBUG_IMAGE_STORE[asset_id] = {
+        "asset_id": asset_id,
+        "filename": filename,
+        "media_type": preview_media_type or media_type,
+        "data": preview_data,
+        "source": str(getattr(image, "source", "") or ""),
+        "page": str(getattr(image, "page", "") or ""),
+        "width": str(getattr(image, "width", "") or ""),
+        "height": str(getattr(image, "height", "") or ""),
+        "caption": str(getattr(image, "caption", "") or ""),
+        "has_binary": bool(preview_data),
+      }
+
+
+def _compact_image_debug_payload(item: Any) -> Dict[str, Any]:
+  raw: Dict[str, Any] = {}
+  if hasattr(item, "to_debug_payload"):
+    try:
+      payload = item.to_debug_payload()
+      if isinstance(payload, dict):
+        raw = dict(payload)
+    except Exception:
+      raw = {}
+  elif isinstance(item, dict):
+    raw = dict(item)
+
+  asset_id = str(raw.get("asset_id") or _asset_field(item, "asset_id", "") or "").strip()
+  cached = DEBUG_IMAGE_STORE.get(asset_id) if asset_id else None
+  media_type = str(
+    _asset_field(cached, "media_type", "")
+    or raw.get("media_type")
+    or _asset_field(item, "media_type", "")
+    or "application/octet-stream"
+  ).strip()
+  filename = str(
+    _asset_field(cached, "filename", "")
+    or raw.get("filename")
+    or _asset_field(item, "filename", "")
+    or ""
+  ).strip()
+  page = str(_asset_field(cached, "page", "") or raw.get("page") or "").strip()
+  width = str(_asset_field(cached, "width", "") or raw.get("width") or "").strip()
+  height = str(_asset_field(cached, "height", "") or raw.get("height") or "").strip()
+  data_size = len(bytes(_asset_field(cached, "data", b"") or b"")) if cached is not None else int(raw.get("byte_size") or 0)
+
+  return {
+    "asset_id": asset_id,
+    "filename": filename,
+    "media_type": media_type,
+    "byte_size": str(data_size),
+    "width": width,
+    "height": height,
+    "page": page,
+    "has_binary": bool(data_size > 0),
+    "preview_only": True,
+  }
 
 
 def _summarize_large_value(value: Any) -> Any:
@@ -160,15 +243,12 @@ def _local_asset_payload(page: Any) -> Dict[str, Any]:
 
     images: list[Any] = []
     for item in list(getattr(assets, "images", []) or []):
-        if hasattr(item, "to_debug_payload"):
-            try:
-                images.append(item.to_debug_payload())
-                continue
-            except Exception:
-                pass
-        text = str(item or "").strip()
-        if text:
-            images.append(text)
+      if hasattr(item, "to_debug_payload") or isinstance(item, dict):
+        images.append(_compact_image_debug_payload(item))
+        continue
+      text = str(item or "").strip()
+      if text:
+        images.append(text)
 
     return {
         "headers": _clean_text_list(getattr(assets, "headers", [])),
@@ -197,6 +277,17 @@ def _page_to_payload_snapshot(page: Any) -> Dict[str, Any]:
     payload.pop("category", None)
     payload.pop("metadata", None)
     payload.pop("markdown_text", None)
+    images_raw = payload.get("images")
+    if isinstance(images_raw, list):
+      compact_images: list[Any] = []
+      for item in images_raw:
+        if hasattr(item, "to_debug_payload") or isinstance(item, dict):
+          compact_images.append(_compact_image_debug_payload(item))
+        else:
+          text = str(item or "").strip()
+          if text:
+            compact_images.append(text)
+      payload["images"] = compact_images
     return payload
 
 
@@ -236,6 +327,8 @@ def _page_variable_snapshot(page: Any) -> Dict[str, Any]:
 
     raw_markdown_text = str(getattr(page, "markdown_text", "") or "")
     render_markdown_text = _build_debug_render_markdown_text(page)
+    payload_snapshot = _page_to_payload_snapshot(page)
+    payload_images = list(payload_snapshot.get("images") or []) if isinstance(payload_snapshot, dict) else []
     snapshot: Dict[str, Any] = {
         "class_name": str(type(page).__name__),
         "category": str(getattr(page, "category", "") or ""),
@@ -244,8 +337,11 @@ def _page_variable_snapshot(page: Any) -> Dict[str, Any]:
         "raw_markdown_text": raw_markdown_text,
         "render_markdown_text": render_markdown_text,
         "metadata": _metadata_snapshot(getattr(page, "metadata", {}) or {}),
-        "assets": _json_safe(getattr(page, "assets", None), max_depth=3),
-      "to_payload": _page_to_payload_snapshot(page),
+      "assets": {
+        "image_count": len(payload_images),
+        "image_preview": _json_safe(payload_images[:3], max_depth=2),
+      },
+      "to_payload": payload_snapshot,
     }
 
     for key, value in attrs.items():
@@ -633,10 +729,10 @@ def _resolve_debug_image_asset(asset_id: str) -> Any:
     asset = DEBUG_IMAGE_STORE.get(key)
     if asset is None:
         raise HTTPException(status_code=404, detail="调试图片不存在")
-    data = bytes(getattr(asset, "data", b"") or b"")
+    data = bytes(_asset_field(asset, "data", b"") or b"")
     if not data:
         raise HTTPException(status_code=404, detail="调试图片无二进制内容")
-    media_type = str(getattr(asset, "media_type", "") or "application/octet-stream").strip()
+    media_type = str(_asset_field(asset, "media_type", "") or "application/octet-stream").strip()
     return asset, data, media_type
 
 
@@ -893,16 +989,10 @@ def _build_debug_image_bytes(
                 resampling = getattr(Image, "BICUBIC", 3)
             resample_filter: Any = resampling
             image.thumbnail((max(64, int(max_px or 360)), max(64, int(max_px or 360))), resample_filter)
-            fmt = str(getattr(image, "format", "") or "").strip().upper()
-            if not fmt:
-                fmt = str(resolved_media_type.split("/", 1)[-1] or "PNG").strip().upper()
-            if fmt == "JPG":
-                fmt = "JPEG"
-            save_image = image
-            if fmt in {"JPEG", "WEBP"} and image.mode not in {"RGB", "L"}:
-                save_image = image.convert("RGB")
+            fmt = "WEBP"
+            save_image = image.convert("RGB") if image.mode not in {"RGB", "L"} else image
             output = BytesIO()
-            save_image.save(output, format=fmt, optimize=True)
+            save_image.save(output, format=fmt, optimize=True, quality=DEBUG_PREVIEW_WEBP_QUALITY, method=4)
             output_bytes = output.getvalue()
             if output_bytes:
                 resolved_media_type = str(getattr(Image, "MIME", {}).get(fmt) or resolved_media_type)
@@ -1262,7 +1352,7 @@ def _build_page_html() -> str:
     const renderMarkdownEl = document.getElementById('renderMarkdownEl');
     const varsEl = document.getElementById('vars');
     const meta = document.getElementById('meta');
-    const IMAGE_PREVIEW_MAX_PX = 1600;
+    const IMAGE_PREVIEW_MAX_PX = 960;
 
     let payload = null;
     let selectedNodeId = '';
@@ -2408,11 +2498,11 @@ def create_app() -> FastAPI:
       data, media_type = _build_debug_image_bytes(
           data,
           media_type,
-          filename=str(getattr(asset, "filename", "") or "asset.bin"),
+        filename=str(_asset_field(asset, "filename", "") or "asset.bin"),
           preview=bool(int(preview or 0)),
           max_px=max(64, min(1200, int(max_px or 360))),
       )
-      filename = str(getattr(asset, "filename", "") or "asset.bin").replace('"', "")
+      filename = str(_asset_field(asset, "filename", "") or "asset.bin").replace('"', "")
       headers = {
           "Content-Disposition": f'inline; filename="{filename}"',
           "Cache-Control": "public, max-age=3600",
