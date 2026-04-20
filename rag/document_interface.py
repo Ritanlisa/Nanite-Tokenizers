@@ -897,6 +897,168 @@ class RAG_DB_Document(Chapter, ABC):
 
         return chunks
 
+    def _split_text_for_semipages(self, text: str, *, max_chars: Optional[int] = None) -> List[str]:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return []
+
+        chunk_chars = max(200, int(max_chars or self.default_chunk_chars or 1200))
+        segments: List[str] = []
+        start = 0
+        total = len(normalized)
+        while start < total:
+            hard_end = min(total, start + chunk_chars)
+            if hard_end >= total:
+                tail = normalized[start:].strip()
+                if tail:
+                    segments.append(tail)
+                break
+
+            split_at = hard_end
+            for marker in ("\n\n", "\n", "。", "！", "？", ".", "!", "?", "；", ";", "，", ",", " "):
+                idx = normalized.rfind(marker, start, hard_end)
+                if idx > start:
+                    split_at = idx + len(marker)
+                    break
+            if split_at <= start:
+                split_at = hard_end
+
+            piece = normalized[start:split_at].strip()
+            if piece:
+                segments.append(piece)
+            start = split_at
+
+        return segments
+
+    @classmethod
+    def _resolved_section_id_from_metadata(
+        cls,
+        metadata: Dict[str, Any],
+        *,
+        fallback_page: Optional[int] = None,
+    ) -> str:
+        base_section_id = str(metadata.get("section_id") or "").strip()
+        fragment_index = int(cls._coerce_positive_int(metadata.get("fragment_index")) or 1)
+        fragment_count = int(cls._coerce_positive_int(metadata.get("fragment_count")) or 1)
+        if not base_section_id and fallback_page is not None and int(fallback_page) > 0:
+            base_section_id = f"page-{int(fallback_page)}"
+        if fragment_count > 1 and base_section_id and "::fragment::" not in base_section_id:
+            return f"{base_section_id}::fragment::{fragment_index}"
+        return base_section_id
+
+    def _build_chunk_documents_from_pages(self, pages: Sequence[MonoPage]) -> List[Document]:
+        chunk_documents: List[Document] = []
+        for fallback_index, mono_page in enumerate(list(pages or []), start=1):
+            metadata = dict(getattr(mono_page, "metadata", {}) or {})
+            text = str(getattr(mono_page, "markdown_text", "") or metadata.get("raw_page_text") or "").strip()
+            if not text:
+                continue
+
+            page_number = int(
+                self.coerce_page_number(metadata.get("physical_page"))
+                or self.coerce_page_number(metadata.get("page"))
+                or fallback_index
+            )
+            fragment_index = int(self._coerce_positive_int(metadata.get("fragment_index")) or 1)
+            fragment_count = int(self._coerce_positive_int(metadata.get("fragment_count")) or 1)
+            metadata["doc_name"] = str(metadata.get("doc_name") or self.doc_name)
+            metadata["file_name"] = str(metadata.get("file_name") or self.doc_name)
+            metadata["source_extension"] = str(metadata.get("source_extension") or self.source_extension)
+            metadata["fragment_index"] = fragment_index
+            metadata["fragment_count"] = fragment_count
+
+            base_section_id = str(metadata.get("section_id") or "").strip()
+            resolved_section_id = self._resolved_section_id_from_metadata(metadata, fallback_page=page_number)
+            if fragment_count > 1 and base_section_id and "::fragment::" not in base_section_id:
+                metadata.setdefault("parent_section_id", base_section_id)
+            metadata["section_id"] = resolved_section_id or base_section_id or f"page-{page_number}"
+
+            is_fragment = bool(metadata.get("is_fragment")) or isinstance(mono_page, SemiPage) or fragment_count > 1
+            metadata["chunk_index"] = fragment_index if is_fragment else 1
+            page_unit = "semipage" if is_fragment else "monopage"
+            chunk_documents.append(
+                Document(
+                    text=text,
+                    metadata=metadata,
+                    doc_id=f"{self.doc_name}::{page_unit}::{metadata['section_id']}",
+                )
+            )
+        return chunk_documents
+
+    def _split_monopage_by_char_budget(
+        self,
+        page: MonoPage,
+        *,
+        max_chars: Optional[int] = None,
+    ) -> List[MonoPage]:
+        if not isinstance(page, MonoPage):
+            return [page]
+
+        page_meta = dict(getattr(page, "metadata", {}) or {})
+        raw_text = str(page_meta.get("raw_page_text") or page.markdown_text or "").strip()
+        if not raw_text:
+            return [page]
+
+        segments = self._split_text_for_semipages(raw_text, max_chars=max_chars)
+        if len(segments) <= 1:
+            existing_fragment_index = int(self._coerce_positive_int(page.metadata.get("fragment_index")) or 1)
+            existing_fragment_count = int(self._coerce_positive_int(page.metadata.get("fragment_count")) or 1)
+            page.metadata["fragment_index"] = existing_fragment_index
+            page.metadata["fragment_count"] = existing_fragment_count
+            return [page]
+
+        physical_page = int(
+            self.coerce_page_number(page_meta.get("physical_page"))
+            or self.coerce_page_number(page_meta.get("page"))
+            or 0
+        )
+        page_number = int(self.coerce_page_number(page_meta.get("page")) or physical_page or 0)
+        base_section_id = str(page_meta.get("section_id") or "").strip() or f"page-{page_number or physical_page or 1}"
+        fragment_count = len(segments)
+        fragments: List[MonoPage] = []
+        for index, segment_text in enumerate(segments, start=1):
+            fragment_meta = dict(page_meta)
+            if physical_page > 0:
+                fragment_meta["physical_page"] = physical_page
+            if page_number > 0:
+                fragment_meta["page"] = page_number
+                fragment_meta.setdefault("section_start_page", page_number)
+                fragment_meta.setdefault("section_end_page", page_number)
+            fragment_meta["fragment_index"] = index
+            fragment_meta["fragment_count"] = fragment_count
+            fragment_meta["parent_section_id"] = base_section_id
+            fragment_meta["section_id"] = f"{base_section_id}::fragment::{index}"
+            fragment_meta["raw_page_text"] = segment_text
+            fragment_meta["page_image_indexes"] = list(page_meta.get("page_image_indexes") or []) if index == 1 else []
+
+            assets = PageAssets(
+                headers=list(page.assets.headers) if index == 1 else [],
+                footers=list(page.assets.footers) if index == fragment_count else [],
+                annotations=list(page.assets.annotations) if index == 1 else [],
+                citations=list(page.assets.citations) if index == 1 else [],
+                page_numbers=list(page.assets.page_numbers) if index == fragment_count else [],
+                images=list(page.assets.images) if index == 1 else [],
+            )
+            fragments.append(
+                SemiPage(
+                    markdown_text=segment_text,
+                    assets=assets,
+                    metadata=fragment_meta,
+                )
+            )
+        return fragments
+
+    def split_mono_pages_by_char_budget(
+        self,
+        pages: Sequence[MonoPage],
+        *,
+        max_chars: Optional[int] = None,
+    ) -> List[MonoPage]:
+        split_pages: List[MonoPage] = []
+        for page in list(pages or []):
+            split_pages.extend(self._split_monopage_by_char_budget(page, max_chars=max_chars))
+        return split_pages
+
     @staticmethod
     def _parse_page_number_hint(line: str) -> Optional[int]:
         text = str(line or "").strip()
@@ -2984,7 +3146,6 @@ class RAG_DB_Document(Chapter, ABC):
             page_texts = [cleaned_text]
 
         page_nodes: List[MonoPage] = []
-        chunks: List[Document] = []
 
         for page_idx, page_text in enumerate(page_texts, start=1):
             section_title = f"Page {page_idx}"
@@ -3009,19 +3170,9 @@ class RAG_DB_Document(Chapter, ABC):
             node.add_page_number(page_idx)
             page_nodes.append(node)
 
-            for chunk_idx, chunk_text in enumerate(self._split_text_chunks(page_text), start=1):
-                chunk_meta = dict(page_meta)
-                chunk_meta["chunk_index"] = chunk_idx
-                chunks.append(
-                    Document(
-                        text=chunk_text,
-                        metadata=chunk_meta,
-                        doc_id=f"{self.doc_name}::page::{page_idx}::chunk::{chunk_idx}",
-                    )
-                )
-
-        self.set_page_nodes(page_nodes)
-        self.chunk_documents = chunks
+        leaf_page_nodes = self.split_mono_pages_by_char_budget(page_nodes)
+        self.set_page_nodes(leaf_page_nodes)
+        self.chunk_documents = self._build_chunk_documents_from_pages(leaf_page_nodes)
         self.page_count = len(page_nodes)
         self.pagination_mode = "page-tree"
         self.catalog = self.catalog_payload()
@@ -3106,7 +3257,10 @@ class RAG_DB_Document(Chapter, ABC):
         enriched: List[Dict[str, Any]] = []
         for row in regex_matches:
             metadata = dict(row.get("metadata") or {})
-            section_id = str(metadata.get("section_id") or "").strip()
+            section_id = self._resolved_section_id_from_metadata(
+                metadata,
+                fallback_page=self.coerce_page_number(metadata.get("page")),
+            )
             section_path = str(row.get("section_path") or "")
             text = str(row.get("text") or "")
             score = float(section_scores.get(section_id, 0.0))
@@ -3124,6 +3278,7 @@ class RAG_DB_Document(Chapter, ABC):
         payload = self.to_payload()
         payload["doc_name"] = self.doc_name
         payload["page_count"] = self.page_count
+        payload["chunk_count"] = len(list(self.chunk_documents or []))
         payload["pagination_mode"] = self.pagination_mode
         payload["catalog"] = self.catalog_payload()
         return payload

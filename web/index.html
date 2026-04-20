@@ -656,9 +656,20 @@
       }
 
       .modal {
-        width: min(920px, 100%);
+        width: min(1080px, 100%);
         max-height: 90vh;
         overflow-y: auto;
+      }
+
+      .secondary-button {
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        box-shadow: none;
+      }
+
+      .secondary-button:hover {
+        box-shadow: none;
       }
 
       .attachments {
@@ -776,13 +787,26 @@
         gap: 8px;
       }
 
+      .rag-detail {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
       .rag-detail.collapsed {
         display: none;
       }
 
+      .rag-section {
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 12px;
+        padding: 12px;
+        background: rgba(10, 12, 18, 0.36);
+      }
+
       .rag-doc-list {
         width: 100%;
-        height: 360px;
+        height: 200px;
         display: flex;
         flex-direction: column;
         gap: 8px;
@@ -815,6 +839,14 @@
         position: relative;
         z-index: 2;
         word-break: break-word;
+      }
+
+      .rag-doc-submeta {
+        position: relative;
+        z-index: 2;
+        margin-top: 4px;
+        font-size: 11px;
+        color: var(--muted);
       }
 
       .rag-doc-progress-track {
@@ -856,6 +888,181 @@
         margin-top: 4px;
         font-size: 13px;
         color: var(--text);
+      }
+
+      .rag-doc-meta {
+        display: grid;
+        gap: 10px;
+      }
+
+      .rag-doc-meta-heading {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--text);
+        word-break: break-word;
+      }
+
+      .rag-doc-meta-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 8px;
+      }
+
+      .rag-doc-meta-item {
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 10px;
+        padding: 8px;
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .rag-doc-meta-label {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .rag-doc-meta-value {
+        margin-top: 4px;
+        font-size: 13px;
+        color: var(--text);
+        word-break: break-word;
+      }
+
+      .rag-doc-keywords {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .rag-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(107, 209, 245, 0.14);
+        border: 1px solid rgba(107, 209, 245, 0.24);
+        font-size: 11px;
+        color: var(--text);
+      }
+
+      .rag-empty-state {
+        padding: 10px;
+        border-radius: 10px;
+        border: 1px dashed rgba(255, 255, 255, 0.12);
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .rag-catalog-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-height: 220px;
+        overflow-y: auto;
+      }
+
+      .rag-catalog-item {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+        align-items: start;
+        padding: 8px 10px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+      }
+
+      .rag-catalog-item-title {
+        font-size: 13px;
+        color: var(--text);
+        word-break: break-word;
+      }
+
+      .rag-catalog-item-meta {
+        margin-top: 4px;
+        font-size: 11px;
+        color: var(--muted);
+      }
+
+      .rag-catalog-page {
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 12px;
+        color: var(--accent);
+        white-space: nowrap;
+      }
+
+      .rag-retrieve-grid {
+        display: grid;
+        gap: 8px;
+      }
+
+      .rag-retrieve-query {
+        min-height: 86px;
+      }
+
+      .rag-retrieve-row {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .rag-retrieve-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .rag-retrieve-results {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-height: 280px;
+        overflow-y: auto;
+        margin-top: 10px;
+      }
+
+      .rag-result-item {
+        padding: 10px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+      }
+
+      .rag-result-head {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .rag-result-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text);
+        word-break: break-word;
+      }
+
+      .rag-result-score {
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 12px;
+        color: var(--accent-2);
+        white-space: nowrap;
+      }
+
+      .rag-result-meta {
+        margin-top: 4px;
+        font-size: 11px;
+        color: var(--muted);
+        word-break: break-word;
+      }
+
+      .rag-result-text {
+        margin-top: 8px;
+        font-size: 12px;
+        color: var(--text);
+        white-space: pre-wrap;
+        word-break: break-word;
       }
 
       .attachment {
@@ -984,6 +1191,14 @@
 
       @media (max-width: 720px) {
         .workspace {
+          grid-template-columns: 1fr;
+        }
+
+        .rag-manager-layout {
+          grid-template-columns: 1fr;
+        }
+
+        .rag-retrieve-row {
           grid-template-columns: 1fr;
         }
 
@@ -1129,12 +1344,46 @@
             </div>
             <div id="ragDetailPane" class="rag-col rag-detail collapsed">
               <div id="ragDbStats" class="rag-db-stats"></div>
-              <div id="ragDocTitle" class="rag-col-title">Documents</div>
-              <div id="ragDocSelect" class="rag-doc-list" role="listbox" aria-label="RAG documents"></div>
-              <div class="rag-doc-actions" style="margin-top: 10px;">
-                <button id="ragDocAddBtn">Add Doc</button>
-                <button id="ragDocDeleteBtn">Delete Doc</button>
-                <button id="ragDocRefreshBtn">Refresh</button>
+              <div class="rag-section">
+                <div id="ragDocTitle" class="rag-col-title">Documents</div>
+                <div id="ragDocSelect" class="rag-doc-list" role="listbox" aria-label="RAG documents"></div>
+                <div class="rag-doc-actions" style="margin-top: 10px;">
+                  <button id="ragDocAddBtn">Add Doc</button>
+                  <button id="ragDocDeleteBtn">Delete Doc</button>
+                  <button id="ragDocBuildBtn">Rebuild</button>
+                  <button id="ragDocRefreshBtn">Refresh</button>
+                </div>
+              </div>
+              <div class="rag-section">
+                <div id="ragDocMetaTitle" class="rag-col-title">Document Tree Summary</div>
+                <div id="ragDocMeta" class="rag-doc-meta"></div>
+              </div>
+              <div class="rag-section">
+                <div id="ragCatalogTitle" class="rag-col-title">Catalog</div>
+                <div id="ragCatalogList" class="rag-catalog-list"></div>
+              </div>
+              <div class="rag-section">
+                <div id="ragRetrieveTitle" class="rag-col-title">Document Tree Retrieve</div>
+                <div class="rag-retrieve-grid">
+                  <select id="ragRetrieveMode">
+                    <option value="vector">Semantic</option>
+                    <option value="regex">Regex</option>
+                  </select>
+                  <select id="ragRetrieveDocScope"></select>
+                  <input id="ragRetrieveSection" type="text" placeholder="Section filter" />
+                  <input id="ragRetrieveRegex" type="text" placeholder="Regex filter" />
+                  <textarea id="ragRetrieveQuery" class="rag-retrieve-query" placeholder="Semantic query. Leave blank to run regex/filter-only retrieve."></textarea>
+                  <div class="rag-retrieve-row">
+                    <input id="ragRetrievePageStart" type="number" min="1" placeholder="Page start" />
+                    <input id="ragRetrievePageEnd" type="number" min="1" placeholder="Page end" />
+                    <input id="ragRetrieveLimit" type="number" min="1" max="50" value="10" placeholder="Limit" />
+                  </div>
+                  <div class="rag-retrieve-actions">
+                    <button id="ragRetrieveRunBtn">Search</button>
+                    <button id="ragRetrieveClearBtn" class="secondary-button">Clear</button>
+                  </div>
+                </div>
+                <div id="ragRetrieveResults" class="rag-retrieve-results"></div>
               </div>
               <div id="ragManagerStatus" class="status"></div>
             </div>
@@ -1205,10 +1454,27 @@
       const ragDbCloneBtn = document.getElementById("ragDbCloneBtn");
       const ragDocAddBtn = document.getElementById("ragDocAddBtn");
       const ragDocDeleteBtn = document.getElementById("ragDocDeleteBtn");
+      const ragDocBuildBtn = document.getElementById("ragDocBuildBtn");
       const ragDbDeleteBtn = document.getElementById("ragDbDeleteBtn");
       const ragDocRefreshBtn = document.getElementById("ragDocRefreshBtn");
       const ragDocSelect = document.getElementById("ragDocSelect");
       const ragDbStats = document.getElementById("ragDbStats");
+      const ragDocMetaTitle = document.getElementById("ragDocMetaTitle");
+      const ragDocMeta = document.getElementById("ragDocMeta");
+      const ragCatalogTitle = document.getElementById("ragCatalogTitle");
+      const ragCatalogList = document.getElementById("ragCatalogList");
+      const ragRetrieveTitle = document.getElementById("ragRetrieveTitle");
+      const ragRetrieveMode = document.getElementById("ragRetrieveMode");
+      const ragRetrieveDocScope = document.getElementById("ragRetrieveDocScope");
+      const ragRetrieveSection = document.getElementById("ragRetrieveSection");
+      const ragRetrieveRegex = document.getElementById("ragRetrieveRegex");
+      const ragRetrieveQuery = document.getElementById("ragRetrieveQuery");
+      const ragRetrievePageStart = document.getElementById("ragRetrievePageStart");
+      const ragRetrievePageEnd = document.getElementById("ragRetrievePageEnd");
+      const ragRetrieveLimit = document.getElementById("ragRetrieveLimit");
+      const ragRetrieveRunBtn = document.getElementById("ragRetrieveRunBtn");
+      const ragRetrieveClearBtn = document.getElementById("ragRetrieveClearBtn");
+      const ragRetrieveResults = document.getElementById("ragRetrieveResults");
       const ragDbDocInput = document.getElementById("ragDbDocInput");
       const ragDetailPane = document.getElementById("ragDetailPane");
       const toolBanner = document.getElementById("toolBanner");
@@ -1285,6 +1551,11 @@
       let selectedRagDocName = "";
       let ragDocNames = [];
       let ragUploadingDocs = [];
+      let ragTreeDocuments = [];
+      let ragCatalogRows = [];
+      let ragRetrievePayload = null;
+      let ragCatalogReqId = 0;
+      let ragRetrieveReqId = 0;
 
       const normalizeCollapseBucket = (value) => {
         if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -1362,14 +1633,42 @@
           ragDbCloneBtn: "Clone",
           ragDocAddBtn: "Add Doc",
           ragDocDeleteBtn: "Delete Doc",
+          ragDocBuildBtn: "Rebuild",
           ragDbDeleteBtn: "Delete",
           ragDocRefreshBtn: "Refresh",
+          ragDocMetaTitle: "Document Tree Summary",
+          ragCatalogTitle: "Catalog",
+          ragRetrieveTitle: "Document Tree Retrieve",
+          ragRetrieveModeVector: "Semantic",
+          ragRetrieveModeRegex: "Regex",
+          ragRetrieveRunBtn: "Search",
+          ragRetrieveClearBtn: "Clear",
+          ragRetrieveDocAll: "All documents",
+          ragRetrieveQueryPlaceholder: "Semantic query. Leave blank to run regex/filter-only retrieve.",
+          ragRetrieveRegexPlaceholder: "Regex filter (optional)",
+          ragRetrieveSectionPlaceholder: "Section filter (optional)",
+          ragRetrievePageStartPlaceholder: "Page start",
+          ragRetrievePageEndPlaceholder: "Page end",
+          ragRetrieveLimitPlaceholder: "Limit",
+          ragRetrieveRegexModeHint: "Regex mode ignores semantic query. Use regex and filters below.",
+          ragDocMetaEmpty: "Select a document to inspect its tree summary.",
+          ragCatalogEmpty: "No catalog available for the selected document.",
+          ragRetrieveEmpty: "No retrieve results yet.",
+          ragRetrieveRunning: "Running document-tree retrieve...",
+          ragRetrieveFailed: "Retrieve failed:",
+          ragDocPages: "Pages",
+          ragDocChunks: "Chunks",
+          ragDocSections: "Sections",
+          ragDocPagination: "Pagination",
+          ragDocNameLabel: "Doc Name",
+          ragDocKeywords: "Keywords",
           ragStatsDocs: "Documents",
           ragStatsChunks: "Chunks",
           ragStatsSize: "Size",
           ragStatsUpdated: "Updated",
           ragStatsUnknown: "Unknown",
           ragUploading: "Uploading documents...",
+          ragLoading: "Loading RAG databases...",
           ragBuilding: "Building RAG index...",
           ragSuccess: "RAG updated.",
           ragFail: "RAG update failed:",
@@ -1476,14 +1775,42 @@
           ragDbCloneBtn: "克隆",
           ragDocAddBtn: "添加文档",
           ragDocDeleteBtn: "删除文档",
+          ragDocBuildBtn: "重建索引",
           ragDbDeleteBtn: "删除",
           ragDocRefreshBtn: "刷新",
+          ragDocMetaTitle: "文档树摘要",
+          ragCatalogTitle: "目录",
+          ragRetrieveTitle: "文档树检索",
+          ragRetrieveModeVector: "语义检索",
+          ragRetrieveModeRegex: "正则检索",
+          ragRetrieveRunBtn: "检索",
+          ragRetrieveClearBtn: "清空",
+          ragRetrieveDocAll: "全部文档",
+          ragRetrieveQueryPlaceholder: "语义查询。留空时只按 regex 或筛选条件检索。",
+          ragRetrieveRegexPlaceholder: "Regex 过滤（可选）",
+          ragRetrieveSectionPlaceholder: "章节过滤（可选）",
+          ragRetrievePageStartPlaceholder: "起始页",
+          ragRetrievePageEndPlaceholder: "结束页",
+          ragRetrieveLimitPlaceholder: "数量",
+          ragRetrieveRegexModeHint: "正则模式会忽略语义查询，请使用 regex 和下面的过滤条件。",
+          ragDocMetaEmpty: "选择一篇文档后可查看它的文档树摘要。",
+          ragCatalogEmpty: "当前文档没有可用目录。",
+          ragRetrieveEmpty: "还没有检索结果。",
+          ragRetrieveRunning: "正在执行文档树检索...",
+          ragRetrieveFailed: "检索失败：",
+          ragDocPages: "页数",
+          ragDocChunks: "Chunk 数",
+          ragDocSections: "章节数",
+          ragDocPagination: "分页模式",
+          ragDocNameLabel: "文档名",
+          ragDocKeywords: "关键词",
           ragStatsDocs: "文档数",
           ragStatsChunks: "Chunk 数",
           ragStatsSize: "大小",
           ragStatsUpdated: "更新时间",
           ragStatsUnknown: "未知",
           ragUploading: "正在上传文档...",
+          ragLoading: "正在加载 RAG 数据库...",
           ragBuilding: "正在生成 RAG 索引...",
           ragSuccess: "RAG 已更新。",
           ragFail: "RAG 更新失败：",
@@ -1751,6 +2078,7 @@
         resetButton.title = t("reset");
         resetButton.setAttribute("aria-label", t("reset"));
         if (ragManagerHeaderToggle) ragManagerHeaderToggle.title = t("ragManage");
+        if (ragManagerHeaderToggle) ragManagerHeaderToggle.setAttribute("aria-label", t("ragManage"));
         if (ragDbSelect) {
           ragDbSelect.title = t("ragDb");
           ragDbSelect.setAttribute("aria-label", t("ragDb"));
@@ -1767,8 +2095,24 @@
         if (ragDbCloneBtn) ragDbCloneBtn.textContent = t("ragDbCloneBtn");
         if (ragDocAddBtn) ragDocAddBtn.textContent = t("ragDocAddBtn");
         if (ragDocDeleteBtn) ragDocDeleteBtn.textContent = t("ragDocDeleteBtn");
+        if (ragDocBuildBtn) ragDocBuildBtn.textContent = t("ragDocBuildBtn");
         if (ragDbDeleteBtn) ragDbDeleteBtn.textContent = t("ragDbDeleteBtn");
         if (ragDocRefreshBtn) ragDocRefreshBtn.textContent = t("ragDocRefreshBtn");
+        if (ragDocMetaTitle) ragDocMetaTitle.textContent = t("ragDocMetaTitle");
+        if (ragCatalogTitle) ragCatalogTitle.textContent = t("ragCatalogTitle");
+        if (ragRetrieveTitle) ragRetrieveTitle.textContent = t("ragRetrieveTitle");
+        if (ragRetrieveMode && ragRetrieveMode.options.length >= 2) {
+          ragRetrieveMode.options[0].textContent = t("ragRetrieveModeVector");
+          ragRetrieveMode.options[1].textContent = t("ragRetrieveModeRegex");
+        }
+        if (ragRetrieveQuery) ragRetrieveQuery.placeholder = t("ragRetrieveQueryPlaceholder");
+        if (ragRetrieveRegex) ragRetrieveRegex.placeholder = t("ragRetrieveRegexPlaceholder");
+        if (ragRetrieveSection) ragRetrieveSection.placeholder = t("ragRetrieveSectionPlaceholder");
+        if (ragRetrievePageStart) ragRetrievePageStart.placeholder = t("ragRetrievePageStartPlaceholder");
+        if (ragRetrievePageEnd) ragRetrievePageEnd.placeholder = t("ragRetrievePageEndPlaceholder");
+        if (ragRetrieveLimit) ragRetrieveLimit.placeholder = t("ragRetrieveLimitPlaceholder");
+        if (ragRetrieveRunBtn) ragRetrieveRunBtn.textContent = t("ragRetrieveRunBtn");
+        if (ragRetrieveClearBtn) ragRetrieveClearBtn.textContent = t("ragRetrieveClearBtn");
         graphTitle.textContent = t("graphTitle");
         graphSubtitle.textContent = t("graphSubtitle");
         settingsTitle.textContent = t("settingsTitle");
@@ -1790,6 +2134,12 @@
         if (current) {
           renderChatFromSession();
         }
+        renderRagDocList();
+        renderRagDocMeta();
+        renderRagCatalog();
+        renderRagRetrieveResults();
+        populateRagRetrieveDocScope();
+        syncRagRetrieveMode();
       };
 
       const createNode = (role, text, extra = {}) => {
@@ -2266,6 +2616,227 @@
         session.ragDbNames = normalizeRagDbNames(names);
         session.updatedAt = Date.now();
         saveSessions();
+      };
+
+      const normalizeDocIdentity = (value) => {
+        const normalized = String(value || "").trim().replace(/\\/g, "/");
+        if (!normalized) return "";
+        const parts = normalized.split("/").filter(Boolean);
+        return parts.length ? parts[parts.length - 1] : normalized;
+      };
+
+      const getTreeDocLabel = (doc) => {
+        const payload = doc && typeof doc === "object" ? doc : {};
+        const docName = String(payload.doc_name || "").trim();
+        const title = String(payload.title || "").trim();
+        return normalizeDocIdentity(docName) || title || docName || "";
+      };
+
+      const getTreeDocByName = (name) => {
+        const target = normalizeDocIdentity(name);
+        if (!target) return null;
+        return ragTreeDocuments.find((item) => {
+          const label = getTreeDocLabel(item);
+          const docName = String(item?.doc_name || "").trim();
+          return normalizeDocIdentity(label) === target || normalizeDocIdentity(docName) === target;
+        }) || null;
+      };
+
+      const getSelectedTreeDoc = () => getTreeDocByName(selectedRagDocName);
+
+      const renderRagDocMeta = () => {
+        if (!ragDocMeta) return;
+        ragDocMeta.innerHTML = "";
+        const doc = getSelectedTreeDoc();
+        if (!doc) {
+          const empty = document.createElement("div");
+          empty.className = "rag-empty-state";
+          empty.textContent = t("ragDocMetaEmpty");
+          ragDocMeta.appendChild(empty);
+          return;
+        }
+
+        const heading = document.createElement("div");
+        heading.className = "rag-doc-meta-heading";
+        heading.textContent = String(doc.title || "").trim() || getTreeDocLabel(doc);
+        ragDocMeta.appendChild(heading);
+
+        const grid = document.createElement("div");
+        grid.className = "rag-doc-meta-grid";
+        const fields = [
+          [t("ragDocNameLabel"), String(doc.doc_name || selectedRagDocName || "").trim() || getTreeDocLabel(doc)],
+          [t("ragDocPages"), String(doc.page_count ?? 0)],
+          [t("ragDocChunks"), String(doc.chunk_count ?? 0)],
+          [t("ragDocSections"), String(doc.catalog_count ?? 0)],
+          [t("ragDocPagination"), String(doc.pagination_mode || "page-tree")],
+        ];
+        fields.forEach(([label, value]) => {
+          const item = document.createElement("div");
+          item.className = "rag-doc-meta-item";
+          const labelNode = document.createElement("div");
+          labelNode.className = "rag-doc-meta-label";
+          labelNode.textContent = label;
+          const valueNode = document.createElement("div");
+          valueNode.className = "rag-doc-meta-value";
+          valueNode.textContent = value;
+          item.appendChild(labelNode);
+          item.appendChild(valueNode);
+          grid.appendChild(item);
+        });
+        ragDocMeta.appendChild(grid);
+
+        const keywords = Array.isArray(doc.keywords) ? doc.keywords.filter(Boolean) : [];
+        if (keywords.length) {
+          const label = document.createElement("div");
+          label.className = "rag-doc-meta-label";
+          label.textContent = t("ragDocKeywords");
+          ragDocMeta.appendChild(label);
+
+          const chips = document.createElement("div");
+          chips.className = "rag-doc-keywords";
+          keywords.forEach((keyword) => {
+            const chip = document.createElement("span");
+            chip.className = "rag-chip";
+            chip.textContent = String(keyword || "").trim();
+            chips.appendChild(chip);
+          });
+          ragDocMeta.appendChild(chips);
+        }
+      };
+
+      const renderRagCatalog = (rows = ragCatalogRows) => {
+        ragCatalogRows = Array.isArray(rows) ? rows : [];
+        if (!ragCatalogList) return;
+        ragCatalogList.innerHTML = "";
+        if (!ragCatalogRows.length) {
+          const empty = document.createElement("div");
+          empty.className = "rag-empty-state";
+          empty.textContent = t("ragCatalogEmpty");
+          ragCatalogList.appendChild(empty);
+          return;
+        }
+
+        ragCatalogRows.forEach((item) => {
+          const row = document.createElement("div");
+          row.className = "rag-catalog-item";
+
+          const info = document.createElement("div");
+          const title = document.createElement("div");
+          title.className = "rag-catalog-item-title";
+          title.textContent = String(item.title || "").trim() || "(untitled)";
+          title.style.paddingLeft = `${Math.max(0, Number(item.level || 1) - 1) * 14}px`;
+          info.appendChild(title);
+
+          const metaParts = [];
+          if (item.category) metaParts.push(String(item.category));
+          if (item.parent_title) metaParts.push(String(item.parent_title));
+          if (metaParts.length) {
+            const meta = document.createElement("div");
+            meta.className = "rag-catalog-item-meta";
+            meta.textContent = metaParts.join(" · ");
+            info.appendChild(meta);
+          }
+
+          const page = document.createElement("div");
+          page.className = "rag-catalog-page";
+          const startPage = Number(item.page || 0);
+          const endPage = Number(item.end_page || item.page || 0);
+          page.textContent = startPage > 0
+            ? (endPage > startPage ? `${startPage}-${endPage}` : `${startPage}`)
+            : "-";
+
+          row.appendChild(info);
+          row.appendChild(page);
+          ragCatalogList.appendChild(row);
+        });
+      };
+
+      const renderRagRetrieveResults = (payload = ragRetrievePayload) => {
+        ragRetrievePayload = payload && typeof payload === "object" ? payload : null;
+        if (!ragRetrieveResults) return;
+        ragRetrieveResults.innerHTML = "";
+
+        const results = Array.isArray(ragRetrievePayload?.results)
+          ? ragRetrievePayload.results
+          : [];
+        if (!results.length) {
+          const empty = document.createElement("div");
+          empty.className = "rag-empty-state";
+          empty.textContent = t("ragRetrieveEmpty");
+          ragRetrieveResults.appendChild(empty);
+          return;
+        }
+
+        results.forEach((item, index) => {
+          const row = document.createElement("div");
+          row.className = "rag-result-item";
+
+          const head = document.createElement("div");
+          head.className = "rag-result-head";
+          const title = document.createElement("div");
+          title.className = "rag-result-title";
+          title.textContent = String(item.section_path || item.doc_name || `Result ${index + 1}`);
+          head.appendChild(title);
+
+          const scoreValue = Number(item.score || 0);
+          if (Number.isFinite(scoreValue) && scoreValue > 0) {
+            const score = document.createElement("div");
+            score.className = "rag-result-score";
+            score.textContent = scoreValue.toFixed(3);
+            head.appendChild(score);
+          }
+          row.appendChild(head);
+
+          const meta = document.createElement("div");
+          meta.className = "rag-result-meta";
+          const pageStart = Number(item.page_start || item.page || 0);
+          const pageEnd = Number(item.page_end || item.page_start || item.page || 0);
+          const pageText = pageStart > 0
+            ? (pageEnd > pageStart ? `${pageStart}-${pageEnd}` : `${pageStart}`)
+            : "-";
+          meta.textContent = [
+            String(item.doc_name || "").trim(),
+            `page ${pageText}`,
+          ].filter(Boolean).join(" · ");
+          row.appendChild(meta);
+
+          const text = document.createElement("div");
+          text.className = "rag-result-text";
+          text.textContent = String(item.text || "").trim();
+          row.appendChild(text);
+
+          ragRetrieveResults.appendChild(row);
+        });
+      };
+
+      const populateRagRetrieveDocScope = () => {
+        if (!ragRetrieveDocScope) return;
+        const current = ragRetrieveDocScope.value;
+        ragRetrieveDocScope.innerHTML = "";
+
+        const allOption = document.createElement("option");
+        allOption.value = "";
+        allOption.textContent = t("ragRetrieveDocAll");
+        ragRetrieveDocScope.appendChild(allOption);
+
+        ragTreeDocuments.forEach((doc) => {
+          const option = document.createElement("option");
+          option.value = String(doc.doc_name || "").trim() || getTreeDocLabel(doc);
+          option.textContent = getTreeDocLabel(doc);
+          ragRetrieveDocScope.appendChild(option);
+        });
+
+        const options = Array.from(ragRetrieveDocScope.options || []).map((opt) => opt.value);
+        ragRetrieveDocScope.value = options.includes(current) ? current : "";
+      };
+
+      const syncRagRetrieveMode = () => {
+        if (!ragRetrieveMode || !ragRetrieveQuery) return;
+        const isVectorMode = ragRetrieveMode.value !== "regex";
+        ragRetrieveQuery.disabled = !isVectorMode;
+        ragRetrieveQuery.placeholder = isVectorMode
+          ? t("ragRetrieveQueryPlaceholder")
+          : t("ragRetrieveRegexModeHint");
       };
 
       const renderRagDbStats = (stats) => {
@@ -3309,9 +3880,8 @@
       };
 
       const openRagManagerModal = () => {
-        selectedRagManagerDb = "";
         if (ragDetailPane) {
-          ragDetailPane.classList.add("collapsed");
+          ragDetailPane.classList.toggle("collapsed", !selectedRagManagerDb);
         }
         if (ragDbList) {
           const dbs = Array.from(ragDbSelect?.options || []).map((opt) => opt.value);
@@ -3319,6 +3889,14 @@
         }
         ragManagerModal.classList.add("visible");
         ragManagerModal.setAttribute("aria-hidden", "false");
+      };
+
+      const openRagManagerFromHeader = async () => {
+        openRagManagerModal();
+        if (ragStatus) {
+          ragStatus.textContent = t("ragLoading");
+        }
+        await loadRagDbOptions(selectedRagManagerDb || (ragDbSelect && ragDbSelect.value ? ragDbSelect.value : ""));
       };
 
       const closeSettingsModal = () => {
@@ -3332,9 +3910,10 @@
       };
 
       const openRagUseModal = async () => {
-        await loadRagDbOptions(ragDbSelect && ragDbSelect.value ? ragDbSelect.value : "");
         ragUseModal.classList.add("visible");
         ragUseModal.setAttribute("aria-hidden", "false");
+        renderRagUseDbList(Array.from(ragDbSelect?.options || []).map((opt) => opt.value));
+        await loadRagDbOptions(ragDbSelect && ragDbSelect.value ? ragDbSelect.value : "", { loadDocs: false });
         renderRagUseDbList(Array.from(ragDbSelect?.options || []).map((opt) => opt.value));
       };
 
@@ -3429,15 +4008,31 @@
           row.className = `rag-doc-item${item.name === selectedRagDocName ? " active" : ""}${item.uploading ? " uploading" : ""}`;
           row.setAttribute("role", "option");
           row.setAttribute("aria-selected", item.name === selectedRagDocName ? "true" : "false");
-          row.addEventListener("click", () => {
+          row.addEventListener("click", async () => {
             selectedRagDocName = item.name;
             renderRagDocList();
+            renderRagDocMeta();
+            await loadRagDocCatalog(getSelectedRagDb(), item.name);
           });
 
           const name = document.createElement("div");
           name.className = "rag-doc-name";
           name.textContent = item.name;
           row.appendChild(name);
+
+          const summary = getTreeDocByName(item.name);
+          if (summary) {
+            const meta = document.createElement("div");
+            meta.className = "rag-doc-submeta";
+            const metaParts = [];
+            if (Number(summary.page_count || 0) > 0) metaParts.push(`${t("ragDocPages")}: ${summary.page_count}`);
+            if (Number(summary.catalog_count || 0) > 0) metaParts.push(`${t("ragDocSections")}: ${summary.catalog_count}`);
+            if (String(summary.pagination_mode || "").trim()) metaParts.push(String(summary.pagination_mode));
+            meta.textContent = metaParts.join(" · ");
+            if (meta.textContent) {
+              row.appendChild(meta);
+            }
+          }
 
           if (item.uploading) {
             const track = document.createElement("div");
@@ -3452,6 +4047,40 @@
           ragDocSelect.appendChild(row);
         });
       };
+
+      async function loadRagDocCatalog(dbName, docName) {
+        const requestId = ++ragCatalogReqId;
+        if (!dbName || !docName) {
+          if (requestId !== ragCatalogReqId) return;
+          renderRagCatalog([]);
+          return;
+        }
+
+        const summary = getTreeDocByName(docName);
+        const resolvedDocName = String(summary?.doc_name || docName || "").trim();
+        if (!resolvedDocName) {
+          if (requestId !== ragCatalogReqId) return;
+          renderRagCatalog([]);
+          return;
+        }
+
+        try {
+          const response = await fetch(
+            `/api/rag/dbs/${encodeURIComponent(dbName)}/tree/catalog?doc_name=${encodeURIComponent(resolvedDocName)}`
+          );
+          if (requestId !== ragCatalogReqId) return;
+          if (!response.ok) {
+            renderRagCatalog([]);
+            return;
+          }
+          const data = await response.json();
+          if (requestId !== ragCatalogReqId) return;
+          renderRagCatalog(Array.isArray(data.catalog) ? data.catalog : []);
+        } catch {
+          if (requestId !== ragCatalogReqId) return;
+          renderRagCatalog([]);
+        }
+      }
 
       const renderRagUseDbList = (dbs) => {
         if (!ragUseDbList) return;
@@ -3560,6 +4189,62 @@
           }
         });
       };
+
+      function clearRagRetrieveForm() {
+        if (ragRetrieveQuery) ragRetrieveQuery.value = "";
+        if (ragRetrieveRegex) ragRetrieveRegex.value = "";
+        if (ragRetrieveSection) ragRetrieveSection.value = "";
+        if (ragRetrievePageStart) ragRetrievePageStart.value = "";
+        if (ragRetrievePageEnd) ragRetrievePageEnd.value = "";
+        if (ragRetrieveLimit) ragRetrieveLimit.value = "10";
+        if (ragRetrieveDocScope) ragRetrieveDocScope.value = "";
+        renderRagRetrieveResults(null);
+        syncRagRetrieveMode();
+      }
+
+      async function runRagTreeRetrieve() {
+        const dbName = getSelectedRagDb();
+        if (!dbName) {
+          ragStatus.textContent = t("ragNoDb");
+          return;
+        }
+
+        const limitValue = Math.max(1, Math.min(50, Number(ragRetrieveLimit?.value || 10) || 10));
+        const pageStartValue = Number(ragRetrievePageStart?.value || 0);
+        const pageEndValue = Number(ragRetrievePageEnd?.value || 0);
+        const payload = {
+          query: ragRetrieveMode?.value === "regex" ? "" : String(ragRetrieveQuery?.value || "").trim(),
+          doc_name: String(ragRetrieveDocScope?.value || "").trim() || null,
+          section: String(ragRetrieveSection?.value || "").trim() || null,
+          page_start: pageStartValue > 0 ? pageStartValue : null,
+          page_end: pageEndValue > 0 ? pageEndValue : null,
+          regex: String(ragRetrieveRegex?.value || "").trim() || null,
+          limit: limitValue,
+        };
+
+        const requestId = ++ragRetrieveReqId;
+        ragStatus.textContent = t("ragRetrieveRunning");
+        try {
+          const response = await fetch(`/api/rag/dbs/${encodeURIComponent(dbName)}/tree/retrieve`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (requestId !== ragRetrieveReqId) return;
+          if (!response.ok) {
+            const error = await response.text();
+            ragStatus.textContent = `${t("ragRetrieveFailed")} ${error}`;
+            return;
+          }
+          const data = await response.json();
+          if (requestId !== ragRetrieveReqId) return;
+          renderRagRetrieveResults(data);
+          ragStatus.textContent = `${t("ragSuccess")} (${data.count || 0})`;
+        } catch (err) {
+          if (requestId !== ragRetrieveReqId) return;
+          ragStatus.textContent = `${t("ragRetrieveFailed")} ${err}`;
+        }
+      }
 
       const updateRagSelection = async (dbNames, enabled) => {
         ragStatus.textContent = t("ragBuilding");
@@ -3742,10 +4427,7 @@
         });
       }
       if (ragManagerHeaderToggle) {
-        ragManagerHeaderToggle.addEventListener("click", async () => {
-          await loadRagDbOptions(ragDbSelect && ragDbSelect.value ? ragDbSelect.value : "");
-          openRagManagerModal();
-        });
+        ragManagerHeaderToggle.addEventListener("click", openRagManagerFromHeader);
       }
       if (ragQuickSelect) {
         ragQuickSelect.addEventListener("click", openRagUseModal);
@@ -3765,9 +4447,12 @@
       if (ragDocDeleteBtn) {
         ragDocDeleteBtn.addEventListener("click", deleteRagDoc);
       }
+      if (ragDocBuildBtn) {
+        ragDocBuildBtn.addEventListener("click", rebuildSelectedRagDb);
+      }
       if (ragDocRefreshBtn) {
         ragDocRefreshBtn.addEventListener("click", () => {
-          const dbName = ragDbSelect && ragDbSelect.value ? ragDbSelect.value : "";
+          const dbName = getSelectedRagDb();
           loadRagDbDocs(dbName);
         });
       }
@@ -3783,6 +4468,15 @@
           uploadDocsToSelectedDb(event.target.files);
           ragDbDocInput.value = "";
         });
+      }
+      if (ragRetrieveMode) {
+        ragRetrieveMode.addEventListener("change", syncRagRetrieveMode);
+      }
+      if (ragRetrieveRunBtn) {
+        ragRetrieveRunBtn.addEventListener("click", runRagTreeRetrieve);
+      }
+      if (ragRetrieveClearBtn) {
+        ragRetrieveClearBtn.addEventListener("click", clearRagRetrieveForm);
       }
 
       messageInput.addEventListener("paste", (event) => {
@@ -3805,6 +4499,7 @@
 
       messageInput.addEventListener("input", autoResizeMessageInput);
       autoResizeMessageInput();
+      syncRagRetrieveMode();
 
       const renderMcpLinks = () => {
         mcpList.innerHTML = "";
@@ -3831,8 +4526,9 @@
         });
       };
 
-      const loadRagDbOptions = async (currentName) => {
+      const loadRagDbOptions = async (currentName, opts = {}) => {
         if (!ragDbSelect) return;
+        const loadDocs = opts && opts.loadDocs !== false;
         const requestId = ++ragDbOptionsReqId;
         ragDbSelect.innerHTML = "";
         try {
@@ -3846,35 +4542,41 @@
           const data = await response.json();
           if (requestId !== ragDbOptionsReqId) return;
           const databases = Array.isArray(data.databases) ? data.databases : [];
-          const options = new Set(databases);
-          Array.from(options).forEach((name) => {
+          const availableNames = new Set(databases);
+          Array.from(availableNames).forEach((name) => {
             const opt = document.createElement("option");
             opt.value = name;
             opt.textContent = name;
             ragDbSelect.appendChild(opt);
           });
-          if (currentName && options.has(currentName)) {
+          if (currentName && availableNames.has(currentName)) {
             ragDbSelect.value = currentName;
           } else if (ragDbSelect.options.length) {
             ragDbSelect.value = ragDbSelect.options[0].value;
           } else {
             ragDbSelect.value = "";
           }
-          if (selectedRagManagerDb && !options.has(selectedRagManagerDb)) {
+          if (selectedRagManagerDb && !availableNames.has(selectedRagManagerDb)) {
             selectedRagManagerDb = "";
           }
-          selectedRagUseDbs = selectedRagUseDbs.filter((name) => options.has(name));
+          selectedRagUseDbs = selectedRagUseDbs.filter((name) => availableNames.has(name));
           persistSessionRagDbNames(getActiveSession(), selectedRagUseDbs);
           renderRagDbList(databases);
           updateRagUseMeta();
           if (ragUseModal?.classList.contains("visible")) {
-            renderRagUseDbList(Array.from(options));
+            renderRagUseDbList(Array.from(availableNames));
           }
           if (ragDetailPane) {
             ragDetailPane.classList.toggle("collapsed", !selectedRagManagerDb);
           }
-          if (requestId === ragDbOptionsReqId) {
-            await loadRagDbDocs(ragDbSelect.value || "");
+          if (loadDocs && requestId === ragDbOptionsReqId) {
+            await loadRagDbDocs(getSelectedRagDb());
+          }
+          if (requestId === ragDbOptionsReqId && ragStatus && ragManagerModal?.classList.contains("visible")) {
+            const statusText = String(ragStatus.textContent || "");
+            if (statusText === t("ragLoading")) {
+              ragStatus.textContent = "";
+            }
           }
         } catch (err) {
           if (requestId !== ragDbOptionsReqId) return;
@@ -3887,20 +4589,33 @@
         const requestId = ++ragDbDocsReqId;
         const previousSelectedDoc = selectedRagDocName;
         ragDocNames = [];
+        ragTreeDocuments = [];
+        ragCatalogRows = [];
         selectedRagDocName = previousSelectedDoc;
         renderRagDocList();
+        renderRagDocMeta();
+        renderRagCatalog([]);
+        renderRagRetrieveResults(null);
+        populateRagRetrieveDocScope();
         if (!dbName) {
           if (requestId !== ragDbDocsReqId) return;
           ragUploadingDocs = [];
           selectedRagDocName = "";
           renderRagDocList();
           renderRagDbStats(null);
+          renderRagDocMeta();
+          renderRagCatalog([]);
+          renderRagRetrieveResults(null);
+          populateRagRetrieveDocScope();
           return;
         }
         try {
           await loadRagDbStats(dbName);
           if (requestId !== ragDbDocsReqId) return;
-          const response = await fetch(`/api/rag/dbs/${encodeURIComponent(dbName)}/docs`);
+          const [response, treeResponse] = await Promise.all([
+            fetch(`/api/rag/dbs/${encodeURIComponent(dbName)}/docs`),
+            fetch(`/api/rag/dbs/${encodeURIComponent(dbName)}/tree/documents`),
+          ]);
           if (requestId !== ragDbDocsReqId) return;
           if (!response.ok) {
             const error = await response.text();
@@ -3909,6 +4624,13 @@
           }
           const data = await response.json();
           if (requestId !== ragDbDocsReqId) return;
+          if (treeResponse.ok) {
+            const treeData = await treeResponse.json();
+            if (requestId !== ragDbDocsReqId) return;
+            ragTreeDocuments = Array.isArray(treeData.documents) ? treeData.documents : [];
+          } else {
+            ragTreeDocuments = [];
+          }
           const docs = Array.isArray(data.documents) ? data.documents : [];
           ragDocNames = docs;
           ragUploadingDocs = ragUploadingDocs.filter((item) => !ragDocNames.includes(item.name));
@@ -3916,8 +4638,39 @@
             selectedRagDocName = ragDocNames.length ? ragDocNames[0] : "";
           }
           renderRagDocList();
+          renderRagDocMeta();
+          populateRagRetrieveDocScope();
+          if (selectedRagDocName) {
+            await loadRagDocCatalog(dbName, selectedRagDocName);
+          } else {
+            renderRagCatalog([]);
+          }
         } catch (err) {
           if (requestId !== ragDbDocsReqId) return;
+          ragStatus.textContent = `${t("ragFail")} ${err}`;
+        }
+      }
+
+      async function rebuildSelectedRagDb() {
+        const dbName = getSelectedRagDb();
+        if (!dbName) {
+          ragStatus.textContent = t("ragNoDb");
+          return;
+        }
+        try {
+          ragStatus.textContent = t("ragBuilding");
+          const response = await fetch(`/api/rag/dbs/${encodeURIComponent(dbName)}/build`, {
+            method: "POST",
+          });
+          if (!response.ok) {
+            const error = await response.text();
+            ragStatus.textContent = `${t("ragFail")} ${error}`;
+            return;
+          }
+          const data = await response.json();
+          await loadRagDbDocs(dbName);
+          ragStatus.textContent = `${t("ragSuccess")} (${data.documents || 0})`;
+        } catch (err) {
           ragStatus.textContent = `${t("ragFail")} ${err}`;
         }
       }

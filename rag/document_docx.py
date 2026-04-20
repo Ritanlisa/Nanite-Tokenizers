@@ -200,29 +200,14 @@ class DocxRAGDocument(RAG_DB_Document):
         )
 
         leaf_page_nodes = self.split_mono_pages_by_section_markers(physical_page_nodes, tree_ranges)
-        chunks: List[Document] = []
-        for leaf_index, leaf_page in enumerate(leaf_page_nodes, start=1):
-            leaf_meta = dict(getattr(leaf_page, "metadata", {}) or {})
-            leaf_page_no = int(self.coerce_page_number(leaf_meta.get("page")) or leaf_index)
-            for chunk_idx, chunk_text in enumerate(self._split_text_chunks(str(getattr(leaf_page, "markdown_text", "") or "")), start=1):
-                if not str(chunk_text or "").strip():
-                    continue
-                chunk_meta = dict(leaf_meta)
-                chunk_meta["chunk_index"] = chunk_idx
-                chunks.append(
-                    Document(
-                        text=chunk_text,
-                        metadata=chunk_meta,
-                        doc_id=f"{self.doc_name}::docx-page::{leaf_page_no}::chunk::{chunk_idx}",
-                    )
-                )
+        leaf_page_nodes = self.split_mono_pages_by_char_budget(leaf_page_nodes)
 
-            self.set_build_trace(
-                leaf_page_count=len(leaf_page_nodes),
-                physical_page_count=len(physical_page_nodes),
-            )
+        self.set_build_trace(
+            leaf_page_count=len(leaf_page_nodes),
+            physical_page_count=len(physical_page_nodes),
+        )
         self.set_page_nodes(self.build_catalog_tree(leaf_page_nodes, tree_ranges))
-        self.chunk_documents = chunks
+        self.chunk_documents = self._build_chunk_documents_from_pages(leaf_page_nodes)
         self.page_count = len(physical_page_nodes)
         self.pagination_mode = "docx-page-tree"
         self.catalog = self.catalog_payload()

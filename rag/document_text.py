@@ -29,7 +29,6 @@ class TextRAGDocument(RAG_DB_Document):
             page_texts = [self.cleaned_text.strip()]
 
         page_nodes: List[MonoPage] = []
-        chunks: List[Document] = []
         for page_idx, page_text in enumerate(page_texts, start=1):
             section_title = "Document"
             section_path = "Document"
@@ -53,19 +52,9 @@ class TextRAGDocument(RAG_DB_Document):
             node.add_page_number(page_idx)
             page_nodes.append(node)
 
-            for chunk_idx, chunk_text in enumerate(self._split_text_chunks(page_text), start=1):
-                chunk_meta = dict(page_meta)
-                chunk_meta["chunk_index"] = chunk_idx
-                chunks.append(
-                    Document(
-                        text=chunk_text,
-                        metadata=chunk_meta,
-                        doc_id=f"{self.doc_name}::text-page::{page_idx}::chunk::{chunk_idx}",
-                    )
-                )
-
-        self.set_page_nodes(page_nodes)
-        self.chunk_documents = chunks
+        leaf_page_nodes = self.split_mono_pages_by_char_budget(page_nodes)
+        self.set_page_nodes(leaf_page_nodes)
+        self.chunk_documents = self._build_chunk_documents_from_pages(leaf_page_nodes)
         self.page_count = len(page_nodes)
         self.pagination_mode = "text-page-tree"
         self.catalog = self.catalog_payload()

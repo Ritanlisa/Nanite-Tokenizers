@@ -708,6 +708,20 @@ def _selected_rag_db_names() -> list[str]:
     return names
 
 
+def _catalog_text_items(value: Any) -> list[str]:
+    items: list[str] = []
+    for item in list(value or []):
+        if isinstance(item, dict):
+            title = str(item.get("title") or "").strip()
+            if title:
+                items.append(title)
+            continue
+        text = str(item or "").strip()
+        if text:
+            items.append(text)
+    return items
+
+
 def _require_selected_rag_db() -> str | None:
     if not config.settings.ENABLE_RAG:
         return _t("RAG 功能已禁用。", "RAG is disabled.")
@@ -996,7 +1010,15 @@ class RAGDocListTool(InputSugarTool):
                 asyncio.get_event_loop().run_in_executor(None, rag_engine.list_documents),
                 timeout=config.settings.RAG_TOOL_TIMEOUT,
             )
-            payload = _to_json_safe(docs)
+            normalized_docs: list[dict[str, Any]] = []
+            for item in list(docs or []):
+                if not isinstance(item, dict):
+                    continue
+                row = dict(item)
+                row["catalog"] = _catalog_text_items(row.get("catalog"))
+                normalized_docs.append(row)
+
+            payload = _to_json_safe(normalized_docs)
             pruned = _prune_empty_fields(payload)
             if pruned is _EMPTY:
                 pruned = []
@@ -1039,10 +1061,9 @@ class RAGDocCatalogTool(InputSugarTool):
                 timeout=config.settings.RAG_TOOL_TIMEOUT,
             )
             payload = _to_json_safe(catalog)
-            pruned = _prune_empty_fields(payload)
-            if pruned is _EMPTY:
-                pruned = []
-            output_text = json.dumps(pruned, ensure_ascii=False)
+            if not isinstance(payload, list):
+                payload = []
+            output_text = json.dumps(payload, ensure_ascii=False)
             return output_text
         except asyncio.TimeoutError:
             output_text = _t("获取目录超时。", "Fetching catalog timed out.")

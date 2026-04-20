@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import logging
@@ -23,7 +24,6 @@ from llama_index.core import (
     VectorStoreIndex,
     load_index_from_storage,
 )
-from llama_index.core.node_parser import SentenceSplitter, TokenTextSplitter
 from llama_index.core.postprocessor import LLMRerank, SentenceTransformerRerank
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.retrievers import VectorIndexRetriever
@@ -42,9 +42,11 @@ from exceptions import APIThrottlingError, QueryTimeoutError, RAGError
 from monitoring import rag_cache_hit_ratio, rag_query_count, rag_query_latency
 from rag.documents import (
     RAG_DB_Document,
+    chunk_documents_from_rag_documents,
     load_chunk_documents_from_paths,
     load_chunk_documents_from_data_dir,
     load_chunk_documents_from_persist_dir,
+    load_rag_documents_from_paths,
     load_rag_documents_from_persist_dir,
     stable_doc_id,
 )
@@ -67,6 +69,96 @@ SUPPORTED_RAG_EXTENSIONS = {
 }
 INDEX_METADATA_MAX_VALUE_LENGTH = 320
 INDEX_METADATA_DROP_KEYS = {"native_catalog", "style_catalog", "font_catalog"}
+DOC_TREE_CACHE_FILENAME = "doc_tree_cache.json"
+DOC_TREE_CACHE_VERSION = 1
+
+
+def _lock_shared_file(handle) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle, fcntl.LOCK_SH)
+
+
+def _lock_exclusive_file(handle) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle, fcntl.LOCK_EX)
+
+
+def _unlock_file(handle) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _read_json_file_locked(path: str, default: Any) -> Any:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a+", encoding="utf-8") as handle:
+        _lock_shared_file(handle)
+        handle.seek(0)
+        try:
+            raw = handle.read()
+            if not str(raw).strip():
+                return copy.deepcopy(default)
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return copy.deepcopy(default)
+        finally:
+            _unlock_file(handle)
+
+
+def _write_json_file_locked(path: str, payload: Any) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        _lock_exclusive_file(handle)
+        try:
+            json.dump(payload, handle, ensure_ascii=False)
+        finally:
+            _unlock_file(handle)
+
+
+def _json_safe_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(item) for item in value]
+    if isinstance(value, bytes):
+        return {"type": "bytes", "length": len(value)}
+
+    to_payload = getattr(value, "to_payload", None)
+    if callable(to_payload):
+        try:
+            return _json_safe_value(to_payload())
+        except TypeError:
+            pass
+        except Exception:
+            return str(value)
+
+    item = getattr(value, "item", None)
+    if callable(item):
+        try:
+            return _json_safe_value(item())
+        except Exception:
+            pass
+
+    return str(value)
 
 
 def _should_use_openai_embedding(model_name: str, api_base: Optional[str]) -> bool:
@@ -518,11 +610,14 @@ class RAGEngine:
     def _sanitize_documents_for_indexing(self, docs: List[Document]) -> List[Document]:
         sanitized_docs: List[Document] = []
         for doc in docs:
+            text = str(doc.text or "")
+            if not text.strip():
+                continue
             sanitized_docs.append(
                 Document(
-                    text=doc.text,
+                    text=text,
                     metadata=self._sanitize_metadata_for_indexing(dict(doc.metadata or {})),
-                    doc_id=doc.doc_id,
+                    doc_id=doc.doc_id or stable_doc_id(doc),
                 )
             )
         return sanitized_docs
@@ -613,6 +708,252 @@ class RAGEngine:
         else:
             self.cache[key] = value
 
+    def _doc_tree_cache_path(self) -> str:
+        return os.path.join(config.get_rag_persist_dir(), DOC_TREE_CACHE_FILENAME)
+
+    @staticmethod
+    def _default_doc_tree_cache() -> Dict[str, Any]:
+        return {"version": DOC_TREE_CACHE_VERSION, "documents": []}
+
+    def _load_doc_tree_cache(self) -> Dict[str, Any]:
+        payload = _read_json_file_locked(
+            self._doc_tree_cache_path(),
+            self._default_doc_tree_cache(),
+        )
+        if not isinstance(payload, dict):
+            return self._default_doc_tree_cache()
+        documents = [
+            dict(item)
+            for item in list(payload.get("documents") or [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "version": int(payload.get("version") or DOC_TREE_CACHE_VERSION),
+            "documents": documents,
+        }
+
+    def _save_doc_tree_cache(self, payload: Dict[str, Any]) -> None:
+        documents = [
+            dict(item)
+            for item in list((payload or {}).get("documents") or [])
+            if isinstance(item, dict)
+        ]
+        _write_json_file_locked(
+            self._doc_tree_cache_path(),
+            _json_safe_value({"version": DOC_TREE_CACHE_VERSION, "documents": documents}),
+        )
+
+    @staticmethod
+    def _sort_doc_tree_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return sorted(
+            entries,
+            key=lambda item: (
+                str(item.get("title") or ""),
+                str(item.get("doc_name") or ""),
+            ),
+        )
+
+    @staticmethod
+    def _build_doc_tree_search_rows(rag_doc: RAG_DB_Document) -> List[Dict[str, Any]]:
+        rows = rag_doc.retrieve_by_regex(
+            compiled_regex=None,
+            section=None,
+            page_start=None,
+            page_end=None,
+            chunk=None,
+        )
+        cached_rows: List[Dict[str, Any]] = []
+        for row in list(rows or []):
+            if not isinstance(row, dict):
+                continue
+            metadata = dict(row.get("metadata") or {})
+            doc_name = str(row.get("doc_name") or metadata.get("doc_name") or rag_doc.doc_name).strip()
+            section_path = str(row.get("section_path") or metadata.get("section_path") or "").strip()
+            section_id = str(metadata.get("section_id") or "").strip()
+            parent_section_id = str(metadata.get("parent_section_id") or "").strip()
+            page = RAG_DB_Document.coerce_page_number(row.get("page"))
+            page_start = RAG_DB_Document.coerce_page_number(row.get("page_start"))
+            page_end = RAG_DB_Document.coerce_page_number(row.get("page_end"))
+            cached_rows.append(
+                {
+                    "text": str(row.get("text") or ""),
+                    "doc_name": doc_name,
+                    "section_path": section_path,
+                    "section_id": section_id,
+                    "parent_section_id": parent_section_id or None,
+                    "page": page,
+                    "page_start": page_start,
+                    "page_end": page_end,
+                    "metadata": {
+                        "doc_name": doc_name,
+                        "section_path": section_path,
+                        "section_id": section_id,
+                        "parent_section_id": parent_section_id or None,
+                        "page": page,
+                        "section_start_page": page_start,
+                        "section_end_page": page_end,
+                    },
+                }
+            )
+        return cached_rows
+
+    def _build_doc_tree_cache_entries(self, rag_docs: List[RAG_DB_Document]) -> List[Dict[str, Any]]:
+        entries_by_doc_name: Dict[str, Dict[str, Any]] = {}
+        for rag_doc in rag_docs:
+            payload = rag_doc.list_payload()
+            doc_name = str(payload.get("doc_name") or "").strip()
+            if not doc_name:
+                continue
+            entries_by_doc_name[doc_name] = {
+                "doc_name": doc_name,
+                "title": str(payload.get("title") or "").strip(),
+                "page_count": int(payload.get("page_count") or 0),
+                "chunk_count": int(payload.get("chunk_count") or 0),
+                "pagination_mode": str(payload.get("pagination_mode") or "").strip(),
+                "catalog": list(rag_doc.catalog_payload() or []),
+                "search_rows": self._build_doc_tree_search_rows(rag_doc),
+                "tree": rag_doc.to_payload(),
+                "keywords": [],
+                "build_trace": rag_doc.get_build_trace(),
+            }
+        entries = self._sort_doc_tree_entries(list(entries_by_doc_name.values()))
+        self._refresh_doc_tree_keywords(entries)
+        return entries
+
+    def _refresh_doc_tree_keywords(self, entries: List[Dict[str, Any]]) -> None:
+        texts_by_doc_name: Dict[str, List[str]] = {}
+        for entry in entries:
+            doc_name = str(entry.get("doc_name") or "").strip()
+            if not doc_name:
+                continue
+            title = str(entry.get("title") or "").strip()
+            tree_payload = dict(entry.get("tree") or {}) if isinstance(entry.get("tree"), dict) else {}
+            markdown_text = str(tree_payload.get("markdown_text") or "").strip()
+            keyword_text_parts: List[str] = []
+            if title:
+                keyword_text_parts.append(title)
+            if markdown_text:
+                keyword_text_parts.append(markdown_text)
+            if keyword_text_parts:
+                texts_by_doc_name.setdefault(doc_name, []).append("\n".join(keyword_text_parts))
+        keyword_map = extract_document_keywords(texts_by_doc_name, top_k=50) if texts_by_doc_name else {}
+        for entry in entries:
+            doc_name = str(entry.get("doc_name") or "").strip()
+            entry["keywords"] = [
+                str(keyword).strip()
+                for keyword in list(keyword_map.get(doc_name) or [])
+                if str(keyword).strip()
+            ]
+
+    def _persist_doc_tree_cache_from_rag_docs(
+        self,
+        rag_docs: List[RAG_DB_Document],
+        *,
+        replace: bool,
+    ) -> None:
+        new_entries = self._build_doc_tree_cache_entries(rag_docs)
+        if replace:
+            self._save_doc_tree_cache({"version": DOC_TREE_CACHE_VERSION, "documents": new_entries})
+            return
+
+        existing_payload = self._load_doc_tree_cache()
+        by_doc_name: Dict[str, Dict[str, Any]] = {}
+        for item in list(existing_payload.get("documents") or []):
+            if not isinstance(item, dict):
+                continue
+            doc_name = str(item.get("doc_name") or "").strip()
+            if not doc_name:
+                continue
+            by_doc_name[doc_name] = dict(item)
+        for item in new_entries:
+            doc_name = str(item.get("doc_name") or "").strip()
+            if not doc_name:
+                continue
+            by_doc_name[doc_name] = dict(item)
+        merged_entries = self._sort_doc_tree_entries(list(by_doc_name.values()))
+        self._refresh_doc_tree_keywords(merged_entries)
+        self._save_doc_tree_cache({"version": DOC_TREE_CACHE_VERSION, "documents": merged_entries})
+
+    def _load_doc_tree_entries(self) -> List[Dict[str, Any]]:
+        payload = self._load_doc_tree_cache()
+        return [
+            dict(item)
+            for item in list(payload.get("documents") or [])
+            if isinstance(item, dict)
+        ]
+
+    @staticmethod
+    def _filter_doc_tree_search_rows(
+        rows: List[Dict[str, Any]],
+        *,
+        compiled_regex: Optional[re.Pattern[str]],
+        section: Optional[str],
+        page_start: Optional[int],
+        page_end: Optional[int],
+        chunk: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        section_norm = (section or "").strip().lower()
+        chunk_norm = (chunk or "").strip().lower()
+        page_filtered = page_start is not None or page_end is not None
+        filtered: List[Dict[str, Any]] = []
+        for raw_row in list(rows or []):
+            if not isinstance(raw_row, dict):
+                continue
+            row = dict(raw_row)
+            text = str(row.get("text") or "").strip()
+            if not text:
+                continue
+            metadata = dict(row.get("metadata") or {})
+            section_path = str(row.get("section_path") or metadata.get("section_path") or "").strip()
+            if section_norm and section_norm not in section_path.lower():
+                continue
+            if chunk_norm and chunk_norm not in text.lower():
+                continue
+            if compiled_regex and not compiled_regex.search(text):
+                continue
+
+            candidate_start = RAG_DB_Document.coerce_page_number(row.get("page_start"))
+            candidate_end = RAG_DB_Document.coerce_page_number(row.get("page_end"))
+            node_page = RAG_DB_Document.coerce_page_number(row.get("page")) or candidate_start or candidate_end
+
+            if page_filtered:
+                if candidate_start is None or candidate_end is None:
+                    continue
+                if page_start is not None and candidate_end < page_start:
+                    continue
+                if page_end is not None and candidate_start > page_end:
+                    continue
+
+            doc_name = str(row.get("doc_name") or metadata.get("doc_name") or "").strip()
+            section_id = str(row.get("section_id") or metadata.get("section_id") or "").strip()
+            parent_section_id = str(
+                row.get("parent_section_id") or metadata.get("parent_section_id") or ""
+            ).strip()
+            normalized_metadata = dict(metadata)
+            normalized_metadata.setdefault("doc_name", doc_name)
+            normalized_metadata.setdefault("section_path", section_path)
+            normalized_metadata.setdefault("section_id", section_id)
+            if parent_section_id:
+                normalized_metadata.setdefault("parent_section_id", parent_section_id)
+            normalized_metadata.setdefault("page", node_page)
+            normalized_metadata.setdefault("section_start_page", candidate_start)
+            normalized_metadata.setdefault("section_end_page", candidate_end)
+            filtered.append(
+                {
+                    "score": 0.0,
+                    "text": text[:1400],
+                    "doc_name": doc_name,
+                    "section_path": section_path or None,
+                    "page": node_page,
+                    "page_start": candidate_start,
+                    "page_end": candidate_end,
+                    "section_id": section_id,
+                    "parent_section_id": parent_section_id or None,
+                    "metadata": normalized_metadata,
+                }
+            )
+        return filtered
+
     def _clear_cache(self) -> None:
         if isinstance(self.cache, Redis):
             try:
@@ -693,38 +1034,32 @@ class RAGEngine:
         self._build_index_from_docs(docs)
 
     def _build_index_for_selected_db(self) -> bool:
-        docs = load_chunk_documents_from_persist_dir(
+        rag_docs = load_rag_documents_from_persist_dir(
             config.get_rag_persist_dir(),
             SUPPORTED_RAG_EXTENSIONS,
         )
+        if not rag_docs:
+            self.index = None
+            self.query_engine = None
+            self._save_doc_tree_cache(self._default_doc_tree_cache())
+            self._save_doc_registry(set())
+            return False
+        docs = chunk_documents_from_rag_documents(rag_docs)
         if not docs:
             self.index = None
             self.query_engine = None
+            self._persist_doc_tree_cache_from_rag_docs(rag_docs, replace=True)
             self._save_doc_registry(set())
             return False
         self._build_index_from_docs(docs)
+        self._persist_doc_tree_cache_from_rag_docs(rag_docs, replace=True)
         return True
 
     @profile_if_enabled
     def _build_index_from_docs(self, docs: List[Document]) -> None:
         docs = self._sanitize_documents_for_indexing(docs)
-        parser = SentenceSplitter.from_defaults(
-            chunk_size=config.settings.CHUNK_SIZE,
-            chunk_overlap=config.settings.CHUNK_OVERLAP,
-        )
-        try:
-            nodes = parser.get_nodes_from_documents(docs)
-        except RecursionError:
-            logger.warning("Sentence splitter recursion overflow, switching to token splitter")
-            token_parser = TokenTextSplitter.from_defaults(
-                chunk_size=config.settings.CHUNK_SIZE,
-                chunk_overlap=config.settings.CHUNK_OVERLAP,
-                separator=" ",
-                backup_separators=["\n", "。", ".", "，", ",", "；", ";", "：", ":"],
-            )
-            nodes = token_parser.get_nodes_from_documents(docs)
-        if not nodes:
-            raise ValueError("Document parsing produced no nodes")
+        if not docs:
+            raise ValueError("Document tree chunking produced no indexable nodes")
 
         persist_dir = config.get_rag_persist_dir()
 
@@ -743,7 +1078,7 @@ class RAGEngine:
                 logger.warning("Vector store fallback active; performance may be degraded")
             storage_context = StorageContext.from_defaults(vector_store=vector_store)
             self.index = VectorStoreIndex(
-                nodes,
+                docs,
                 storage_context=storage_context,
                 embed_model=self.embed_model,
                 show_progress=True,
@@ -836,38 +1171,19 @@ class RAGEngine:
         if self.index is None:
             raise RAGError("RAG index is unavailable")
 
-        existing_ids = self._get_existing_doc_ids()
+        new_docs = self._sanitize_documents_for_indexing(new_docs)
+        if not new_docs:
+            logger.info("No indexable document-tree chunks to add")
+            return
 
-        parser = SentenceSplitter.from_defaults(
-            chunk_size=config.settings.CHUNK_SIZE,
-            chunk_overlap=config.settings.CHUNK_OVERLAP,
-        )
-        token_parser = TokenTextSplitter.from_defaults(
-            chunk_size=config.settings.CHUNK_SIZE,
-            chunk_overlap=config.settings.CHUNK_OVERLAP,
-            separator=" ",
-            backup_separators=["\n", "。", ".", "，", ",", "；", ";", "：", ":"],
-        )
+        existing_ids = self._get_existing_doc_ids()
         inserted = 0
         inserted_ids: Set[str] = set()
         for doc in new_docs:
             doc_id = doc.doc_id or stable_doc_id(doc)
             if doc_id in existing_ids:
                 continue
-            insert_doc = Document(
-                text=doc.text,
-                metadata=self._sanitize_metadata_for_indexing(dict(doc.metadata or {})),
-                doc_id=doc_id,
-            )
-            try:
-                nodes = parser.get_nodes_from_documents([insert_doc])
-            except RecursionError:
-                logger.warning(
-                    "Sentence splitter recursion overflow for doc %s, fallback to token splitter",
-                    doc_id,
-                )
-                nodes = token_parser.get_nodes_from_documents([insert_doc])
-            self.index.insert_nodes(nodes)
+            self.index.insert_nodes([doc])
             inserted += 1
             inserted_ids.add(doc_id)
         if inserted:
@@ -904,10 +1220,13 @@ class RAGEngine:
 
     def add_documents_from_paths(self, paths: List[str]) -> int:
         self._ensure_db_context()
-        docs = load_chunk_documents_from_paths(paths, SUPPORTED_RAG_EXTENSIONS)
-        if not docs:
+        rag_docs = load_rag_documents_from_paths(paths, SUPPORTED_RAG_EXTENSIONS)
+        if not rag_docs:
             return 0
-        self._add_documents_incremental(docs)
+        docs = chunk_documents_from_rag_documents(rag_docs)
+        if docs:
+            self._add_documents_incremental(docs)
+        self._persist_doc_tree_cache_from_rag_docs(rag_docs, replace=False)
         return len(docs)
 
     def rebuild_index_from_paths(self, paths: List[str]) -> int:
@@ -915,13 +1234,17 @@ class RAGEngine:
         self.index = None
         self.query_engine = None
         if not paths:
+            self._save_doc_tree_cache(self._default_doc_tree_cache())
             self._save_doc_registry(set())
             return 0
-        docs = load_chunk_documents_from_paths(paths, SUPPORTED_RAG_EXTENSIONS)
+        rag_docs = load_rag_documents_from_paths(paths, SUPPORTED_RAG_EXTENSIONS)
+        docs = chunk_documents_from_rag_documents(rag_docs)
         if not docs:
+            self._persist_doc_tree_cache_from_rag_docs(rag_docs, replace=True)
             self._save_doc_registry(set())
             return 0
         self._build_index_from_docs(docs)
+        self._persist_doc_tree_cache_from_rag_docs(rag_docs, replace=True)
         return len(docs)
 
     def rebuild_index(self) -> int:
@@ -1248,11 +1571,8 @@ class RAGEngine:
             )
         self._ensure_db_context()
         limit = max(1, min(int(limit), 50))
-        rag_docs = load_rag_documents_from_persist_dir(
-            config.get_rag_persist_dir(),
-            SUPPORTED_RAG_EXTENSIONS,
-        )
-        if not rag_docs:
+        cached_entries = self._load_doc_tree_entries()
+        if not cached_entries:
             return self._empty_retrieve_result(
                 query_text=query_text,
                 section=section,
@@ -1305,9 +1625,9 @@ class RAGEngine:
         matched_doc_names: Optional[Set[str]] = None
         if doc_name is not None:
             available_doc_names = {
-                self._resolve_rag_doc_name(rag_doc)
-                for rag_doc in rag_docs
-                if self._resolve_rag_doc_name(rag_doc)
+                str(entry.get("doc_name") or "").strip()
+                for entry in cached_entries
+                if str(entry.get("doc_name") or "").strip()
             }
             matched_doc_names = RAG_DB_Document.resolve_doc_name_matches(
                 doc_name,
@@ -1325,40 +1645,49 @@ class RAGEngine:
                     doc_name=doc_name,
                 )
 
-        scoped_docs = [
-            rag_doc
-            for rag_doc in rag_docs
-            if matched_doc_names is None or self._resolve_rag_doc_name(rag_doc) in matched_doc_names
+        scoped_entries = [
+            entry
+            for entry in cached_entries
+            if matched_doc_names is None or str(entry.get("doc_name") or "").strip() in matched_doc_names
         ]
 
         results: List[Dict[str, Any]] = []
-        for rag_doc in scoped_docs:
-            candidate_doc_name = self._resolve_rag_doc_name(rag_doc)
+        for entry in scoped_entries:
+            candidate_doc_name = str(entry.get("doc_name") or "").strip()
+            rows = self._filter_doc_tree_search_rows(
+                list(entry.get("search_rows") or []),
+                compiled_regex=compiled,
+                section=section,
+                page_start=page_start,
+                page_end=page_end,
+                chunk=chunk,
+            )
             if use_vector:
                 section_scores = vector_section_scores.get(candidate_doc_name) or {}
                 if not section_scores:
                     continue
-                results.extend(
-                    rag_doc.retrieve_by_vector(
-                        query_text=query_text,
-                        section_scores=section_scores,
-                        compiled_regex=compiled,
-                        section=section,
-                        page_start=page_start,
-                        page_end=page_end,
-                        chunk=chunk,
-                    )
-                )
+                query_norm = (query_text or "").strip().lower()
+                for row in rows:
+                    metadata = dict(row.get("metadata") or {})
+                    section_id = str(row.get("section_id") or metadata.get("section_id") or "").strip()
+                    parent_section_id = str(
+                        row.get("parent_section_id") or metadata.get("parent_section_id") or ""
+                    ).strip()
+                    section_path = str(row.get("section_path") or "")
+                    text = str(row.get("text") or "")
+                    score = float(section_scores.get(section_id, 0.0))
+                    if parent_section_id:
+                        score = max(score, float(section_scores.get(parent_section_id, 0.0)))
+                    if query_norm and query_norm in text.lower():
+                        score += 0.2
+                    if section_path:
+                        score += float(section_scores.get(section_path, 0.0))
+
+                    enriched_row = dict(row)
+                    enriched_row["score"] = score
+                    results.append(enriched_row)
                 continue
-            results.extend(
-                rag_doc.retrieve_by_regex(
-                    compiled_regex=compiled,
-                    section=section,
-                    page_start=page_start,
-                    page_end=page_end,
-                    chunk=chunk,
-                )
-            )
+            results.extend(rows)
 
         results.sort(key=lambda row: row.get("score", 0.0), reverse=True)
         payload = self._empty_retrieve_result(
@@ -1425,59 +1754,61 @@ class RAGEngine:
     def list_documents(self) -> List[Dict[str, Any]]:
         """返回当前数据库中的所有文档标题（文件名）及其估计页数。"""
         self._ensure_db_context()
-        rag_docs = load_rag_documents_from_persist_dir(
-            config.get_rag_persist_dir(),
-            SUPPORTED_RAG_EXTENSIONS,
-        )
-        by_doc_name: Dict[str, Dict[str, Any]] = {}
-        texts_by_doc_name: Dict[str, List[str]] = {}
-        for rag_doc in rag_docs:
-            payload = rag_doc.list_payload()
-            doc_name = str(payload.get("doc_name") or "").strip()
-            if not doc_name:
-                continue
+        entries = self._load_doc_tree_entries()
+        if not entries:
+            docs_dir = os.path.join(config.get_rag_persist_dir(), "docs")
+            if not os.path.isdir(docs_dir):
+                return []
+            fallback: List[Dict[str, Any]] = []
+            for file_name in sorted(os.listdir(docs_dir)):
+                file_path = os.path.join(docs_dir, file_name)
+                if not os.path.isfile(file_path):
+                    continue
+                if os.path.splitext(file_name)[1].lower() not in SUPPORTED_RAG_EXTENSIONS:
+                    continue
+                fallback.append(
+                    {
+                        "doc_name": file_name,
+                        "title": file_name,
+                        "page_count": 0,
+                        "chunk_count": 0,
+                        "pagination_mode": "",
+                        "catalog": [],
+                        "keywords": [],
+                    }
+                )
+            return fallback
 
-            keyword_text_parts: List[str] = []
-            title = str(payload.get("title") or "").strip()
-            if title:
-                keyword_text_parts.append(title)
-            cleaned_text = str(getattr(rag_doc, "cleaned_text", "") or "").strip()
-            if cleaned_text:
-                keyword_text_parts.append(cleaned_text)
-            if keyword_text_parts:
-                texts_by_doc_name.setdefault(doc_name, []).append("\n".join(keyword_text_parts))
-
-            existing = by_doc_name.get(doc_name)
-            if existing is None:
-                by_doc_name[doc_name] = payload
-                continue
-            existing["page_count"] = max(
-                int(existing.get("page_count") or 0),
-                int(payload.get("page_count") or 0),
+        summaries: List[Dict[str, Any]] = []
+        for entry in entries:
+            summaries.append(
+                {
+                    "doc_name": str(entry.get("doc_name") or "").strip(),
+                    "title": str(entry.get("title") or "").strip(),
+                    "page_count": int(entry.get("page_count") or 0),
+                    "chunk_count": int(entry.get("chunk_count") or 0),
+                    "pagination_mode": str(entry.get("pagination_mode") or "").strip(),
+                    "catalog": list(entry.get("catalog") or []),
+                    "keywords": [
+                        str(keyword).strip()
+                        for keyword in list(entry.get("keywords") or [])
+                        if str(keyword).strip()
+                    ],
+                }
             )
-            existing["chunk_count"] = max(
-                int(existing.get("chunk_count") or 0),
-                int(payload.get("chunk_count") or 0),
-            )
-
-        keyword_map = extract_document_keywords(texts_by_doc_name, top_k=50)
-        for doc_name, payload in by_doc_name.items():
-            payload["keywords"] = keyword_map.get(doc_name, [])
-
-        return sorted(by_doc_name.values(), key=lambda d: str(d.get("title") or ""))
+        return self._sort_doc_tree_entries(summaries)
 
 
     def get_document_catalog(self, doc_name: str) -> List[Dict[str, Any]]:
         """返回指定文档的目录：章节路径及起始页码。"""
         self._ensure_db_context()
-        rag_docs = load_rag_documents_from_persist_dir(
-            config.get_rag_persist_dir(),
-            SUPPORTED_RAG_EXTENSIONS,
-        )
+        entries = self._load_doc_tree_entries()
+        if not entries:
+            return []
         available_doc_names = {
-            self._resolve_rag_doc_name(rag_doc)
-            for rag_doc in rag_docs
-            if self._resolve_rag_doc_name(rag_doc)
+            str(entry.get("doc_name") or "").strip()
+            for entry in entries
+            if str(entry.get("doc_name") or "").strip()
         }
         matched_doc_names = RAG_DB_Document.resolve_doc_name_matches(
             doc_name,
@@ -1487,33 +1818,36 @@ class RAGEngine:
         if not matched_doc_names:
             return []
 
-        catalog: Dict[str, Dict[str, Any]] = {}
-        for rag_doc in rag_docs:
-            candidate_doc_name = self._resolve_rag_doc_name(rag_doc)
+        catalog: List[Dict[str, Any]] = []
+        for entry in entries:
+            candidate_doc_name = str(entry.get("doc_name") or "").strip()
             if candidate_doc_name not in matched_doc_names:
                 continue
-            for item in rag_doc.catalog_payload():
-                title = str(item.get("title") or "").strip()
+            for item in list(entry.get("catalog") or []):
+                if not isinstance(item, dict):
+                    continue
+                row = dict(item)
+                title = str(row.get("title") or "").strip()
                 if not title:
                     continue
-                page = int(item.get("page") or 0)
-                end_page = max(page, int(item.get("end_page") or page))
-                existing = catalog.get(title)
-                if existing is None:
-                    catalog[title] = {
-                        "title": title,
-                        "page": page,
-                        "end_page": end_page,
-                    }
-                    continue
-                existing["page"] = min(int(existing.get("page") or page), page)
-                existing["end_page"] = max(int(existing.get("end_page") or end_page), end_page)
+                page = int(row.get("page") or 0)
+                end_page = max(page, int(row.get("end_page") or page))
+                row["title"] = title
+                row["page"] = page
+                row["end_page"] = end_page
+                row["doc_name"] = candidate_doc_name
+                row["category"] = str(row.get("category") or "").strip()
+                row["level"] = max(1, int(row.get("level") or 1))
+                row["parent_title"] = str(row.get("parent_title") or "").strip() or None
+                catalog.append(row)
 
         return sorted(
-            catalog.values(),
+            catalog,
             key=lambda item: (
+                str(item.get("doc_name") or ""),
                 int(item.get("page") or 0),
                 int(item.get("end_page") or item.get("page") or 0),
+                int(item.get("level") or 1),
                 str(item.get("title") or ""),
             ),
         )
