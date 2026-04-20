@@ -1379,6 +1379,7 @@ class RAG_DB_Document(Chapter, ABC):
                     "start": start_page,
                     "end": end_page,
                     "level": max(1, min(level, 6)),
+                    "kind": str(marker.get("kind") or "").strip(),
                 }
             )
         return ranges
@@ -2674,6 +2675,7 @@ class RAG_DB_Document(Chapter, ABC):
                 "section_end_page": item["end"],
                 "level": item["level"],
                 "order": item.get("order", idx - 1),
+                "kind": str(item.get("kind") or "").strip(),
             }
             chapters.append(Chapter(title=item["title"], metadata=chapter_meta, SubContent=[]))
 
@@ -2830,6 +2832,12 @@ class RAG_DB_Document(Chapter, ABC):
 
             if str(node.markdown_text or "").strip() or _chapter_has_local_assets(node):
                 node.SubContent = [_build_synthetic_monopage_from_chapter(node)]
+                return node
+
+            chapter_kind = str((node.metadata or {}).get("kind") or "").strip().lower()
+            if chapter_kind in {"tool_toc", "manual-toc", "native_catalog", "style_catalog", "font_catalog"}:
+                # Keep empty catalogue-origin chapter nodes as placeholders so
+                # same-page sibling entries are not dropped from final catalog.
                 return node
 
             return None

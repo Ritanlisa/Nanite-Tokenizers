@@ -89,7 +89,7 @@ class PDFRAGDocument(RAG_DB_Document):
                 if key in seen:
                     continue
                 seen.add(key)
-                markers.append({"title": title, "page": page, "level": level})
+                markers.append({"title": title, "page": page, "level": level, "kind": "tool_toc"})
         return markers
 
     @staticmethod
