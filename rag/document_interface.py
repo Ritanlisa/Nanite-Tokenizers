@@ -1718,11 +1718,23 @@ class RAG_DB_Document(Chapter, ABC):
             key = self._normalized_heading_text(title)
             if not title or not key or self._is_noise_heading_line(title):
                 continue
-            if len(key) < 2 and self._heading_level(title) is None:
+            marker_level = int(self._coerce_positive_int(marker.get("level")) or 1)
+            marker_kind = str(marker.get("kind") or "").strip().lower()
+            allow_short_key = bool(
+                marker_level >= 2
+                or marker_kind in {"tool_toc", "manual-toc", "native_catalog", "style_catalog", "font_catalog"}
+            )
+            if len(key) < 2 and self._heading_level(title) is None and not allow_short_key:
                 continue
             hit_index: Optional[int] = None
             for line_index, line_key in enumerate(normalized_lines):
                 if not line_key:
+                    continue
+                if len(key) <= 2:
+                    # Very short markers should use strict matching to avoid正文误命中。
+                    if line_key == key or (len(line_key) <= 2 and line_key.startswith(key)):
+                        hit_index = line_index
+                        break
                     continue
                 if line_key == key or line_key.startswith(key) or (len(line_key) >= 6 and key.startswith(line_key)):
                     hit_index = line_index

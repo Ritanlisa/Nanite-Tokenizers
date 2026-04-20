@@ -572,10 +572,15 @@ class PDFRAGDocument(RAG_DB_Document):
             return False
         lines = [str(line or "").strip() for line in str(page_text or "").splitlines() if str(line or "").strip()]
         for line in lines[:32]:
-            if self._heading_level(line) is None:
-                continue
             line_key = self._normalized_heading_text(self._clean_heading_title(line))
             if not line_key:
+                continue
+
+            if (len(key_full) <= 2 or len(key_core) <= 2) and len(line_key) <= 2:
+                if (key_full and line_key == key_full) or (key_core and line_key == key_core):
+                    return True
+
+            if self._heading_level(line) is None:
                 continue
             full_hit = bool(
                 key_full and (line_key == key_full or line_key.startswith(key_full) or (len(line_key) >= 8 and key_full.startswith(line_key)))
