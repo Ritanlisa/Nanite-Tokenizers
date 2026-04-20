@@ -30,6 +30,7 @@ dependencies = [
   "prometheus-client>=0.19.0",
   "PyMuPDF>=1.24.0",
   "pymupdf-layout>=1.27.1",
+  "mammoth>=1.8.0",
   "PyYAML>=6.0",
   "tqdm>=4.66.0",
   "gradio>=6.5.1",

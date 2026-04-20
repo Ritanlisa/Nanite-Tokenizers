@@ -38,7 +38,7 @@ def _sanitize_filename(name: str) -> str:
 
 
 def build_texts_by_doc_name(file_path: str) -> Dict[str, List[str]]:
-    from rag.documents import load_rag_documents_from_paths, load_single_file_document
+    from rag.documents import load_rag_documents_from_paths
 
     rag_docs = load_rag_documents_from_paths([file_path], SUPPORTED_RAG_EXTENSIONS)
 
@@ -53,31 +53,20 @@ def build_texts_by_doc_name(file_path: str) -> Dict[str, List[str]]:
         if title:
             parts.append(title)
 
-        cleaned_text = str(getattr(rag_doc, "cleaned_text", "") or "").strip()
-        if cleaned_text:
-            parts.append(cleaned_text)
+        tree_markdown = ""
+        try:
+            tree_markdown = str(rag_doc.export_markdown_from_tree() or "").strip()
+        except Exception as exc:
+            print(f"警告：文档树导出失败，doc={doc_name}: {exc}")
+            tree_markdown = ""
+        if tree_markdown:
+            parts.append(tree_markdown)
 
         if parts:
             texts_by_doc_name.setdefault(doc_name, []).append("\n".join(parts))
 
-    if texts_by_doc_name:
-        return texts_by_doc_name
-
-    # Fallback for cases where RAG_DB_Document build fails (e.g. legacy .doc path).
-    raw_doc = load_single_file_document(file_path, SUPPORTED_RAG_EXTENSIONS)
-    if raw_doc is not None:
-        metadata = dict(getattr(raw_doc, "metadata", {}) or {})
-        fallback_doc_name = str(
-            metadata.get("file_name")
-            or getattr(raw_doc, "doc_id", "")
-            or file_path
-        ).strip()
-        fallback_text = str(getattr(raw_doc, "text", "") or "").strip()
-        if fallback_doc_name and fallback_text:
-            texts_by_doc_name.setdefault(fallback_doc_name, []).append(fallback_text)
-
     if not texts_by_doc_name:
-        raise RuntimeError("文档已加载，但没有可用于关键词提取的文本")
+        raise RuntimeError("文档已加载，但文档树无可导出的 Markdown 正文")
     return texts_by_doc_name
 
 

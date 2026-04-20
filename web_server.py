@@ -5,7 +5,7 @@ import logging
 import os
 import re
 import shutil
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Optional
 
 import yaml
@@ -79,6 +79,7 @@ class RagSelectionRequest(BaseModel):
 
 class RagRetrieveRequest(BaseModel):
     query: Optional[str] = None
+    doc_name: Optional[str] = None
     section: Optional[str] = None
     page_start: Optional[int] = Field(default=None, ge=1)
     page_end: Optional[int] = Field(default=None, ge=1)
@@ -311,6 +312,79 @@ def create_app() -> FastAPI:
         settings_data["RAG_DB_NAME"] = primary
         settings_data["RAG_DB_NAMES"] = valid_selected
         _write_settings_yaml(settings_data)
+
+    @contextmanager
+    def _scoped_rag_db(name: str):
+        normalized = _normalize_db_name(name)
+        if not _is_valid_db(normalized):
+            raise HTTPException(status_code=404, detail="Database not found")
+
+        original_db_name = config.settings.RAG_DB_NAME
+        original_db_names = list(config.settings.RAG_DB_NAMES)
+        try:
+            config.settings = config.settings.update(
+                RAG_DB_NAME=normalized,
+                RAG_DB_NAMES=[normalized],
+            )
+            yield normalized
+        finally:
+            config.settings = config.settings.update(
+                RAG_DB_NAME=original_db_name,
+                RAG_DB_NAMES=original_db_names,
+            )
+
+    def _compact_tree_document_summary(item: Any) -> dict[str, object]:
+        payload = dict(item or {})
+        keywords = [str(keyword).strip() for keyword in list(payload.get("keywords") or []) if str(keyword).strip()]
+        return {
+            "doc_name": str(payload.get("doc_name") or "").strip(),
+            "title": str(payload.get("title") or "").strip(),
+            "page_count": int(payload.get("page_count") or 0),
+            "chunk_count": int(payload.get("chunk_count") or 0),
+            "pagination_mode": str(payload.get("pagination_mode") or "").strip(),
+            "catalog_count": len(list(payload.get("catalog") or [])),
+            "keywords": keywords[:12],
+        }
+
+    def _compact_catalog_rows(rows: Any) -> list[dict[str, object]]:
+        compact: list[dict[str, object]] = []
+        for item in list(rows or []):
+            row = dict(item or {})
+            compact.append(
+                {
+                    "title": str(row.get("title") or "").strip(),
+                    "page": int(row.get("page") or 0),
+                    "end_page": int(row.get("end_page") or row.get("page") or 0),
+                    "level": int(row.get("level") or 1),
+                    "category": str(row.get("category") or "").strip(),
+                    "parent_title": str(row.get("parent_title") or "").strip() or None,
+                }
+            )
+        return compact
+
+    def _compact_retrieve_payload(payload: Any) -> dict[str, object]:
+        raw = dict(payload or {})
+        compact_results: list[dict[str, object]] = []
+        for item in list(raw.get("results") or []):
+            row = dict(item or {})
+            compact_results.append(
+                {
+                    "score": float(row.get("score") or 0.0),
+                    "text": str(row.get("text") or ""),
+                    "doc_name": str(row.get("doc_name") or "").strip(),
+                    "section_path": str(row.get("section_path") or "").strip() or None,
+                    "page": row.get("page"),
+                    "page_start": row.get("page_start"),
+                    "page_end": row.get("page_end"),
+                }
+            )
+        return {
+            "query": str(raw.get("query") or ""),
+            "filters": dict(raw.get("filters") or {}),
+            "count": int(raw.get("count") or len(compact_results)),
+            "results": compact_results,
+            "timestamp": raw.get("timestamp"),
+        }
 
     @app.get("/")
     def index():
@@ -602,7 +676,7 @@ def create_app() -> FastAPI:
                     request.page_end,
                     request.regex,
                     request.chunk,
-                    None,
+                    request.doc_name,
                     request.limit,
                 )
             else:
@@ -613,7 +687,7 @@ def create_app() -> FastAPI:
                     request.page_start,
                     request.page_end,
                     request.chunk,
-                    None,
+                    request.doc_name,
                     request.limit,
                 )
         except Exception as exc:
@@ -783,6 +857,82 @@ def create_app() -> FastAPI:
         if not _is_valid_db(name):
             raise HTTPException(status_code=404, detail="Database not found")
         return _collect_db_stats(name)
+
+    @app.post("/api/rag/dbs/{db_name}/build")
+    async def rag_db_build(db_name: str):
+        name = _normalize_db_name(db_name)
+        return await rag_build(RagBuildRequest(db_name=name))
+
+    @app.get("/api/rag/dbs/{db_name}/tree/documents")
+    async def rag_db_tree_documents(db_name: str):
+        name = _normalize_db_name(db_name)
+        if not _is_valid_db(name):
+            raise HTTPException(status_code=404, detail="Database not found")
+        try:
+            with _scoped_rag_db(name):
+                documents = await asyncio.to_thread(RAGEngine().list_documents)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("RAG tree document listing failed")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {
+            "database": name,
+            "documents": [_compact_tree_document_summary(item) for item in list(documents or [])],
+        }
+
+    @app.get("/api/rag/dbs/{db_name}/tree/catalog")
+    async def rag_db_tree_catalog(db_name: str, doc_name: str):
+        name = _normalize_db_name(db_name)
+        if not _is_valid_db(name):
+            raise HTTPException(status_code=404, detail="Database not found")
+        if not str(doc_name or "").strip():
+            raise HTTPException(status_code=400, detail="doc_name is required")
+        try:
+            with _scoped_rag_db(name):
+                catalog = await asyncio.to_thread(RAGEngine().get_document_catalog, doc_name)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("RAG tree catalog load failed")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {
+            "database": name,
+            "doc_name": str(doc_name or "").strip(),
+            "catalog": _compact_catalog_rows(catalog),
+        }
+
+    @app.post("/api/rag/dbs/{db_name}/tree/retrieve")
+    async def rag_db_tree_retrieve(db_name: str, request: RagRetrieveRequest):
+        name = _normalize_db_name(db_name)
+        if not _is_valid_db(name):
+            raise HTTPException(status_code=404, detail="Database not found")
+        try:
+            with _scoped_rag_db(name):
+                engine = RAGEngine()
+                if (request.query or "").strip():
+                    result = await asyncio.to_thread(
+                        engine.vector_retrieve,
+                        request.query or "",
+                        request.section,
+                        request.page_start,
+                        request.page_end,
+                        request.regex,
+                        request.chunk,
+                        request.doc_name,
+                        request.limit,
+                    )
+                else:
+                    result = await asyncio.to_thread(
+                        engine.regex_retrieve,
+                        request.regex,
+                        request.section,
+                        request.page_start,
+                        request.page_end,
+                        request.chunk,
+                        request.doc_name,
+                        request.limit,
+                    )
+        except Exception as exc:
+            logging.getLogger(__name__).exception("RAG tree retrieval failed")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return _compact_retrieve_payload(result)
 
     @app.post("/api/rag/dbs/{db_name}/docs/upload")
     async def rag_db_docs_upload(
