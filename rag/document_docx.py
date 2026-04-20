@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from llama_index.core import Document
 
-from rag.document_interface import MonoPage, PageAssets, RAG_DB_Document
+from rag.document_interface import MonoPage, PageAssets, RAG_DB_Document, _dedupe_text_values
 from rag.preprocessor import clean_document
 
 try:
@@ -79,6 +79,7 @@ class DocxRAGDocument(RAG_DB_Document):
 
         physical_page_nodes: List[MonoPage] = []
         page_layouts = self.get_page_layouts()
+        deferred_catalog_citations: List[str] = []
         for page_idx, page_text in enumerate(page_texts, start=1):
             signal = page_signals[page_idx - 1] if page_idx - 1 < len(page_signals) else {}
             logical_page = int(signal.get("logical_page_number") or page_idx)
@@ -108,6 +109,15 @@ class DocxRAGDocument(RAG_DB_Document):
             footers = [str(x).strip() for x in list(page_layout.get("footers") or []) if str(x).strip()]
             if not footers and str(signal.get("footer_text") or "").strip():
                 footers = [str(signal.get("footer_text") or "").strip()]
+            citations = [str(x).strip() for x in list(page_layout.get("citations") or []) if str(x).strip()]
+            is_catalogue_page = self._looks_like_catalogue_page(page_text)
+            if is_catalogue_page and citations:
+                deferred_catalog_citations.extend(citations)
+                citations = []
+            elif (not is_catalogue_page) and deferred_catalog_citations:
+                # Reattach notes that were incorrectly bound to TOC pages.
+                citations = _dedupe_text_values(list(deferred_catalog_citations) + list(citations))
+                deferred_catalog_citations = []
             images = self.resolve_page_images(
                 page_text,
                 list(page_layout.get("images") or []),
@@ -117,11 +127,18 @@ class DocxRAGDocument(RAG_DB_Document):
                 page_number=page_idx,
                 page_images=images,
                 page_image_indexes=list(range(1, len(images) + 1)),
+                page_citations=citations,
             )
             page_number_hint = str(page_layout.get("page_number") or "").strip()
             if not page_number_hint:
                 page_number_hint = str(signal.get("page_number_hint") or "").strip()
-            assets = PageAssets(headers=headers, footers=footers, page_numbers=[page_number_hint] if page_number_hint else [], images=images)
+            assets = PageAssets(
+                headers=headers,
+                footers=footers,
+                citations=citations,
+                page_numbers=[page_number_hint] if page_number_hint else [],
+                images=images,
+            )
 
             page_meta: Dict[str, Any] = {
                 "doc_name": self.doc_name,

@@ -1086,10 +1086,9 @@ class RAG_DB_Document(Chapter, ABC):
         row = cls._parse_toc_entry_line(line)
         if row is None:
             return False
-        title = str(row.get("title") or "")
-        if cls._heading_level(title) is not None:
-            return True
-        return bool(re.match(r"^(?:第[一二三四五六七八九十百千万0-9]+[章节部分篇]|附录|\d+(?:\.\d+){0,5})", title))
+        # If a row can be parsed as "title + page", treat it as TOC-like.
+        # Restricting to numbered titles misses many literary catalog rows.
+        return True
 
     def _looks_like_catalogue_page(self, page_text: str) -> bool:
         lines = [line.strip() for line in str(page_text or "").splitlines() if line and line.strip()]
@@ -1121,6 +1120,8 @@ class RAG_DB_Document(Chapter, ABC):
             return min(compact_numbered.group(1).count(".") + 1, 6)
         if re.match(r"^第[一二三四五六七八九十百千万0-9]+[章节部分篇]", text):
             return 1
+        if re.match(r"^(序言|前言|引言|后记|尾记|跋|附记|后序|序章)\b", text, flags=re.IGNORECASE):
+            return 2
         if re.match(r"^附录[一二三四五六七八九十百千万0-9A-Za-z（(]", text):
             return 1
         return None
@@ -1593,11 +1594,74 @@ class RAG_DB_Document(Chapter, ABC):
                     "page": int(self._coerce_positive_int(row.get("page")) or index),
                     "headers": _dedupe_text_values(list(row.get("headers") or [])),
                     "footers": _dedupe_text_values(list(row.get("footers") or [])),
+                    "citations": _dedupe_text_values(list(row.get("citations") or [])),
                     "page_number": str(row.get("page_number") or "").strip(),
                     "images": _dedupe_image_values(list(row.get("images") or [])),
                 }
             )
         return normalized_layouts
+
+    @staticmethod
+    def _append_citations_to_markdown(markdown_text: str, citations: Optional[Sequence[str]]) -> str:
+        rows = _dedupe_text_values(list(citations or []))
+        if not rows:
+            return str(markdown_text or "").strip()
+
+        normalized: List[str] = []
+        for item in rows:
+            text = str(item or "").strip()
+            if not text:
+                continue
+            if re.match(r"^\[\^[^\]]+\]:\s*.+$", text):
+                normalized.append(text)
+            else:
+                normalized.append(f"- {text}")
+
+        if not normalized:
+            return str(markdown_text or "").strip()
+
+        block = "\n".join(normalized).strip()
+        base = str(markdown_text or "").strip()
+        heading = "参考注释"
+        if base:
+            return f"{base}\n\n{heading}:\n{block}".strip()
+        return f"{heading}:\n{block}".strip()
+
+    @staticmethod
+    def _inject_citation_markers_into_text(text: str, citations: Optional[Sequence[str]]) -> str:
+        base = str(text or "")
+        rows = [str(item or "").strip() for item in list(citations or []) if str(item or "").strip()]
+        if not base or not rows:
+            return base
+
+        # citation label map: 1 -> f1 / e1 / p1 (the full marker token after ^)
+        label_by_number: Dict[str, str] = {}
+        for row in rows:
+            match = re.match(r"^\[\^([^\]]+)\]:", row)
+            if not match:
+                continue
+            token = str(match.group(1) or "").strip()
+            num_match = re.search(r"(\d{1,3})$", token)
+            if not token or num_match is None:
+                continue
+            label_by_number[str(num_match.group(1))] = token
+
+        if not label_by_number:
+            return base
+
+        updated = str(base)
+        for number in sorted(label_by_number.keys(), key=lambda item: int(item), reverse=True):
+            token = label_by_number[number]
+            if f"[^{token}]" in updated:
+                continue
+            # Replace inline note marks like "...重要1。" => "...重要[^f1]。"
+            updated = re.sub(
+                rf"(?<=[\u4e00-\u9fffA-Za-z）】』」》\)\]]){re.escape(number)}(?=[。！？!?，,；;：:、])",
+                "[^" + token + "]",
+                updated,
+            )
+
+        return updated
 
     @staticmethod
     def _group_items_evenly(values: Sequence[Any], slots: int) -> List[List[Any]]:
@@ -1719,6 +1783,7 @@ class RAG_DB_Document(Chapter, ABC):
                     page_number=physical_page,
                     page_images=page.get_images(),
                     page_image_indexes=list(range(1, len(page.get_images()) + 1)),
+                    page_citations=list(page.assets.citations or []),
                 )
             )
             page.metadata.setdefault("physical_page", physical_page)
@@ -1735,6 +1800,7 @@ class RAG_DB_Document(Chapter, ABC):
                     page_number=physical_page,
                     page_images=page.get_images(),
                     page_image_indexes=list(range(1, len(page.get_images()) + 1)),
+                    page_citations=list(page.assets.citations or []),
                 )
             )
             page.metadata.setdefault("physical_page", physical_page)
@@ -1745,6 +1811,7 @@ class RAG_DB_Document(Chapter, ABC):
         segments: List[Dict[str, Any]] = []
         current_title = str(page_meta.get("section_title") or "").strip()
         current_path = str(page_meta.get("section_path") or current_title).strip()
+        carried_prefix_text = ""
         first_hit_index = int(hits[0].get("line_index", 0) or 0)
         if first_hit_index > 0:
             prefix_text = "\n".join(lines[:first_hit_index]).strip()
@@ -1768,21 +1835,29 @@ class RAG_DB_Document(Chapter, ABC):
                 else:
                     first_hit_path = str(first_hit.get("section_path") or "").strip().replace(">", "/")
                     if "/" in first_hit_path:
+                        # Same physical page enters a nested section: keep all prefix text with
+                        # the first nested fragment instead of creating a standalone parent node.
+                        carried_prefix_text = prefix_text
+                        prefix_text = ""
+                    else:
                         prefix_path = first_hit_path.rsplit("/", 1)[0].strip()
                         prefix_title = prefix_path.rsplit("/", 1)[-1].strip() if prefix_path else prefix_title
-                segments.append(
-                    {
-                        "text": prefix_text,
-                        "section_title": prefix_title,
-                        "section_path": prefix_path,
-                        "marker": None,
-                    }
-                )
+                if prefix_text:
+                    segments.append(
+                        {
+                            "text": prefix_text,
+                            "section_title": prefix_title,
+                            "section_path": prefix_path,
+                            "marker": None,
+                        }
+                    )
 
         for index, hit in enumerate(hits):
             start = int(hit.get("line_index", 0) or 0)
             next_start = int(hits[index + 1].get("line_index", len(lines)) or len(lines)) if index + 1 < len(hits) else len(lines)
             fragment_text = "\n".join(lines[start:next_start]).strip()
+            if index == 0 and carried_prefix_text:
+                fragment_text = f"{carried_prefix_text}\n{fragment_text}".strip()
             if not fragment_text:
                 continue
             section_title = str(hit.get("title") or current_title).strip()
@@ -1796,8 +1871,40 @@ class RAG_DB_Document(Chapter, ABC):
                 }
             )
 
+        def _is_heading_only_fragment(text: str) -> bool:
+            lines_local = [str(line or "").strip() for line in str(text or "").splitlines() if str(line or "").strip()]
+            if not lines_local:
+                return True
+            if len(lines_local) > 4:
+                return False
+            for line in lines_local:
+                if line.startswith("#"):
+                    continue
+                level = self._heading_level(line)
+                if level is not None and len(line) <= 80:
+                    continue
+                return False
+            return True
+
+        if len(segments) >= 2:
+            first_marker = segments[0].get("marker") if isinstance(segments[0], dict) else None
+            second_marker = segments[1].get("marker") if isinstance(segments[1], dict) else None
+            first_level = int(self._coerce_positive_int(first_marker.get("level")) or 0) if isinstance(first_marker, dict) else 0
+            second_level = int(self._coerce_positive_int(second_marker.get("level")) or 0) if isinstance(second_marker, dict) else 0
+            if first_level == 1 and second_level > 1 and _is_heading_only_fragment(str(segments[0].get("text") or "")):
+                segments = list(segments[1:])
+
         if len(segments) <= 1:
             return [page]
+
+        citation_target_segment_index = 1
+        for idx, segment in enumerate(segments, start=1):
+            text = str(segment.get("text") or "")
+            body_lines = [str(line or "").strip() for line in text.splitlines() if str(line or "").strip()]
+            prose_lines = [line for line in body_lines if not line.startswith("#")]
+            if prose_lines:
+                citation_target_segment_index = idx
+                break
 
         page_images = list(page.get_images() or [])
         page_image_indexes = list(range(1, len(page_images) + 1))
@@ -1830,7 +1937,7 @@ class RAG_DB_Document(Chapter, ABC):
                 headers=list(page.assets.headers) if index == 1 else [],
                 footers=list(page.assets.footers) if index == fragment_count else [],
                 annotations=list(page.assets.annotations) if index == 1 else [],
-                citations=list(page.assets.citations) if index == 1 else [],
+                citations=list(page.assets.citations) if index == citation_target_segment_index else [],
                 page_numbers=list(page.assets.page_numbers) if index == fragment_count else [],
                 images=[],
             )
@@ -1851,6 +1958,7 @@ class RAG_DB_Document(Chapter, ABC):
                 page_number=physical_page,
                 page_images=assets.images,
                 page_image_indexes=fragment_image_indexes,
+                page_citations=list(assets.citations or []),
             )
             fragments.append(
                 SemiPage(
@@ -1859,6 +1967,47 @@ class RAG_DB_Document(Chapter, ABC):
                     metadata=fragment_meta,
                 )
             )
+
+        if len(fragments) >= 2:
+            first_fragment = fragments[0]
+            second_fragment = fragments[1]
+            first_meta = dict(getattr(first_fragment, "metadata", {}) or {})
+            second_meta = dict(getattr(second_fragment, "metadata", {}) or {})
+            first_path = str(first_meta.get("section_path") or "").strip()
+            second_path = str(second_meta.get("section_path") or "").strip()
+
+            first_markdown = str(getattr(first_fragment, "markdown_text", "") or "")
+            residue_lines: List[str] = []
+            for raw in first_markdown.splitlines():
+                stripped = str(raw or "").strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("#"):
+                    continue
+                if re.match(r"^参考注释\s*[:：]?\s*$", stripped):
+                    continue
+                if re.match(r"^\[\^[^\]]+\]:\s*.+$", stripped):
+                    continue
+                residue_lines.append(stripped)
+
+            if first_path and second_path.startswith(f"{first_path}/") and not residue_lines:
+                merged_citations = _dedupe_text_values(list(first_fragment.assets.citations or []) + list(second_fragment.assets.citations or []))
+                second_fragment.assets.citations = list(merged_citations)
+
+                second_raw = str(second_meta.get("raw_page_text") or "")
+                second_fragment.set_markdown(
+                    self._render_plaintext_page_to_markdown(
+                        second_raw,
+                        page_number=physical_page,
+                        page_images=second_fragment.get_images(),
+                        page_image_indexes=list(second_meta.get("page_image_indexes") or []),
+                        page_citations=merged_citations,
+                    )
+                )
+                fragments = list(fragments[1:])
+                for idx, fragment in enumerate(fragments, start=1):
+                    fragment.metadata["fragment_index"] = idx
+                    fragment.metadata["fragment_count"] = len(fragments)
 
         return fragments or [page]
 
@@ -1882,7 +2031,9 @@ class RAG_DB_Document(Chapter, ABC):
         page_images: Optional[Sequence[Any]] = None,
         page_image_indexes: Optional[Sequence[int]] = None,
         selected_figure_captions: Optional[Sequence[str]] = None,
+        page_citations: Optional[Sequence[str]] = None,
     ) -> str:
+        text = self._inject_citation_markers_into_text(text, page_citations)
         markers = [dict(item) for item in list(start_markers or []) if str(item.get("title") or "").strip()]
         figure_captions = self._extract_figure_captions(text)
         ordered_figure_captions: List[str] = []
@@ -1938,7 +2089,8 @@ class RAG_DB_Document(Chapter, ABC):
         }
         consumed: Set[str] = set()
         normalized_lines: List[str] = []
-        for raw in str(text or "").splitlines():
+        source_lines = str(text or "").splitlines()
+        for line_index, raw in enumerate(source_lines):
             line = self._normalize_list_markdown_line(raw)
             line_key = self._normalized_heading_text(self._clean_heading_title(line))
             marker = marker_keys.get(line_key)
@@ -1946,6 +2098,22 @@ class RAG_DB_Document(Chapter, ABC):
                 level = max(1, min(int(self._coerce_positive_int(marker.get("level")) or 1), 6))
                 normalized_lines.append(f"{'#' * level} {str(marker.get('title') or '').strip()}")
                 consumed.add(line_key)
+                continue
+
+            # Heuristic: promote short standalone title lines near page head.
+            stripped = str(line or "").strip()
+            next_line = str(source_lines[line_index + 1] or "").strip() if line_index + 1 < len(source_lines) else ""
+            if (
+                line_index <= 6
+                and stripped
+                and not stripped.startswith("#")
+                and len(stripped) <= 42
+                and len(stripped) >= 4
+                and not re.search(r"[。！？!?；;]", stripped)
+                and len(next_line) >= 18
+                and bool(re.match(r"^(序言|前言|引言|后记|尾记|附录|第[一二三四五六七八九十百千万0-9]+[章节部分篇卷])", stripped))
+            ):
+                normalized_lines.append(f"## {stripped}")
                 continue
             normalized_lines.append(line)
 
@@ -2011,12 +2179,13 @@ class RAG_DB_Document(Chapter, ABC):
 
             out.append(line)
             i += 1
-        return self._append_missing_page_image_tokens(
+        markdown_with_images = self._append_missing_page_image_tokens(
             "\n".join(out),
             page_images=page_images,
             page_number=page_number,
             page_image_indexes=page_image_indexes,
         )
+        return self._append_citations_to_markdown(markdown_with_images, page_citations)
 
     @staticmethod
     def _is_markdown_table_block(block: str) -> bool:
@@ -2280,6 +2449,7 @@ class RAG_DB_Document(Chapter, ABC):
             page_images=page_images,
             page_image_indexes=page_image_indexes,
             selected_figure_captions=selected_figure_captions,
+            page_citations=list(page_assets.citations or []) if page_assets is not None else [],
         )
         page.set_markdown(refreshed)
 
@@ -3162,13 +3332,34 @@ class RAG_DB_Document(Chapter, ABC):
         page_range = self._format_page_range_label(page_numbers)
 
         notes = self._unique_nonempty(chapter.get_annotations())
-        own_markdown = str(getattr(chapter, "markdown_text", "") or "").strip()
-        merged_children_markdown = chapter.merged_markdown().strip() if chapter.SubContent else ""
-        children_markdown = [
-            self._compose_page_markdown(child, heading_level=min(level + 1, 6), visited=visited_ids)
-            for child in chapter.SubContent
-        ]
-        children_markdown = [item for item in children_markdown if item.strip()]
+        citations = self._unique_nonempty(chapter.get_citations())
+        own_markdown_raw = str(getattr(chapter, "markdown_text", "") or "").strip()
+        own_markdown, own_markdown_citations = self._split_markdown_body_and_citations(own_markdown_raw)
+        citations = self._unique_nonempty(list(citations) + list(own_markdown_citations))
+        children_markdown: List[str] = []
+        previous_path = ""
+        for child in chapter.SubContent:
+            if isinstance(child, MonoPage):
+                child_meta = dict(getattr(child, "metadata", {}) or {})
+                child_path = str(child_meta.get("section_path") or child_meta.get("section_title") or "").strip()
+                include_heading = not (child_path and child_path == previous_path)
+                child_markdown = self._compose_monopage_markdown(
+                    child,
+                    heading_level=min(level + 1, 6),
+                    include_heading=include_heading,
+                    include_citations=False,
+                )
+                if child_path:
+                    previous_path = child_path
+            else:
+                child_markdown = self._compose_page_markdown(
+                    child,
+                    heading_level=min(level + 1, 6),
+                    visited=visited_ids,
+                    include_citations=False,
+                )
+            if child_markdown.strip():
+                children_markdown.append(child_markdown)
 
         parts: List[str] = [heading]
         if page_range:
@@ -3176,16 +3367,59 @@ class RAG_DB_Document(Chapter, ABC):
         if notes:
             parts.append("注释:")
             parts.extend([f"- {item}" for item in notes])
-        if own_markdown and (not children_markdown or own_markdown != merged_children_markdown):
+        if own_markdown and not children_markdown:
             parts.append("正文:")
             parts.append(own_markdown)
         if children_markdown:
             parts.extend(children_markdown)
+        if citations:
+            parts.append("参考注释:")
+            parts.extend([item if re.match(r"^\[\^[^\]]+\]:\s*.+$", item) else f"- {item}" for item in citations])
         result = "\n\n".join(parts).strip()
         visited_ids.discard(chapter_id)
         return result
 
-    def _compose_monopage_markdown(self, mono_page: MonoPage, *, heading_level: int = 3) -> str:
+    @staticmethod
+    def _split_markdown_body_and_citations(markdown_text: str) -> tuple[str, List[str]]:
+        lines = [str(line or "") for line in str(markdown_text or "").splitlines()]
+        if not lines:
+            return "", []
+
+        extracted: List[str] = []
+        keep_lines: List[str] = []
+        note_heading = re.compile(r"^\s*参考注释\s*[:：]?\s*$")
+        note_def = re.compile(r"^\s*\[\^[^\]]+\]:\s*.+$")
+        in_note_block = False
+
+        for raw in lines:
+            line = str(raw or "")
+            if note_heading.match(line):
+                in_note_block = True
+                continue
+            if in_note_block:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if note_def.match(stripped) or stripped.startswith("-"):
+                    extracted.append(stripped)
+                    continue
+                in_note_block = False
+            if note_def.match(line.strip()):
+                extracted.append(line.strip())
+                continue
+            keep_lines.append(line)
+
+        body = "\n".join(keep_lines).strip()
+        return body, RAG_DB_Document._unique_nonempty(extracted)
+
+    def _compose_monopage_markdown(
+        self,
+        mono_page: MonoPage,
+        *,
+        heading_level: int = 3,
+        include_heading: bool = True,
+        include_citations: bool = True,
+    ) -> str:
         metadata = dict(getattr(mono_page, "metadata", {}) or {})
         title = str(mono_page.title or metadata.get("section_title") or "").strip() or "Untitled Page"
         level = min(max(int(heading_level), 1), 6)
@@ -3194,14 +3428,21 @@ class RAG_DB_Document(Chapter, ABC):
         page_numbers = self._coerce_page_numbers_from_page(mono_page)
         page_range = self._format_page_range_label(page_numbers)
         notes = self._unique_nonempty(mono_page.get_annotations())
-        body_markdown = str(mono_page.markdown_text or "").strip()
+        citations = self._unique_nonempty(mono_page.get_citations())
+        body_markdown, inline_citations = self._split_markdown_body_and_citations(str(mono_page.markdown_text or ""))
+        citations = self._unique_nonempty(list(citations) + list(inline_citations))
 
-        parts: List[str] = [heading]
+        parts: List[str] = []
+        if include_heading:
+            parts.append(heading)
         if page_range:
             parts.append(f"页码: {page_range}")
         if notes:
             parts.append("注释:")
             parts.extend([f"- {item}" for item in notes])
+        if include_citations and citations:
+            parts.append("参考注释:")
+            parts.extend([item if re.match(r"^\[\^[^\]]+\]:\s*.+$", item) else f"- {item}" for item in citations])
         if body_markdown:
             parts.append("正文:")
             parts.append(body_markdown)
@@ -3213,11 +3454,12 @@ class RAG_DB_Document(Chapter, ABC):
         *,
         heading_level: int = 2,
         visited: Optional[Set[int]] = None,
+        include_citations: bool = True,
     ) -> str:
         if isinstance(page, Chapter):
             return self._compose_chapter_markdown(page, heading_level=heading_level, visited=visited)
         if isinstance(page, MonoPage):
-            return self._compose_monopage_markdown(page, heading_level=heading_level)
+            return self._compose_monopage_markdown(page, heading_level=heading_level, include_citations=include_citations)
 
         # Unknown Page subtype fallback: keep markdown text to avoid data loss.
         metadata = dict(getattr(page, "metadata", {}) or {})

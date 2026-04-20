@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from llama_index.core import Document
 
-from rag.document_interface import ImageAsset, MonoPage, PageAssets, RAG_DB_Document, _dedupe_image_values
+from rag.document_interface import ImageAsset, MonoPage, PageAssets, RAG_DB_Document, _dedupe_image_values, _dedupe_text_values
 from rag.preprocessor import clean_document
 
 try:
@@ -199,10 +199,48 @@ class PDFRAGDocument(RAG_DB_Document):
                 {
                     "headers": list(dict.fromkeys(headers)),
                     "footers": list(dict.fromkeys(footers)),
+                    "citations": _dedupe_text_values(list(layout.get("citations") or [])),
                     "page_number": page_number,
                 }
             )
         return normalized
+
+    @staticmethod
+    def _extract_citations_from_pdf_page_text(page_text: str) -> tuple[List[str], str]:
+        lines = [str(line or "").rstrip() for line in str(page_text or "").splitlines()]
+        if not lines:
+            return [], ""
+
+        citation_rows_reversed: List[str] = []
+        start_idx: Optional[int] = None
+        for idx in range(len(lines) - 1, -1, -1):
+            raw = str(lines[idx] or "").strip()
+            if not raw:
+                if start_idx is not None:
+                    break
+                continue
+            match = re.match(r"^\s*(?:\[(\d{1,3})\]|(\d{1,3})[\)\].、:：]|([*†‡]))\s+(.+)$", raw)
+            if not match:
+                if start_idx is not None:
+                    break
+                continue
+            label = str(match.group(1) or match.group(2) or match.group(3) or "").strip()
+            content = str(match.group(4) or "").strip()
+            if not label or len(content) < 2:
+                if start_idx is not None:
+                    break
+                continue
+            citation_rows_reversed.append(f"[^p{label}]: {content}")
+            start_idx = idx
+
+        if not citation_rows_reversed or start_idx is None:
+            return [], str(page_text or "").strip()
+
+        citations = list(reversed(citation_rows_reversed))
+        body_lines = lines[:start_idx]
+        while body_lines and not str(body_lines[-1] or "").strip():
+            body_lines.pop()
+        return _dedupe_text_values(citations), "\n".join(body_lines).strip()
 
     @staticmethod
     def _line_matches_layout_asset(line: str, asset_keys: set[str]) -> bool:
@@ -266,10 +304,33 @@ class PDFRAGDocument(RAG_DB_Document):
                 for page_idx in range(min(int(pdf_doc.page_count or 0), len(results))):
                     page = pdf_doc.load_page(page_idx)
                     seen_xrefs: set[int] = set()
-                    for image_meta in page.get_images(full=True):
-                        if not image_meta:
-                            continue
-                        xref = int(image_meta[0] or 0)
+                    image_infos: List[Dict[str, Any]] = []
+                    try:
+                        info_rows = page.get_image_info(xrefs=True)
+                        if isinstance(info_rows, list):
+                            image_infos = [dict(item) for item in info_rows if isinstance(item, dict)]
+                    except Exception:
+                        image_infos = []
+
+                    if image_infos:
+                        xref_candidates = [int(item.get("xref") or 0) for item in image_infos]
+                    else:
+                        xref_candidates = []
+                        for image_meta in page.get_images(full=True):
+                            if not image_meta:
+                                continue
+                            xref = int(image_meta[0] or 0)
+                            if xref <= 0:
+                                continue
+                            try:
+                                rects = page.get_image_rects(xref)
+                            except Exception:
+                                rects = []
+                            if not rects:
+                                continue
+                            xref_candidates.append(xref)
+
+                    for xref in xref_candidates:
                         if xref <= 0 or xref in seen_xrefs:
                             continue
                         seen_xrefs.add(xref)
@@ -614,7 +675,12 @@ class PDFRAGDocument(RAG_DB_Document):
                 headers = [str(x).strip() for x in list(page_layout.get("headers") or []) if str(x).strip()]
                 footers = [str(x).strip() for x in list(page_layout.get("footers") or []) if str(x).strip()]
                 body_text = self._strip_layout_lines_from_page_text(page_text, headers, footers) or page_text
+                inferred_citations, body_text_wo_citations = self._extract_citations_from_pdf_page_text(body_text)
+                if body_text_wo_citations:
+                    body_text = body_text_wo_citations
                 page_number_hint = str(page_layout.get("page_number") or "").strip()
+                layout_citations = [str(x).strip() for x in list(page_layout.get("citations") or []) if str(x).strip()]
+                page_citations = _dedupe_text_values(layout_citations + list(inferred_citations))
 
                 mapped_path = str(main_section_map.get(int(page_idx)) or "").strip()
                 if mapped_path:
@@ -656,7 +722,7 @@ class PDFRAGDocument(RAG_DB_Document):
                     list(headers),
                     list(footers),
                     [],
-                    [],
+                    list(page_citations),
                     [page_number_hint] if page_number_hint else [],
                     list(images),
                 )
@@ -666,6 +732,7 @@ class PDFRAGDocument(RAG_DB_Document):
                     page_number=int(page_idx),
                     page_images=images,
                     page_image_indexes=list(range(1, len(images) + 1)),
+                    page_citations=page_citations,
                 )
 
                 node = self.create_mono_page_node(

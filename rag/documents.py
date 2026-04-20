@@ -772,6 +772,7 @@ def _merge_page_layouts(
                 "page": page_no,
                 "headers": _dedupe_text_items(list(secondary.get("headers") or []) + list(primary.get("headers") or [])),
                 "footers": _dedupe_text_items(list(secondary.get("footers") or []) + list(primary.get("footers") or [])),
+                "citations": _dedupe_text_items(list(secondary.get("citations") or []) + list(primary.get("citations") or [])),
                 "page_number": str(secondary.get("page_number") or primary.get("page_number") or "").strip(),
                 "images": _dedupe_image_items(list(primary.get("images") or []) + list(secondary.get("images") or [])),
             }
@@ -1084,7 +1085,7 @@ def _align_office_structured_payload_with_uno_pages(
         }
 
     projected_assets: List[Dict[str, Any]] = [
-        {"page": page_number, "headers": [], "footers": [], "page_number": "", "images": []}
+        {"page": page_number, "headers": [], "footers": [], "citations": [], "page_number": "", "images": []}
         for page_number in range(1, target_page_count + 1)
     ]
     for index, item in enumerate(list(source_page_assets or []), start=1):
@@ -1098,6 +1099,7 @@ def _align_office_structured_payload_with_uno_pages(
         target_row = projected_assets[target_page - 1]
         target_row["headers"] = _dedupe_text_items(list(target_row.get("headers") or []) + list(row.get("headers") or []))
         target_row["footers"] = _dedupe_text_items(list(target_row.get("footers") or []) + list(row.get("footers") or []))
+        target_row["citations"] = _dedupe_text_items(list(target_row.get("citations") or []) + list(row.get("citations") or []))
         if not str(target_row.get("page_number") or "").strip():
             target_row["page_number"] = str(row.get("page_number") or "").strip()
         target_row["images"] = _dedupe_image_items(list(target_row.get("images") or []) + list(row.get("images") or []))
@@ -1647,6 +1649,55 @@ def _extract_docx_run_sizes(paragraph: ET.Element, ns: Dict[str, str]) -> List[i
     return run_sizes
 
 
+def _extract_docx_note_text_map(
+    archive: zipfile.ZipFile,
+    *,
+    part_path: str,
+    node_name: str,
+    ns: Dict[str, str],
+) -> Dict[str, str]:
+    try:
+        raw_xml = archive.read(part_path)
+    except Exception:
+        return {}
+
+    try:
+        root = ET.fromstring(raw_xml)
+    except Exception:
+        return {}
+
+    note_map: Dict[str, str] = {}
+    for node in root.findall(f"w:{node_name}", ns):
+        note_id = str(node.attrib.get(f"{{{ns['w']}}}id") or "").strip()
+        if not note_id:
+            continue
+        note_type = str(node.attrib.get(f"{{{ns['w']}}}type") or "").strip().lower()
+        if note_type in {"separator", "continuationseparator", "continuationnotice"}:
+            continue
+        parts: List[str] = []
+        for paragraph in node.findall(".//w:p", ns):
+            text = _extract_docx_text_from_paragraph(paragraph, ns)
+            if text:
+                parts.append(text)
+        merged = "\n".join(str(item or "").strip() for item in parts if str(item or "").strip()).strip()
+        if merged:
+            note_map[note_id] = merged[:1200]
+    return note_map
+
+
+def _extract_docx_paragraph_note_refs(paragraph: ET.Element, ns: Dict[str, str]) -> List[tuple[str, str]]:
+    refs: List[tuple[str, str]] = []
+    for ref in paragraph.findall(".//w:footnoteReference", ns):
+        note_id = str(ref.attrib.get(f"{{{ns['w']}}}id") or "").strip()
+        if note_id:
+            refs.append(("footnote", note_id))
+    for ref in paragraph.findall(".//w:endnoteReference", ns):
+        note_id = str(ref.attrib.get(f"{{{ns['w']}}}id") or "").strip()
+        if note_id:
+            refs.append(("endnote", note_id))
+    return refs
+
+
 def _docx_table_to_markdown(table: ET.Element, ns: Dict[str, str]) -> str:
     rows: List[List[str]] = []
     for tr in table.findall("w:tr", ns):
@@ -1662,6 +1713,42 @@ def _docx_table_to_markdown(table: ET.Element, ns: Dict[str, str]) -> str:
             rows.append(row)
     if not rows:
         return ""
+
+    def _is_toc_like_row(cells: List[str]) -> bool:
+        if not cells:
+            return False
+        cleaned_cells = [str(cell or "").strip() for cell in cells if str(cell or "").strip()]
+        if len(cleaned_cells) >= 2:
+            tail = str(cleaned_cells[-1] or "").strip()
+            if re.fullmatch(r"\d{1,4}|[IVXLCDM]{1,8}", tail, flags=re.IGNORECASE):
+                return True
+        merged = " ".join(str(cell or "").strip() for cell in cells if str(cell or "").strip()).strip()
+        if not merged:
+            return False
+        compact = re.sub(r"\s+", "", merged).lower()
+        if compact in {"目录", "目錄", "contents", "tableofcontents", "toc"}:
+            return True
+        return bool(
+            re.match(
+                r"^.{1,220}?(?:\t+|[·•.]{2,}|\s{2,})(\d{1,4}|[IVXLCDM]{1,8})\s*$",
+                merged,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    toc_like_count = sum(1 for row in rows if _is_toc_like_row(row))
+    if toc_like_count >= max(1, len(rows) - 1):
+        plain_rows: List[str] = []
+        for row in rows:
+            cells = [str(cell or "").strip() for cell in row if str(cell or "").strip()]
+            if not cells:
+                continue
+            if len(cells) >= 2:
+                plain_rows.append(f"{cells[0]}\t{cells[-1]}")
+            else:
+                plain_rows.append(cells[0])
+        return "\n".join(plain_rows).strip()
+
     width = max(len(row) for row in rows)
     normalized_rows = [row + [""] * (width - len(row)) for row in rows]
     out = ["| " + " | ".join(cell.replace("|", "\\|") for cell in normalized_rows[0]) + " |"]
@@ -1715,7 +1802,7 @@ def _extract_docx_structured_payload(file_path: str) -> Dict[str, Any]:
 
     paragraph_rows: List[Dict[str, Any]] = []
     pages: List[List[str]] = [[]]
-    page_assets: List[Dict[str, Any]] = [{"images": []}]
+    page_assets: List[Dict[str, Any]] = [{"images": [], "citations": []}]
     structured_sections: List[Dict[str, Any]] = []
 
     try:
@@ -1736,6 +1823,18 @@ def _extract_docx_structured_payload(file_path: str) -> Dict[str, Any]:
                 "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
                 "v": "urn:schemas-microsoft-com:vml",
             }
+            footnote_text_map = _extract_docx_note_text_map(
+                archive,
+                part_path="word/footnotes.xml",
+                node_name="footnote",
+                ns=ns,
+            )
+            endnote_text_map = _extract_docx_note_text_map(
+                archive,
+                part_path="word/endnotes.xml",
+                node_name="endnote",
+                ns=ns,
+            )
         style_name_by_id: Dict[str, str] = {}
         if styles_xml:
             styles_root = ET.fromstring(styles_xml)
@@ -1800,7 +1899,17 @@ def _extract_docx_structured_payload(file_path: str) -> Dict[str, Any]:
                 if section_stack:
                     section_stack[-1]["images"].extend(images)
 
+            def _append_citations(citations: List[str]) -> None:
+                if not citations:
+                    return
+                current_citations = page_assets[-1].setdefault("citations", [])
+                current_citations.extend(citations)
+
             page_idx = 1
+            footnote_display_index_by_id: Dict[str, int] = {}
+            endnote_display_index_by_id: Dict[str, int] = {}
+            next_footnote_display_index = 1
+            next_endnote_display_index = 1
             for child in list(body or []):
                 tag = child.tag.rsplit("}", 1)[-1]
                 child_images = _extract_docx_images_from_element(
@@ -1816,6 +1925,48 @@ def _extract_docx_structured_payload(file_path: str) -> Dict[str, Any]:
                 if tag == "p":
                     paragraph = child
                     text = _extract_docx_text_from_paragraph(paragraph, ns)
+                    note_refs = _extract_docx_paragraph_note_refs(paragraph, ns)
+                    note_markers: List[str] = []
+                    citation_rows: List[str] = []
+                    seen_note_ids: Set[str] = set()
+                    for note_kind, note_id in note_refs:
+                        key = f"{note_kind}:{note_id}"
+                        if key in seen_note_ids:
+                            continue
+                        seen_note_ids.add(key)
+                        if note_kind == "footnote":
+                            note_text = str(footnote_text_map.get(note_id) or "").strip()
+                            display_index = footnote_display_index_by_id.get(note_id)
+                            if display_index is None:
+                                display_index = next_footnote_display_index
+                                footnote_display_index_by_id[note_id] = int(display_index)
+                                next_footnote_display_index += 1
+                            marker = f"[^f{int(display_index)}]"
+                            if note_text:
+                                citation_rows.append(f"[^f{int(display_index)}]: {note_text}")
+                            note_markers.append(marker)
+                        else:
+                            note_text = str(endnote_text_map.get(note_id) or "").strip()
+                            display_index = endnote_display_index_by_id.get(note_id)
+                            if display_index is None:
+                                display_index = next_endnote_display_index
+                                endnote_display_index_by_id[note_id] = int(display_index)
+                                next_endnote_display_index += 1
+                            marker = f"[^e{int(display_index)}]"
+                            if note_text:
+                                citation_rows.append(f"[^e{int(display_index)}]: {note_text}")
+                            note_markers.append(marker)
+
+                    if note_markers:
+                        marker_suffix = " ".join(note_markers).strip()
+                        if text:
+                            text = f"{text} {marker_suffix}".strip()
+                        else:
+                            text = marker_suffix
+
+                    if citation_rows:
+                        _append_citations(citation_rows)
+
                     if text:
                         pages[-1].append(text)
 
@@ -1853,7 +2004,7 @@ def _extract_docx_structured_payload(file_path: str) -> Dict[str, Any]:
                     for _ in range(page_break_count):
                         page_idx += 1
                         pages.append([])
-                        page_assets.append({"images": []})
+                        page_assets.append({"images": [], "citations": []})
                     continue
 
                 if tag != "tbl":
@@ -1870,7 +2021,7 @@ def _extract_docx_structured_payload(file_path: str) -> Dict[str, Any]:
                 for _ in range(table_break_count):
                     page_idx += 1
                     pages.append([])
-                    page_assets.append({"images": []})
+                    page_assets.append({"images": [], "citations": []})
 
         while pages and not pages[-1]:
             pages.pop()
@@ -1879,7 +2030,7 @@ def _extract_docx_structured_payload(file_path: str) -> Dict[str, Any]:
         if not pages:
             pages = [[]]
         if not page_assets:
-            page_assets = [{"images": []}]
+            page_assets = [{"images": [], "citations": []}]
 
         for row in paragraph_rows:
             style_id = str(row.get("style_id") or "")
@@ -2006,6 +2157,7 @@ def _extract_docx_structured_payload(file_path: str) -> Dict[str, Any]:
         normalized_page_assets.append(
             {
                 "images": _dedupe_image_items(list(item.get("images") or [])),
+                "citations": _dedupe_text_items(list(item.get("citations") or [])),
             }
         )
 

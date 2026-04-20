@@ -79,6 +79,7 @@ class DocRAGDocument(RAG_DB_Document):
             footers = [str(x).strip() for x in list(page_layout.get("footers") or []) if str(x).strip()]
             if not footers and str(signal.get("footer_text") or "").strip():
                 footers = [str(signal.get("footer_text") or "").strip()]
+            citations = [str(x).strip() for x in list(page_layout.get("citations") or []) if str(x).strip()]
             images = self.resolve_page_images(
                 page_text,
                 list(page_layout.get("images") or []),
@@ -88,11 +89,18 @@ class DocRAGDocument(RAG_DB_Document):
                 page_number=page_idx,
                 page_images=images,
                 page_image_indexes=list(range(1, len(images) + 1)),
+                page_citations=citations,
             )
             page_number_hint = str(page_layout.get("page_number") or "").strip()
             if not page_number_hint:
                 page_number_hint = str(signal.get("page_number_hint") or "").strip()
-            assets = PageAssets(headers=headers, footers=footers, page_numbers=[page_number_hint] if page_number_hint else [], images=images)
+            assets = PageAssets(
+                headers=headers,
+                footers=footers,
+                citations=citations,
+                page_numbers=[page_number_hint] if page_number_hint else [],
+                images=images,
+            )
             page_meta: Dict[str, Any] = {
                 "doc_name": self.doc_name,
                 "file_name": self.doc_name,
