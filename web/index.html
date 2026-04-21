@@ -1272,6 +1272,7 @@
                 <div class="input-actions">
                   <button id="attach" title="Attach" aria-label="Attach">📎</button>
                   <button id="ragQuickSelect" title="Use RAG DB" aria-label="Use RAG DB"><svg class="mono-book-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H20v18H7.5A2.5 2.5 0 0 0 5 22V4.5Zm0 0A2.5 2.5 0 0 0 2.5 7v12.5A2.5 2.5 0 0 1 5 22" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M8.5 6.5H17.5M8.5 10H17.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+                  <button id="mcpToolQuickSelect" title="Use MCP Tools" aria-label="Use MCP Tools">🧰</button>
                   <button id="send" title="Send" aria-label="Send">➤</button>
                   <button id="reset" title="Reset" aria-label="Reset">⟲</button>
                 </div>
@@ -1407,6 +1408,21 @@
         </div>
       </div>
 
+      <div id="mcpToolUseModal" class="modal-backdrop" aria-hidden="true">
+        <div class="panel modal" style="max-width: 560px;">
+          <div class="submenu-head">
+            <div id="mcpToolUseTitle" class="title" style="font-size: 20px;">Use MCP Tools</div>
+            <button id="mcpToolUseCloseX" class="submenu-close" aria-label="Close">×</button>
+          </div>
+          <div id="mcpToolUseSubtitle" class="subtitle">Select one or more MCP tools allowed for this conversation.</div>
+          <div id="mcpToolUseMeta" class="status"></div>
+          <div id="mcpToolUseList" class="db-checklist"></div>
+          <div class="settings-actions" style="margin-top: 14px;">
+            <button id="mcpToolUseApplyBtn">Apply</button>
+          </div>
+        </div>
+      </div>
+
       <div id="requestModal" class="modal-backdrop" aria-hidden="true">
         <div class="panel modal" style="max-width: 560px;">
           <div class="submenu-head">
@@ -1442,6 +1458,7 @@
       const ragCurrentInfo = document.getElementById("ragCurrentInfo");
       const ragManagerHeaderToggle = document.getElementById("ragManagerHeaderToggle");
       const ragQuickSelect = document.getElementById("ragQuickSelect");
+      const mcpToolQuickSelect = document.getElementById("mcpToolQuickSelect");
       const imageInput = document.getElementById("imageInput");
       const attachments = document.getElementById("attachments");
       const ragStatus = document.getElementById("ragManagerStatus");
@@ -1495,6 +1512,13 @@
       const ragUseMeta = document.getElementById("ragUseMeta");
       const ragUseDbList = document.getElementById("ragUseDbList");
       const ragUseApplyBtn = document.getElementById("ragUseApplyBtn");
+      const mcpToolUseModal = document.getElementById("mcpToolUseModal");
+      const mcpToolUseCloseX = document.getElementById("mcpToolUseCloseX");
+      const mcpToolUseTitle = document.getElementById("mcpToolUseTitle");
+      const mcpToolUseSubtitle = document.getElementById("mcpToolUseSubtitle");
+      const mcpToolUseMeta = document.getElementById("mcpToolUseMeta");
+      const mcpToolUseList = document.getElementById("mcpToolUseList");
+      const mcpToolUseApplyBtn = document.getElementById("mcpToolUseApplyBtn");
       const requestModal = document.getElementById("requestModal");
       const requestCloseX = document.getElementById("requestCloseX");
       const requestTitle = document.getElementById("requestTitle");
@@ -1543,6 +1567,8 @@
       let streamDurationTicker = null;
       let selectedRagManagerDb = "";
       let selectedRagUseDbs = [];
+      let selectedMcpTools = [];
+      let mcpToolCatalog = [];
       let ragDbOptionsReqId = 0;
       let ragDbDocsReqId = 0;
       let ragDbStatsReqId = 0;
@@ -1619,6 +1645,7 @@
           addDocs: "Add Docs",
           buildRag: "Build RAG",
           useRag: "Use RAG",
+          useMcpTools: "Use MCP Tools",
           ragDb: "RAG DB",
           ragManage: "Manage RAG DB",
           ragUseTitle: "Use RAG Databases",
@@ -1628,6 +1655,14 @@
           ragPrepared: "Using RAG DB(s): {dbs}",
           ragPreparedNone: "Using RAG DB(s): none",
           ragUseApplyBtn: "Apply",
+          mcpUseTitle: "Use MCP Tools",
+          mcpUseSubtitle: "Select one or more MCP tools allowed for this conversation.",
+          mcpUseMeta: "Selected tools: {count}",
+          mcpUseMetaNone: "Selected tools: all available",
+          mcpUseApplyBtn: "Apply",
+          mcpLoading: "Loading MCP tools...",
+          mcpLoadFail: "Failed to load MCP tools.",
+          mcpNoTools: "No selectable MCP tools available.",
           ragManagerTitle: "RAG Database Manager",
           ragDbListTitle: "RAG Databases",
           ragDocTitle: "Selected DB Documents",
@@ -1761,6 +1796,7 @@
           addDocs: "添加文档",
           buildRag: "生成 RAG",
           useRag: "使用 RAG",
+          useMcpTools: "使用 MCP 工具",
           ragDb: "RAG 数据库",
           ragManage: "管理 RAG 数据库",
           ragUseTitle: "使用 RAG 数据库",
@@ -1770,6 +1806,14 @@
           ragPrepared: "当前使用 RAG 库：{dbs}",
           ragPreparedNone: "当前使用 RAG 库：无",
           ragUseApplyBtn: "应用",
+          mcpUseTitle: "使用 MCP 工具",
+          mcpUseSubtitle: "为当前会话选择允许调用的 MCP 工具（已排除 RAG 文档工具）。",
+          mcpUseMeta: "已选工具数：{count}",
+          mcpUseMetaNone: "已选工具：全部可用",
+          mcpUseApplyBtn: "应用",
+          mcpLoading: "正在加载 MCP 工具...",
+          mcpLoadFail: "加载 MCP 工具失败。",
+          mcpNoTools: "当前没有可供选择的 MCP 工具。",
           ragManagerTitle: "RAG 数据库管理",
           ragDbListTitle: "RAG 数据库列表",
           ragDocTitle: "选中数据库文档",
@@ -2078,6 +2122,10 @@
           ragQuickSelect.title = t("useRag");
           ragQuickSelect.setAttribute("aria-label", t("useRag"));
         }
+        if (mcpToolQuickSelect) {
+          mcpToolQuickSelect.title = t("useMcpTools");
+          mcpToolQuickSelect.setAttribute("aria-label", t("useMcpTools"));
+        }
         sendButton.title = t("send");
         sendButton.setAttribute("aria-label", t("send"));
         resetButton.title = t("reset");
@@ -2092,7 +2140,11 @@
         if (ragUseTitle) ragUseTitle.textContent = t("ragUseTitle");
         if (ragUseSubtitle) ragUseSubtitle.textContent = t("ragUseSubtitle");
         if (ragUseApplyBtn) ragUseApplyBtn.textContent = t("ragUseApplyBtn");
+        if (mcpToolUseTitle) mcpToolUseTitle.textContent = t("mcpUseTitle");
+        if (mcpToolUseSubtitle) mcpToolUseSubtitle.textContent = t("mcpUseSubtitle");
+        if (mcpToolUseApplyBtn) mcpToolUseApplyBtn.textContent = t("mcpUseApplyBtn");
         updateRagUseMeta();
+        updateMcpUseMeta();
         if (ragDbListTitle) ragDbListTitle.textContent = t("ragDbListTitle");
         if (ragDocTitle) ragDocTitle.textContent = t("ragDocTitle");
         if (ragDbCreateBtn) ragDbCreateBtn.textContent = t("ragDbCreateBtn");
@@ -2561,9 +2613,26 @@
         return deduped;
       };
 
+      const normalizeMcpToolNames = (value) => {
+        if (!Array.isArray(value)) return [];
+        const deduped = [];
+        value.forEach((item) => {
+          const name = String(item || "").trim();
+          if (name && !deduped.includes(name)) {
+            deduped.push(name);
+          }
+        });
+        return deduped;
+      };
+
       const getSessionRagDbNames = (session) => {
         if (!session) return [];
         return normalizeRagDbNames(session.ragDbNames);
+      };
+
+      const getSessionMcpToolNames = (session) => {
+        if (!session) return [];
+        return normalizeMcpToolNames(session.allowedMcpTools);
       };
 
       const getCurrentRequestRagDbNames = () => {
@@ -2580,6 +2649,11 @@
         (selectedRagUseDbs || []).forEach(append);
         getSessionRagDbNames(current).forEach(append);
         return names;
+      };
+
+      const getCurrentAllowedMcpTools = () => {
+        const current = getActiveSession();
+        return getSessionMcpToolNames(current);
       };
 
       const stopStreamDurationTicker = () => {
@@ -2619,6 +2693,13 @@
       const persistSessionRagDbNames = (session, names) => {
         if (!session) return;
         session.ragDbNames = normalizeRagDbNames(names);
+        session.updatedAt = Date.now();
+        saveSessions();
+      };
+
+      const persistSessionMcpToolNames = (session, names) => {
+        if (!session) return;
+        session.allowedMcpTools = normalizeMcpToolNames(names);
         session.updatedAt = Date.now();
         saveSessions();
       };
@@ -3524,6 +3605,7 @@
             images: images || [],
             rag_db_name: ragDbNames[0] || null,
             rag_db_names: ragDbNames,
+            allowed_mcp_tools: getCurrentAllowedMcpTools(),
             force_agent: Boolean(options.forceAgent),
             messages: messages,
             conversation_path: path,
@@ -3856,6 +3938,7 @@
               title: t("newChat"),
               messages: [],
               ragDbNames: [],
+              allowedMcpTools: [],
               createdAt: Date.now(),
               updatedAt: Date.now(),
             },
@@ -3864,6 +3947,7 @@
         sessions = sessions.map((session) => ({
           ...session,
           ragDbNames: getSessionRagDbNames(session),
+          allowedMcpTools: getSessionMcpToolNames(session),
         }));
         sessionId = localStorage.getItem(ACTIVE_SESSION_KEY) || sessions[0].id;
       };
@@ -4307,6 +4391,111 @@
         closeRagUseModal();
       };
 
+      const updateMcpUseMeta = () => {
+        if (!mcpToolUseMeta) return;
+        const count = selectedMcpTools.length;
+        if (!count) {
+          mcpToolUseMeta.textContent = t("mcpUseMetaNone");
+          return;
+        }
+        mcpToolUseMeta.textContent = t("mcpUseMeta").replace("{count}", String(count));
+      };
+
+      const renderMcpToolUseList = (tools) => {
+        if (!mcpToolUseList) return;
+        mcpToolUseList.innerHTML = "";
+        if (!Array.isArray(tools) || !tools.length) {
+          const empty = document.createElement("div");
+          empty.className = "rag-empty-state";
+          empty.textContent = t("mcpNoTools");
+          mcpToolUseList.appendChild(empty);
+          updateMcpUseMeta();
+          return;
+        }
+        tools.forEach((item) => {
+          const name = String(item?.name || "").trim();
+          if (!name) return;
+          const row = document.createElement("label");
+          row.className = "db-check-item";
+          const checkbox = document.createElement("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = selectedMcpTools.includes(name);
+          checkbox.addEventListener("change", () => {
+            if (checkbox.checked) {
+              if (!selectedMcpTools.includes(name)) selectedMcpTools.push(name);
+            } else {
+              selectedMcpTools = selectedMcpTools.filter((toolName) => toolName !== name);
+            }
+            updateMcpUseMeta();
+          });
+          const text = document.createElement("span");
+          const desc = String(item?.description || "").trim();
+          text.textContent = desc ? `${name} - ${desc}` : name;
+          row.appendChild(checkbox);
+          row.appendChild(text);
+          mcpToolUseList.appendChild(row);
+        });
+        updateMcpUseMeta();
+      };
+
+      const loadMcpToolCatalog = async () => {
+        try {
+          const response = await fetch("/api/mcp/tools");
+          if (!response.ok) {
+            throw new Error(await response.text());
+          }
+          const data = await response.json();
+          mcpToolCatalog = Array.isArray(data.tools)
+            ? data.tools
+                .map((item) => ({
+                  name: String(item?.name || "").trim(),
+                  description: String(item?.description || "").trim(),
+                }))
+                .filter((item) => item.name && !item.name.startsWith("rag_"))
+            : [];
+        } catch (err) {
+          console.error(err);
+          mcpToolCatalog = [];
+        }
+      };
+
+      const openMcpToolUseModal = async () => {
+        if (mcpToolUseMeta) {
+          mcpToolUseMeta.textContent = t("mcpLoading");
+        }
+        mcpToolUseModal.classList.add("visible");
+        mcpToolUseModal.setAttribute("aria-hidden", "false");
+        await loadMcpToolCatalog();
+        const loadFailed = !mcpToolCatalog.length;
+        const current = getActiveSession();
+        const persisted = getSessionMcpToolNames(current);
+        const allNames = mcpToolCatalog.map((item) => item.name);
+        if (persisted.length) {
+          selectedMcpTools = persisted.filter((name) => allNames.includes(name));
+        } else {
+          selectedMcpTools = allNames.slice();
+        }
+        renderMcpToolUseList(mcpToolCatalog);
+        if (loadFailed && mcpToolUseMeta) {
+          mcpToolUseMeta.textContent = t("mcpLoadFail");
+        }
+      };
+
+      const closeMcpToolUseModal = () => {
+        mcpToolUseModal.classList.remove("visible");
+        mcpToolUseModal.setAttribute("aria-hidden", "true");
+      };
+
+      const applyMcpToolUseSelection = () => {
+        const current = getActiveSession();
+        if (!current) {
+          closeMcpToolUseModal();
+          return;
+        }
+        persistSessionMcpToolNames(current, selectedMcpTools);
+        closeMcpToolUseModal();
+      };
+
       const renderAttachments = () => {
         attachments.innerHTML = "";
         attachmentsState.forEach((item, index) => {
@@ -4497,6 +4686,7 @@
           title: t("newChat"),
           messages: [],
           ragDbNames: [],
+          allowedMcpTools: [],
           createdAt: Date.now(),
           updatedAt: Date.now(),
         };
@@ -4512,6 +4702,7 @@
         sessionId = id;
         const current = sessions.find((session) => session.id === id) || null;
         selectedRagUseDbs = getSessionRagDbNames(current);
+        selectedMcpTools = getSessionMcpToolNames(current);
         if (ragDbSelect) {
           ragDbSelect.value = selectedRagUseDbs[0] || "";
         }
@@ -4544,6 +4735,7 @@
               title: t("newChat"),
               messages: [],
               ragDbNames: [],
+              allowedMcpTools: [],
               createdAt: Date.now(),
               updatedAt: Date.now(),
             },
@@ -4587,6 +4779,9 @@
       }
       if (ragQuickSelect) {
         ragQuickSelect.addEventListener("click", openRagUseModal);
+      }
+      if (mcpToolQuickSelect) {
+        mcpToolQuickSelect.addEventListener("click", openMcpToolUseModal);
       }
       if (ragDbCreateBtn) {
         ragDbCreateBtn.addEventListener("click", createRagDb);
@@ -5385,6 +5580,12 @@
       if (ragUseApplyBtn) {
         ragUseApplyBtn.addEventListener("click", applyRagUseSelection);
       }
+      if (mcpToolUseCloseX) {
+        mcpToolUseCloseX.addEventListener("click", closeMcpToolUseModal);
+      }
+      if (mcpToolUseApplyBtn) {
+        mcpToolUseApplyBtn.addEventListener("click", applyMcpToolUseSelection);
+      }
       if (requestCloseX) {
         requestCloseX.addEventListener("click", () => closeRequestModal(null));
       }
@@ -5407,6 +5608,9 @@
       if (ragUseModal) {
         ragUseModal.addEventListener("click", () => {});
       }
+      if (mcpToolUseModal) {
+        mcpToolUseModal.addEventListener("click", () => {});
+      }
       if (requestModal) {
         requestModal.addEventListener("click", () => {});
       }
@@ -5415,6 +5619,7 @@
           closeSettingsModal();
           closeRagManagerModal();
           closeRagUseModal();
+          closeMcpToolUseModal();
           closeRequestModal(null);
         }
       });
@@ -5578,6 +5783,7 @@
             images: Array.isArray(options.images) ? options.images : [],
             rag_db_name: ragDbNames[0] || null,
             rag_db_names: ragDbNames,
+            allowed_mcp_tools: getCurrentAllowedMcpTools(),
             force_agent: Boolean(options.forceAgent),
             messages: Array.isArray(options.messages) ? options.messages : null,
           };

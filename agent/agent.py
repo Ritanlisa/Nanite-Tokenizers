@@ -14,6 +14,7 @@ from langchain.agents import create_agent
 from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
 from langchain_core.outputs import LLMResult
+from langchain_core.tools import BaseTool
 from agent.chatOpenAIWithReasoning import ChatOpenAIWithReasoning
 from pydantic import SecretStr
 try:
@@ -107,10 +108,41 @@ class SmartAgent:
         )
         caps = get_capabilities()
         if caps.tool_calling_supported is False:
-            self.tools = []
+            self.tools: list[BaseTool] = []
         else:
-            self.tools = tools
+            self.tools = list(tools)
         self.agent = self._create_agent()
+
+    @staticmethod
+    def _normalize_tool_names(values: Optional[list[str]]) -> list[str]:
+        if not values:
+            return []
+        deduped: list[str] = []
+        for item in values:
+            name = str(item or "").strip()
+            if name and name not in deduped:
+                deduped.append(name)
+        return deduped
+
+    @staticmethod
+    def _is_rag_tool_name(name: str) -> bool:
+        return str(name or "").strip().startswith("rag_")
+
+    def _select_tools_for_request(self, allowed_mcp_tools: Optional[list[str]]) -> list[BaseTool]:
+        if not self.tools:
+            return []
+        allowed_names = self._normalize_tool_names(allowed_mcp_tools)
+        if not allowed_names:
+            return list(self.tools)
+        allowed_set = set(allowed_names)
+        selected: list[BaseTool] = []
+        for tool in self.tools:
+            tool_name = str(getattr(tool, "name", "") or "").strip()
+            if not tool_name:
+                continue
+            if self._is_rag_tool_name(tool_name) or tool_name in allowed_set:
+                selected.append(tool)
+        return selected
 
     @staticmethod
     def _tool_sugar_protocol_note() -> str:
@@ -166,12 +198,13 @@ class SmartAgent:
         ]
         return "\n\n" + "\n".join(lines)
 
-    def _create_agent(self):
-        protocol_note = self._tool_sugar_protocol_note() if self.tools else ""
+    def _create_agent(self, selected_tools: Optional[list[BaseTool]] = None):
+        tools_for_agent = list(selected_tools) if selected_tools is not None else list(self.tools)
+        protocol_note = self._tool_sugar_protocol_note() if tools_for_agent else ""
         custom_prompt = (config.settings.SYSTEM_PROMPT or "").strip()
         if custom_prompt:
             system_prompt = custom_prompt + protocol_note
-        elif self.tools:
+        elif tools_for_agent:
             system_prompt = (
                 _bi(
                     "你是一个可使用检索与执行工具的智能助手。", 
@@ -236,7 +269,7 @@ class SmartAgent:
             )
         return create_agent(
             model=self.llm,
-            tools=self.tools,
+            tools=tools_for_agent,
             system_prompt=system_prompt,
             debug=config.settings.AGENT_VERBOSE,
             name="smart_agent",
@@ -309,14 +342,20 @@ class SmartAgent:
         )
         return any(item in message for item in timeout_keys)
 
-    async def _ainvoke_with_retry(self, input_messages: list[Any], callbacks: list[BaseCallbackHandler]) -> dict:
+    async def _ainvoke_with_retry(
+        self,
+        input_messages: list[Any],
+        callbacks: list[BaseCallbackHandler],
+        agent_runner: Optional[Any] = None,
+    ) -> dict:
+        runner = agent_runner or self.agent
         retry_times = max(0, int(getattr(config.settings, "AGENT_LLM_RETRY_TIMES", 0)))
         base_delay = float(getattr(config.settings, "AGENT_LLM_RETRY_DELAY", 1.0))
         attempts = retry_times + 1
         last_exc: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                result = await self.agent.ainvoke(
+                result = await runner.ainvoke(
                     cast(Any, {"messages": input_messages}),
                     cast(
                         Any,
@@ -344,7 +383,13 @@ class SmartAgent:
             raise last_exc
         raise RuntimeError("ainvoke retry loop exited unexpectedly")
 
-    def _invoke_with_retry(self, input_messages: list[Any], callbacks: list[BaseCallbackHandler]) -> dict:
+    def _invoke_with_retry(
+        self,
+        input_messages: list[Any],
+        callbacks: list[BaseCallbackHandler],
+        agent_runner: Optional[Any] = None,
+    ) -> dict:
+        runner = agent_runner or self.agent
         retry_times = max(0, int(getattr(config.settings, "AGENT_LLM_RETRY_TIMES", 0)))
         base_delay = float(getattr(config.settings, "AGENT_LLM_RETRY_DELAY", 1.0))
         invoke_timeout = int(getattr(config.settings, "AGENT_INVOKE_TIMEOUT", 180))
@@ -354,7 +399,7 @@ class SmartAgent:
             try:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
                     fut = ex.submit(
-                        self.agent.invoke,
+                        runner.invoke,
                         cast(Any, {"messages": input_messages}),
                         cast(
                             Any,
@@ -511,6 +556,7 @@ class SmartAgent:
         image_urls: Optional[list[str]] = None,
         rag_db_names: Optional[list[str]] = None,
         force_agent: bool = False,
+        allowed_mcp_tools: Optional[list[str]] = None,
         conversation_path: Optional[list[str]] = None,
     ) -> str:
         self.memory.add_user_message(user_input)
@@ -538,10 +584,12 @@ class SmartAgent:
 
             callback = TokenLimitCallback(config.settings.MAX_TOTAL_TOKENS)
             tool_callback = self._tool_callback()
+            active_agent = self._create_agent(self._select_tools_for_request(allowed_mcp_tools))
             try:
                 result = self._invoke_with_retry(
                     cast(list[Any], messages_override or self.memory.get_messages()),
                     [callback, tool_callback],
+                    active_agent,
                 )
                 answer, total_tokens = self._extract_answer_and_tokens(cast(dict, result))
                 logger.info("Token usage: %s", total_tokens)
@@ -576,6 +624,7 @@ class SmartAgent:
         image_urls: Optional[list[str]] = None,
         rag_db_names: Optional[list[str]] = None,
         force_agent: bool = False,
+        allowed_mcp_tools: Optional[list[str]] = None,
         messages: Optional[list[dict]] = None,  # 新增参数
         conversation_path: Optional[list[str]] = None,
     ) -> str:
@@ -623,6 +672,7 @@ class SmartAgent:
 
             callback = TokenLimitCallback(config.settings.MAX_TOTAL_TOKENS)
             tool_callback = self._tool_callback()
+            active_agent = self._create_agent(self._select_tools_for_request(allowed_mcp_tools))
             try:
                 token = set_agent_active()
                 try:
@@ -631,6 +681,7 @@ class SmartAgent:
                     result = await self._ainvoke_with_retry(
                         input_messages,
                         [callback, tool_callback],
+                        active_agent,
                     )
                 finally:
                     reset_agent_active(token)
@@ -667,6 +718,7 @@ class SmartAgent:
         image_urls: Optional[list[str]] = None,
         rag_db_names: Optional[list[str]] = None,
         force_agent: bool = False,
+        allowed_mcp_tools: Optional[list[str]] = None,
         messages: Optional[list[dict]] = None,
         conversation_path: Optional[list[str]] = None,
     ):
@@ -911,6 +963,7 @@ class SmartAgent:
             stream_callback = StreamCallback(queue)
             callback = TokenLimitCallback(config.settings.MAX_TOTAL_TOKENS)
             tool_callback = self._tool_callback()
+            active_agent = self._create_agent(self._select_tools_for_request(allowed_mcp_tools))
 
             async def run_agent():
                 nonlocal error_text, final_answer
@@ -920,6 +973,7 @@ class SmartAgent:
                     result = await self._ainvoke_with_retry(
                         input_messages,
                         [callback, stream_callback, tool_callback],
+                        active_agent,
                     )
                     answer, total_tokens = self._extract_answer_and_tokens(cast(dict, result))
                     final_answer = answer
