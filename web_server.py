@@ -42,6 +42,7 @@ class ChatRequest(BaseModel):
     rag_db_name: Optional[str] = None
     rag_db_names: Optional[list[str]] = None
     force_agent: bool = False
+    allowed_mcp_tools: Optional[list[str]] = None
     messages: Optional[list[dict]] = None
     conversation_path: Optional[list[str]] = None
     language: Optional[str] = None
@@ -197,6 +198,36 @@ def create_app() -> FastAPI:
         db_dir = _db_dir(name)
         docs_dir = _db_docs_dir(name)
         return os.path.isdir(db_dir) and os.path.isdir(docs_dir)
+
+    def _normalize_tool_name_list(values: Optional[list[str]]) -> list[str]:
+        if not values:
+            return []
+        deduped: list[str] = []
+        for item in values:
+            name = str(item or "").strip()
+            if name and name not in deduped:
+                deduped.append(name)
+        return deduped
+
+    def _is_rag_tool_name(name: str) -> bool:
+        return str(name or "").strip().startswith("rag_")
+
+    def _list_selectable_mcp_tools() -> list[dict[str, str]]:
+        items: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for tool in registered_tools:
+            name = str(getattr(tool, "name", "") or "").strip()
+            if not name or name in seen or _is_rag_tool_name(name):
+                continue
+            seen.add(name)
+            items.append(
+                {
+                    "name": name,
+                    "description": str(getattr(tool, "description", "") or ""),
+                }
+            )
+        items.sort(key=lambda item: item["name"])
+        return items
 
     def _list_valid_dbs() -> list[str]:
         base_dir = config.settings.PERSIST_DIR
@@ -651,7 +682,7 @@ def create_app() -> FastAPI:
                 rag_db_names.append(normalized)
 
         logger.debug(
-            "[chat:req] session=%s stream=%s model=%s temp=%s force_agent=%s lang=%s rag=%s msg_len=%s images=%s messages=%s",
+            "[chat:req] session=%s stream=%s model=%s temp=%s force_agent=%s lang=%s rag=%s allowed_mcp=%s msg_len=%s images=%s messages=%s",
             request.session_id,
             request.stream,
             request.model,
@@ -659,6 +690,7 @@ def create_app() -> FastAPI:
             request.force_agent,
             language,
             rag_db_names,
+            _normalize_tool_name_list(request.allowed_mcp_tools),
             len(request.message or ""),
             len(request.images or []),
             len(request.messages or []),
@@ -674,6 +706,7 @@ def create_app() -> FastAPI:
                         image_urls=request.images or [],
                         rag_db_names=rag_db_names,
                         force_agent=request.force_agent,
+                        allowed_mcp_tools=_normalize_tool_name_list(request.allowed_mcp_tools),
                         messages=request.messages,  # 新增参数
                         conversation_path=request.conversation_path,
                     ):
@@ -694,6 +727,7 @@ def create_app() -> FastAPI:
                 image_urls=request.images or [],
                 rag_db_names=rag_db_names,
                 force_agent=request.force_agent,
+                allowed_mcp_tools=_normalize_tool_name_list(request.allowed_mcp_tools),
                 messages=request.messages,  # 新增参数
                 conversation_path=request.conversation_path,
             )
@@ -763,6 +797,10 @@ def create_app() -> FastAPI:
                 }
             )
         return {"tools": items}
+
+    @app.get("/api/mcp/tools")
+    async def mcp_tools():
+        return {"tools": _list_selectable_mcp_tools()}
 
     @app.post("/api/debug/tool-invoke")
     async def debug_tool_invoke(request: DebugToolInvokeRequest):

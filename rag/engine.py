@@ -2048,7 +2048,7 @@ class RAGEngine:
         self._ensure_db_context()
         entries = self._load_doc_tree_entries()
         if not entries:
-            return []
+            return ""
         available_doc_names = {
             str(entry.get("doc_name") or "").strip()
             for entry in entries
@@ -2060,7 +2060,7 @@ class RAGEngine:
             data_dir=str(config.settings.DATA_DIR or ""),
         )
         if not matched_doc_names:
-            return []
+            return ""
 
         catalog: List[Dict[str, Any]] = []
         for entry in entries:
