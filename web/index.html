@@ -3179,33 +3179,95 @@
       };
 
       const buildCopyTextForMessage = (message) => {
-        const parsedTools = parseToolMarkup(message?.text || "");
-        const content = (parsedTools.cleanText || "").trim();
-        const calls = collectMessageToolCalls(message);
-        const parts = [content];
+        const rawText = message.text || '';
+        const fragments = [];
+        let i = 0;
+        const len = rawText.length;
+        let currentText = '';
 
-        if (Array.isArray(calls) && calls.length) {
-          const toolLines = ["", "Tool Calls:"];
-          calls.forEach((call, index) => {
-            const toolName = String(call?.tool_name || "tool");
-            const inputText = String(call?.tool_input || "").trim();
-            const outputText = String(call?.tool_output || "").trim();
-            toolLines.push(`- ${index + 1}. ${toolName}`);
-            toolLines.push("  Input:");
-            toolLines.push("```text");
-            toolLines.push(inputText || "(empty)");
-            toolLines.push("```");
-            toolLines.push("  Output:");
-            toolLines.push("```text");
-            toolLines.push(outputText || "(empty)");
-            toolLines.push("```");
-          });
-          parts.push(toolLines.join("\n"));
+        const flushText = () => {
+          if (currentText) {
+            fragments.push({ type: 'text', content: currentText });
+            currentText = '';
+          }
+        };
+
+        // 解析与渲染完全相同的标签顺序（<think> 和 <tool>）
+        while (i < len) {
+          if (rawText[i] === '<' && (rawText.substr(i, 6) === '<think' || rawText.substr(i, 5) === '<tool')) {
+            flushText();
+            const isThink = rawText.substr(i, 6) === '<think';
+            const tagName = isThink ? 'think' : 'tool';
+            const startTag = `<${tagName}`;
+            const endTag = `</${tagName}>`;
+
+            const tagEnd = rawText.indexOf('>', i);
+            if (tagEnd === -1) {
+              // 不完整的开始标签，直接当作普通文本
+              currentText += rawText.slice(i);
+              break;
+            }
+
+            i = tagEnd + 1;
+            const closePos = rawText.indexOf(endTag, i);
+
+            if (closePos === -1) {
+              // 未闭合标签，取剩余全部内容
+              const innerContent = rawText.slice(i);
+              if (isThink) {
+                fragments.push({ type: 'think', content: innerContent, incomplete: true });
+              } else {
+                fragments.push({ type: 'tool', content: innerContent, incomplete: true });
+              }
+              break;
+            }
+
+            // 正常闭合的标签
+            const innerContent = rawText.slice(i, closePos);
+            if (isThink) {
+              fragments.push({ type: 'think', content: innerContent });
+            } else {
+              fragments.push({ type: 'tool', content: innerContent });
+            }
+            i = closePos + endTag.length;
+          } else {
+            currentText += rawText[i];
+            i++;
+          }
         }
+        flushText();
 
-        return parts.filter((item) => item !== "").join("\n");
+        // 构建复制文本，按顺序拼接
+        const parts = [];
+        fragments.forEach((frag) => {
+          if (frag.type === 'text') {
+            parts.push(frag.content.trim());
+          } else if (frag.type === 'think') {
+            const thinkText = frag.content.trim();
+            if (thinkText) {
+              parts.push(`[思考]\n${thinkText}`);
+            }
+          } else if (frag.type === 'tool') {
+            // 从 <tool> 内部解析各字段
+            const extractTag = (content, tag) => {
+              const regex = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'i');
+              const match = content.match(regex);
+              return match ? match[1] : '';
+            };
+            const toolName = extractTag(frag.content, 'type') || 'tool';
+            const toolInputRaw = extractTag(frag.content, 'query');
+            const toolOutputRaw = extractTag(frag.content, 'result');
+            const isPending = !frag.incomplete && !toolOutputRaw && !extractTag(frag.content, 'result'); // 简化判断
+
+            const inputText = formatToolPayloadText(toolInputRaw) || t('pendingInput');
+            const outputText = isPending ? t('toolCallingInProgress') : (formatToolPayloadText(toolOutputRaw) || t('emptyOutput'));
+
+            parts.push(`[工具调用: ${toolName}]\n${t('inputLabel')}\n${inputText}\n${t('outputLabel')}\n${outputText}`);
+          }
+        });
+
+        return parts.filter(p => p).join('\n\n');
       };
-
       const copyTextToClipboard = async (text) => {
         const payload = String(text || "");
         if (!payload.trim()) return false;

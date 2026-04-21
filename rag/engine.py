@@ -2043,7 +2043,7 @@ class RAGEngine:
         }
 
 
-    def get_document_catalog(self, doc_name: str) -> List[Dict[str, Any]]:
+    def get_document_catalog(self, doc_name: str) -> str:
         """返回指定文档的目录：章节路径及起始页码。"""
         self._ensure_db_context()
         entries = self._load_doc_tree_entries()
@@ -2084,14 +2084,27 @@ class RAGEngine:
                 row["level"] = max(1, int(row.get("level") or 1))
                 row["parent_title"] = str(row.get("parent_title") or "").strip() or None
                 catalog.append(row)
-
-        return sorted(
+        
+        sorted_pages: List[Dict[str, Any]] = sorted(
             catalog,
             key=lambda item: (
-                str(item.get("doc_name") or ""),
-                int(item.get("page") or 0),
-                int(item.get("end_page") or item.get("page") or 0),
-                int(item.get("level") or 1),
-                str(item.get("title") or ""),
+                str(item["doc_name"]),
+                int(item["page"]),
+                int(item["level"]),
+                -int(item["end_page"]),
+                str(item["title"]),
             ),
         )
+        
+        TABLE_CHAR_SUBMODULE = "├"
+        TABLE_CHAR_SUBMODULE_LAST = "└"
+        TABLE_CHAR_PARRELL = "│"
+
+        format_return: str = doc_name
+        for index, page in enumerate(sorted_pages):
+            has_successor = index < len(sorted_pages) - 1 \
+                and sorted_pages[index + 1]["level"] >= page["level"] \
+                and str(sorted_pages[index + 1]["doc_name"]) == str(page["doc_name"])
+            format_return += f"\n{TABLE_CHAR_PARRELL*(page['level'] - 1)}{TABLE_CHAR_SUBMODULE_LAST if not has_successor else TABLE_CHAR_SUBMODULE} {page['title']} (page {page['page']} - {page['end_page']})"
+        
+        return format_return

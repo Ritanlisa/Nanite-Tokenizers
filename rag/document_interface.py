@@ -2081,16 +2081,54 @@ class RAG_DB_Document(Chapter, ABC):
                 citation_target_segment_index = idx
                 break
 
-        page_images = list(page.get_images() or [])
-        page_image_indexes = list(range(1, len(page_images) + 1))
+        page_images_all = list(page.get_images() or [])
+        real_pairs: List[tuple[int, Any]] = [
+            (idx, item)
+            for idx, item in enumerate(page_images_all, start=1)
+            if self._looks_like_real_image_asset(item)
+        ]
+        if real_pairs:
+            page_images = [item for _, item in real_pairs]
+            page_image_indexes = [idx for idx, _ in real_pairs]
+        else:
+            page_images = list(page_images_all)
+            page_image_indexes = list(range(1, len(page_images_all) + 1))
         caption_target_indexes = [
             idx
             for idx, item in enumerate(segments)
             if self._extract_figure_captions(str(item.get("text") or ""))
         ]
         image_target_indexes = caption_target_indexes or list(range(len(segments)))
-        image_groups = self._group_items_evenly(page_images, len(image_target_indexes)) if image_target_indexes else []
-        image_index_groups = self._group_items_evenly(page_image_indexes, len(image_target_indexes)) if image_target_indexes else []
+
+        if caption_target_indexes and len(page_images) >= 2 and len(segments) >= 2:
+            first_segment = segments[0] if isinstance(segments[0], dict) else {}
+            first_marker = first_segment.get("marker") if isinstance(first_segment, dict) else None
+            first_text = str(first_segment.get("text") or "") if isinstance(first_segment, dict) else ""
+            first_lines = [str(line or "").strip() for line in first_text.splitlines() if str(line or "").strip()]
+            has_prose = any((not line.startswith("#")) and len(line) >= 8 for line in first_lines)
+
+            # If a page starts with carry-over prose from previous subsection and then enters
+            # a new subsection that has captions, keep a slot for the carry-over part to avoid
+            # pulling all page images into the latter subsection.
+            if first_marker is None and has_prose and 0 not in image_target_indexes:
+                image_target_indexes = [0] + image_target_indexes
+
+        image_groups = self._group_items_contiguously(page_images, len(image_target_indexes)) if image_target_indexes else []
+        image_index_groups = self._group_items_contiguously(page_image_indexes, len(image_target_indexes)) if image_target_indexes else []
+
+        source_markdown = str(getattr(page, "markdown_text", "") or "")
+        token_targets_by_caption: Dict[str, List[str]] = {}
+        for raw_line in source_markdown.splitlines():
+            line = str(raw_line or "").strip()
+            if not line:
+                continue
+            token_match = re.fullmatch(r"!\[([^\]]*)\]\((image://page-\d+/\d+)\)", line)
+            if token_match is None:
+                continue
+            alt_text = str(token_match.group(1) or "").strip()
+            key = self._normalized_heading_text(alt_text)
+            if key:
+                token_targets_by_caption.setdefault(key, []).append(line)
 
         fragments: List[MonoPage] = []
         fragment_count = len(segments)
@@ -2127,6 +2165,7 @@ class RAG_DB_Document(Chapter, ABC):
 
             fragment_text = str(segment.get("text") or "")
             marker = segment.get("marker")
+            segment_captions = self._extract_figure_captions(fragment_text)
             fragment_markdown = self._render_plaintext_page_to_markdown(
                 fragment_text,
                 start_markers=[dict(marker)] if isinstance(marker, dict) else None,
@@ -2135,6 +2174,35 @@ class RAG_DB_Document(Chapter, ABC):
                 page_image_indexes=fragment_image_indexes,
                 page_citations=list(assets.citations or []),
             )
+
+            # Keep original page image tokens attached to the segment whose caption matches.
+            matched_rows: List[str] = []
+            for caption in segment_captions:
+                key = self._normalized_heading_text(caption)
+                if not key:
+                    continue
+                rows = token_targets_by_caption.get(key) or []
+                if rows:
+                    matched_rows.append(rows.pop(0))
+
+            if matched_rows and (fragment_image_indexes or list(assets.images or [])):
+                existing_targets = {
+                    str(match.group(1) or "").strip()
+                    for match in re.finditer(r"!\[[^\]]*\]\((image://page-\d+/\d+)\)", fragment_markdown)
+                }
+                append_rows: List[str] = []
+                for row in matched_rows:
+                    token_match = re.search(r"\((image://page-\d+/\d+)\)", row)
+                    target = str(token_match.group(1) or "").strip() if token_match else ""
+                    if target and target in existing_targets:
+                        continue
+                    append_rows.append(row)
+                    if target:
+                        existing_targets.add(target)
+                if append_rows:
+                    fragment_markdown = f"{fragment_markdown}\n\n" + "\n\n".join(append_rows)
+                    fragment_markdown = fragment_markdown.strip()
+
             fragments.append(
                 SemiPage(
                     markdown_text=fragment_markdown,

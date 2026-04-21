@@ -1068,10 +1068,9 @@ class RAGDocCatalogTool(InputSugarTool):
                 asyncio.get_event_loop().run_in_executor(None, rag_engine.get_document_catalog, doc_name),
                 timeout=config.settings.RAG_TOOL_TIMEOUT,
             )
-            payload = _to_json_safe(catalog)
-            if not isinstance(payload, list):
-                payload = []
-            output_text = json.dumps(payload, ensure_ascii=False)
+            output_text = _to_json_safe(catalog)
+            if not isinstance(output_text, str):
+                output_text = "output format error"
             return output_text
         except asyncio.TimeoutError:
             output_text = _t("获取目录超时。", "Fetching catalog timed out.")
