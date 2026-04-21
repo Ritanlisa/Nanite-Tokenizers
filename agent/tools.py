@@ -2270,6 +2270,21 @@ class BugTool(InputSugarTool):
 def _build_skill_tools() -> list[BaseTool]:
     return [SkillBridgeTool(skill=skill) for skill in get_agent_skills()]
 
+### Below this are tools for building SysML-v2.0 Database Only
+
+class AddEntityTool(InputSugarTool):
+    name: str = "add_entity"
+    description: str = _bi("向数据库添加实体记录。", "Add an entity record to the database.")
+    args_schema: Any = BaseModel  # TODO: 定义具体的输入模型
+
+    pass
+
+class AddRelationTool(InputSugarTool):
+    name: str = "add_relation"
+    description: str = _bi("向数据库添加关系记录。", "Add a relation record to the database.")
+    args_schema: Any = BaseModel  # TODO: 定义具体的输入模型
+
+    pass
 
 tools = [
     # RAG 工具
