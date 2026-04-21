@@ -748,7 +748,11 @@ def create_app() -> FastAPI:
                 schema_fn = getattr(args_schema, "model_json_schema", None)
                 if callable(schema_fn):
                     try:
-                        schema = schema_fn()
+                        result = schema_fn()
+                        if isinstance(result, dict):
+                            schema = result
+                        else:
+                            schema = None
                     except Exception:
                         schema = None
             items.append(
