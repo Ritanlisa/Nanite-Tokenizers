@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 rag_engine = RAGEngine()
 _EMPTY = object()
-_LAST_SEARCH_STATE: dict[str, Any] | None = None
+_LAST_SEARCH_STATES: dict[str, dict[str, Any]] = {}
 _HIDDEN_LINK_STORE: dict[str, list[str]] = {}
 _SUGAR_URL_MARKS: dict[str, int] = {}
 _TOOL_REF_PATTERN = re.compile(r"^tool\[(-?\d+)\]")
@@ -666,8 +666,8 @@ def _save_last_search(
     page_size: int,
     timestamp: str,
 ) -> dict[str, Any]:
-    global _LAST_SEARCH_STATE
-    _LAST_SEARCH_STATE = {
+    session_id = get_current_session_id() or "__global__"
+    state: dict[str, Any] = {
         "search_type": search_type,
         "query": query,
         "filters": filters,
@@ -676,7 +676,8 @@ def _save_last_search(
         "current_page": 1,
         "timestamp": timestamp,
     }
-    return _build_search_page_payload(_LAST_SEARCH_STATE, 1)
+    _LAST_SEARCH_STATES[session_id] = state
+    return _build_search_page_payload(state, 1)
 
 
 def _resolve_paging_target(command: str, current_page: int, total_pages: int) -> int:
@@ -1365,7 +1366,8 @@ class RAGLastSearchPagingTool(InputSugarTool):
         call_id = start_current_tool_call(self.name, {"page": page})
         output_text = ""
         try:
-            state = _LAST_SEARCH_STATE
+            session_id = get_current_session_id() or "__global__"
+            state = _LAST_SEARCH_STATES.get(session_id)
             if state is None:
                 output_text = _t(
                     "当前没有可翻页的搜索结果，请先执行 rag_regex_search 或 rag_vector_search。",
