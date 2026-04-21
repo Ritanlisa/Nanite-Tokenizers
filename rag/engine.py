@@ -4,13 +4,14 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 import sys
 import time
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, cast
+from typing import Any, Callable, Dict, List, Literal, Optional, Set, cast
 import atexit
 
 import faiss
@@ -43,7 +44,7 @@ from monitoring import rag_cache_hit_ratio, rag_query_count, rag_query_latency
 from rag.documents import (
     RAG_DB_Document,
     chunk_documents_from_rag_documents,
-    load_chunk_documents_from_paths,
+    # load_chunk_documents_from_paths,
     load_chunk_documents_from_data_dir,
     load_chunk_documents_from_persist_dir,
     load_rag_documents_from_paths,
@@ -52,7 +53,7 @@ from rag.documents import (
 )
 from rag.vector_store import get_vector_store
 from rag.line_profiler_instrument import profile_if_enabled, start_profiler, stop_profiler
-from rag.tfidf_keyword_extractor import tfidf_extract as extract_document_keywords
+from rag.logprob_keyword_extractor import logprobs_extract as extract_document_keywords
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,20 @@ INDEX_METADATA_MAX_VALUE_LENGTH = 320
 INDEX_METADATA_DROP_KEYS = {"native_catalog", "style_catalog", "font_catalog"}
 DOC_TREE_CACHE_FILENAME = "doc_tree_cache.json"
 DOC_TREE_CACHE_VERSION = 1
+DOC_TREE_KEYWORD_VERSION = 2
+
+
+def _emit_progress_callback(
+    progress_callback: Optional[Callable[[str, Dict[str, Any]], None]],
+    stage: str,
+    **payload: Any,
+) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(str(stage), {str(key): value for key, value in payload.items()})
+    except Exception as exc:
+        logger.debug("Ignoring RAG progress callback failure (%s): %s", stage, exc)
 
 
 def _lock_shared_file(handle) -> None:
@@ -820,6 +835,42 @@ class RAGEngine:
         self._refresh_doc_tree_keywords(entries)
         return entries
 
+    @staticmethod
+    def _normalize_keyword_list(values: Any) -> List[str]:
+        return [
+            str(keyword).strip()
+            for keyword in list(values or [])
+            if str(keyword).strip()
+        ]
+
+    @staticmethod
+    def _doc_tree_keywords_need_refresh(entry: Dict[str, Any]) -> bool:
+        if int(entry.get("keyword_version") or 0) != DOC_TREE_KEYWORD_VERSION:
+            return True
+        return not isinstance(entry.get("keywords"), list)
+
+    @staticmethod
+    def _resolve_keyword_limit(total_keywords: int, top_k: int, top_k_percent: float) -> int:
+        if total_keywords <= 0:
+            return 0
+        limits: List[int] = []
+        top_k_value = int(top_k)
+        if top_k_value > 0:
+            limits.append(min(total_keywords, top_k_value))
+        try:
+            percent_value = float(top_k_percent)
+        except (TypeError, ValueError):
+            percent_value = -1.0
+        if math.isfinite(percent_value) and 0.0 < percent_value <= 1.0:
+            limits.append(max(1, min(total_keywords, int(math.ceil(total_keywords * percent_value)))))
+        return min(limits) if limits else total_keywords
+
+    @staticmethod
+    def _keyword_rank_percent(rank: int, total_keywords: int) -> float:
+        if total_keywords <= 0:
+            return 1.0
+        return float(max(1, rank)) / float(total_keywords)
+
     def _refresh_doc_tree_keywords(self, entries: List[Dict[str, Any]]) -> None:
         texts_by_doc_name: Dict[str, List[str]] = {}
         for entry in entries:
@@ -836,14 +887,32 @@ class RAGEngine:
                 keyword_text_parts.append(markdown_text)
             if keyword_text_parts:
                 texts_by_doc_name.setdefault(doc_name, []).append("\n".join(keyword_text_parts))
-        keyword_map = extract_document_keywords(texts_by_doc_name, top_k=50) if texts_by_doc_name else {}
+        keyword_map = extract_document_keywords(texts_by_doc_name, top_k=-1) if texts_by_doc_name else {}
         for entry in entries:
             doc_name = str(entry.get("doc_name") or "").strip()
-            entry["keywords"] = [
-                str(keyword).strip()
-                for keyword in list(keyword_map.get(doc_name) or [])
-                if str(keyword).strip()
-            ]
+            entry["keywords"] = self._normalize_keyword_list(keyword_map.get(doc_name) or [])
+            entry["keyword_version"] = DOC_TREE_KEYWORD_VERSION
+            entry["keyword_algorithm"] = "logprobs_square_surprise_plus_adjusted_total_granularity"
+
+    def _ensure_doc_tree_keywords_current(
+        self,
+        entries: List[Dict[str, Any]],
+    ) -> tuple[List[Dict[str, Any]], bool]:
+        normalized_entries = [dict(item) for item in entries if isinstance(item, dict)]
+        if not normalized_entries:
+            return [], False
+
+        changed = False
+        for entry in normalized_entries:
+            normalized_keywords = self._normalize_keyword_list(entry.get("keywords") or [])
+            if normalized_keywords != list(entry.get("keywords") or []):
+                changed = True
+            entry["keywords"] = normalized_keywords
+
+        if any(self._doc_tree_keywords_need_refresh(entry) for entry in normalized_entries):
+            self._refresh_doc_tree_keywords(normalized_entries)
+            changed = True
+        return normalized_entries, changed
 
     def _persist_doc_tree_cache_from_rag_docs(
         self,
@@ -874,13 +943,19 @@ class RAGEngine:
         self._refresh_doc_tree_keywords(merged_entries)
         self._save_doc_tree_cache({"version": DOC_TREE_CACHE_VERSION, "documents": merged_entries})
 
-    def _load_doc_tree_entries(self) -> List[Dict[str, Any]]:
+    def _load_doc_tree_entries(self, *, ensure_keywords_current: bool = False) -> List[Dict[str, Any]]:
         payload = self._load_doc_tree_cache()
-        return [
+        entries = [
             dict(item)
             for item in list(payload.get("documents") or [])
             if isinstance(item, dict)
         ]
+        if not ensure_keywords_current:
+            return entries
+        ensured_entries, changed = self._ensure_doc_tree_keywords_current(entries)
+        if changed:
+            self._save_doc_tree_cache({"version": DOC_TREE_CACHE_VERSION, "documents": ensured_entries})
+        return ensured_entries
 
     @staticmethod
     def _filter_doc_tree_search_rows(
@@ -1218,33 +1293,107 @@ class RAGEngine:
         self._ensure_db_context()
         self._add_documents_incremental(docs)
 
-    def add_documents_from_paths(self, paths: List[str]) -> int:
+    def add_documents_from_paths(
+        self,
+        paths: List[str],
+        *,
+        progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    ) -> int:
         self._ensure_db_context()
-        rag_docs = load_rag_documents_from_paths(paths, SUPPORTED_RAG_EXTENSIONS)
+        _emit_progress_callback(progress_callback, "engine_started", mode="add", path_count=len(paths))
+        rag_docs = load_rag_documents_from_paths(
+            paths,
+            SUPPORTED_RAG_EXTENSIONS,
+            progress_callback=progress_callback,
+        )
         if not rag_docs:
+            _emit_progress_callback(progress_callback, "engine_completed", mode="add", added=0, doc_count=0)
             return 0
         docs = chunk_documents_from_rag_documents(rag_docs)
         if docs:
+            _emit_progress_callback(
+                progress_callback,
+                "index_started",
+                mode="add",
+                doc_count=len(rag_docs),
+                chunk_count=len(docs),
+            )
             self._add_documents_incremental(docs)
+            _emit_progress_callback(
+                progress_callback,
+                "index_completed",
+                mode="add",
+                doc_count=len(rag_docs),
+                chunk_count=len(docs),
+            )
+        _emit_progress_callback(progress_callback, "persist_started", mode="add", doc_count=len(rag_docs))
         self._persist_doc_tree_cache_from_rag_docs(rag_docs, replace=False)
+        _emit_progress_callback(
+            progress_callback,
+            "persist_completed",
+            mode="add",
+            added=len(docs),
+            doc_count=len(rag_docs),
+        )
         return len(docs)
 
-    def rebuild_index_from_paths(self, paths: List[str]) -> int:
+    def rebuild_index_from_paths(
+        self,
+        paths: List[str],
+        *,
+        progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    ) -> int:
         self._ensure_db_context()
         self.index = None
         self.query_engine = None
+        _emit_progress_callback(progress_callback, "engine_started", mode="rebuild", path_count=len(paths))
         if not paths:
             self._save_doc_tree_cache(self._default_doc_tree_cache())
             self._save_doc_registry(set())
+            _emit_progress_callback(progress_callback, "engine_completed", mode="rebuild", added=0, doc_count=0)
             return 0
-        rag_docs = load_rag_documents_from_paths(paths, SUPPORTED_RAG_EXTENSIONS)
+        rag_docs = load_rag_documents_from_paths(
+            paths,
+            SUPPORTED_RAG_EXTENSIONS,
+            progress_callback=progress_callback,
+        )
         docs = chunk_documents_from_rag_documents(rag_docs)
         if not docs:
+            _emit_progress_callback(progress_callback, "persist_started", mode="rebuild", doc_count=len(rag_docs))
             self._persist_doc_tree_cache_from_rag_docs(rag_docs, replace=True)
             self._save_doc_registry(set())
+            _emit_progress_callback(
+                progress_callback,
+                "persist_completed",
+                mode="rebuild",
+                added=0,
+                doc_count=len(rag_docs),
+            )
             return 0
+        _emit_progress_callback(
+            progress_callback,
+            "index_started",
+            mode="rebuild",
+            doc_count=len(rag_docs),
+            chunk_count=len(docs),
+        )
         self._build_index_from_docs(docs)
+        _emit_progress_callback(
+            progress_callback,
+            "index_completed",
+            mode="rebuild",
+            doc_count=len(rag_docs),
+            chunk_count=len(docs),
+        )
+        _emit_progress_callback(progress_callback, "persist_started", mode="rebuild", doc_count=len(rag_docs))
         self._persist_doc_tree_cache_from_rag_docs(rag_docs, replace=True)
+        _emit_progress_callback(
+            progress_callback,
+            "persist_completed",
+            mode="rebuild",
+            added=len(docs),
+            doc_count=len(rag_docs),
+        )
         return len(docs)
 
     def rebuild_index(self) -> int:
@@ -1754,7 +1903,7 @@ class RAGEngine:
     def list_documents(self) -> List[Dict[str, Any]]:
         """返回当前数据库中的所有文档标题（文件名）及其估计页数。"""
         self._ensure_db_context()
-        entries = self._load_doc_tree_entries()
+        entries = self._load_doc_tree_entries(ensure_keywords_current=True)
         if not entries:
             docs_dir = os.path.join(config.get_rag_persist_dir(), "docs")
             if not os.path.isdir(docs_dir):
@@ -1780,6 +1929,7 @@ class RAGEngine:
             return fallback
 
         summaries: List[Dict[str, Any]] = []
+        keyword_limit = max(1, int(getattr(config.settings, "DOC_TREE_SUMMARY_KEYWORDS_LIMIT", 50) or 50))
         for entry in entries:
             summaries.append(
                 {
@@ -1793,10 +1943,104 @@ class RAGEngine:
                         str(keyword).strip()
                         for keyword in list(entry.get("keywords") or [])
                         if str(keyword).strip()
-                    ],
+                    ][:keyword_limit],
                 }
             )
         return self._sort_doc_tree_entries(summaries)
+
+    def keyword_search(
+        self,
+        keyword_regex: str,
+        top_k: int = -1,
+        top_k_percent: float = 0.5,
+        return_top_k: int = -1,
+        return_top_k_percent: float = -1.0,
+        document_ranker: Literal["rank_percent", "rank"] = "rank_percent",
+    ) -> Dict[str, Any]:
+        self._ensure_db_context()
+        pattern_text = str(keyword_regex or "").strip()
+        if not pattern_text:
+            raise ValueError("keyword_regex is required")
+        if document_ranker not in {"rank_percent", "rank"}:
+            raise ValueError("document_ranker must be 'rank_percent' or 'rank'")
+
+        compiled_regex = re.compile(pattern_text, re.IGNORECASE)
+        entries = self._load_doc_tree_entries(ensure_keywords_current=True)
+        documents: List[Dict[str, Any]] = []
+        return_top_k_value = int(return_top_k)
+        try:
+            return_top_k_percent_value = float(return_top_k_percent)
+        except (TypeError, ValueError):
+            return_top_k_percent_value = -1.0
+
+        for entry in entries:
+            keywords = self._normalize_keyword_list(entry.get("keywords") or [])
+            total_keywords = len(keywords)
+            if total_keywords <= 0:
+                continue
+
+            kept_keyword_count = self._resolve_keyword_limit(total_keywords, top_k, top_k_percent)
+            candidate_keywords = keywords[:kept_keyword_count]
+            matches: List[Dict[str, Any]] = []
+            for rank, keyword in enumerate(candidate_keywords, start=1):
+                if compiled_regex.search(keyword) is None:
+                    continue
+                rank_percent = self._keyword_rank_percent(rank, total_keywords)
+                matches.append(
+                    {
+                        "keyword": keyword,
+                        "rank": rank,
+                        "rank_percent": rank_percent,
+                    }
+                )
+
+            if not matches:
+                continue
+
+            best_rank = min(int(item.get("rank") or 0) for item in matches)
+            best_rank_percent = min(float(item.get("rank_percent") or 1.0) for item in matches)
+            if return_top_k_value > 0 and best_rank > return_top_k_value:
+                continue
+            if math.isfinite(return_top_k_percent_value) and return_top_k_percent_value > 0.0 and best_rank_percent > return_top_k_percent_value:
+                continue
+
+            documents.append(
+                {
+                    "doc_name": str(entry.get("doc_name") or "").strip(),
+                    "title": str(entry.get("title") or "").strip(),
+                    "page_count": int(entry.get("page_count") or 0),
+                    "chunk_count": int(entry.get("chunk_count") or 0),
+                    "pagination_mode": str(entry.get("pagination_mode") or "").strip(),
+                    "total_keyword_count": total_keywords,
+                    "kept_keyword_count": kept_keyword_count,
+                    "match_count": len(matches),
+                    "best_rank": best_rank,
+                    "best_rank_percent": best_rank_percent,
+                    "matched_keywords": matches,
+                }
+            )
+
+        documents.sort(
+            key=lambda item: (
+                float(item.get("best_rank_percent") or 1.0) if document_ranker == "rank_percent" else float(item.get("best_rank") or 10**9),
+                float(item.get("best_rank") or 10**9),
+                str(item.get("title") or item.get("doc_name") or ""),
+                str(item.get("doc_name") or ""),
+            )
+        )
+
+        return {
+            "keyword_regex": pattern_text,
+            "document_ranker": document_ranker,
+            "filters": {
+                "top_k": int(top_k),
+                "top_k_percent": float(top_k_percent),
+                "return_top_k": return_top_k_value,
+                "return_top_k_percent": return_top_k_percent_value,
+            },
+            "count": len(documents),
+            "documents": documents,
+        }
 
 
     def get_document_catalog(self, doc_name: str) -> List[Dict[str, Any]]:

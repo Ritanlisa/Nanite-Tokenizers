@@ -5,6 +5,8 @@ import logging
 import os
 import re
 import shutil
+import threading
+import uuid
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Optional
 
@@ -146,6 +148,11 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Nanite Agent API", lifespan=lifespan)
     db_name_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
     allowed_upload_exts = set(SUPPORTED_RAG_EXTENSIONS)
+    rag_db_context_lock = threading.RLock()
+    rag_build_jobs_lock = threading.Lock()
+    rag_build_jobs: dict[str, dict[str, Any]] = {}
+    rag_active_build_jobs: dict[str, str] = {}
+    terminal_job_statuses = {"completed", "failed"}
 
     def _read_settings_yaml() -> dict[str, object]:
         if not os.path.exists("settings.yaml"):
@@ -319,6 +326,7 @@ def create_app() -> FastAPI:
         if not _is_valid_db(normalized):
             raise HTTPException(status_code=404, detail="Database not found")
 
+        rag_db_context_lock.acquire()
         original_db_name = config.settings.RAG_DB_NAME
         original_db_names = list(config.settings.RAG_DB_NAMES)
         try:
@@ -332,6 +340,230 @@ def create_app() -> FastAPI:
                 RAG_DB_NAME=original_db_name,
                 RAG_DB_NAMES=original_db_names,
             )
+            rag_db_context_lock.release()
+
+    def _clone_job_payload(job: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "job_id": str(job.get("job_id") or ""),
+            "database": str(job.get("database") or ""),
+            "mode": str(job.get("mode") or ""),
+            "status": str(job.get("status") or "queued"),
+            "phase": str(job.get("phase") or "queued"),
+            "progress": max(0, min(100, int(job.get("progress") or 0))),
+            "files": int(job.get("files") or 0),
+            "added": int(job.get("added") or 0),
+            "error": str(job.get("error") or "") or None,
+            "documents": [
+                {
+                    "name": str(item.get("name") or ""),
+                    "progress": max(0, min(100, int(item.get("progress") or 0))),
+                    "status": str(item.get("status") or "queued"),
+                    "page_count": int(item.get("page_count") or 0),
+                    "chunk_count": int(item.get("chunk_count") or 0),
+                    "error": str(item.get("error") or "") or None,
+                }
+                for item in list(job.get("documents") or [])
+                if isinstance(item, dict)
+            ],
+        }
+
+    def _snapshot_rag_build_job(job_id: str) -> Optional[dict[str, Any]]:
+        with rag_build_jobs_lock:
+            job = rag_build_jobs.get(job_id)
+            if not isinstance(job, dict):
+                return None
+            return _clone_job_payload(job)
+
+    def _resolve_job_document(job: dict[str, Any], doc_name: str) -> Optional[dict[str, Any]]:
+        normalized = os.path.basename(str(doc_name or "")).strip() or str(doc_name or "").strip()
+        if not normalized:
+            return None
+        for item in list(job.get("documents") or []):
+            if not isinstance(item, dict):
+                continue
+            candidate = os.path.basename(str(item.get("name") or "")).strip() or str(item.get("name") or "").strip()
+            if candidate == normalized:
+                return item
+        return None
+
+    def _recompute_job_progress(job: dict[str, Any]) -> None:
+        progresses = [
+            max(0, min(100, int(item.get("progress") or 0)))
+            for item in list(job.get("documents") or [])
+            if isinstance(item, dict)
+        ]
+        if progresses:
+            job["progress"] = max(0, min(100, int(round(sum(progresses) / len(progresses)))))
+
+    def _register_rag_build_job(db_name: str, mode: str, doc_names: list[str]) -> dict[str, Any]:
+        with rag_build_jobs_lock:
+            active_job_id = rag_active_build_jobs.get(db_name)
+            if active_job_id:
+                active_job = rag_build_jobs.get(active_job_id)
+                if isinstance(active_job, dict) and str(active_job.get("status") or "") not in terminal_job_statuses:
+                    raise HTTPException(status_code=409, detail="A build job is already running for this database")
+                rag_active_build_jobs.pop(db_name, None)
+
+            job_id = uuid.uuid4().hex
+            documents = [
+                {
+                    "name": os.path.basename(str(name or "")).strip() or str(name or "").strip(),
+                    "progress": 0,
+                    "status": "queued",
+                    "page_count": 0,
+                    "chunk_count": 0,
+                    "error": None,
+                }
+                for name in doc_names
+                if str(name or "").strip()
+            ]
+            job = {
+                "job_id": job_id,
+                "database": db_name,
+                "mode": mode,
+                "status": "queued",
+                "phase": "queued",
+                "progress": 0,
+                "files": len(documents),
+                "added": 0,
+                "error": None,
+                "documents": documents,
+            }
+            rag_build_jobs[job_id] = job
+            rag_active_build_jobs[db_name] = job_id
+            return _clone_job_payload(job)
+
+    def _update_rag_build_job(job_id: str, stage: str, payload: dict[str, Any]) -> None:
+        with rag_build_jobs_lock:
+            job = rag_build_jobs.get(job_id)
+            if not isinstance(job, dict):
+                return
+            if str(job.get("status") or "") in terminal_job_statuses:
+                return
+
+            job["status"] = "running"
+            documents = [item for item in list(job.get("documents") or []) if isinstance(item, dict)]
+            doc_name = str(payload.get("doc_name") or "").strip()
+            target_doc = _resolve_job_document(job, doc_name)
+
+            if stage == "engine_started":
+                job["phase"] = "preparing"
+                job["progress"] = max(int(job.get("progress") or 0), 1)
+            elif stage == "load_started":
+                job["phase"] = "loading"
+                job["progress"] = max(int(job.get("progress") or 0), 5)
+            elif stage == "load_doc_completed":
+                job["phase"] = "loading"
+                if target_doc is not None:
+                    target_doc["status"] = "loaded"
+                    target_doc["progress"] = max(int(target_doc.get("progress") or 0), 20)
+            elif stage in {"load_doc_skipped", "build_doc_failed", "build_doc_skipped"}:
+                job["phase"] = "building"
+                if target_doc is not None:
+                    target_doc["status"] = "failed" if stage == "build_doc_failed" else "skipped"
+                    target_doc["progress"] = 100
+                    target_doc["error"] = str(payload.get("error") or payload.get("reason") or "") or None
+            elif stage == "build_doc_started":
+                job["phase"] = "building"
+                if target_doc is not None:
+                    target_doc["status"] = "building"
+                    target_doc["progress"] = max(int(target_doc.get("progress") or 0), 35)
+            elif stage == "build_doc_completed":
+                job["phase"] = "building"
+                if target_doc is not None:
+                    target_doc["status"] = "built"
+                    target_doc["progress"] = max(int(target_doc.get("progress") or 0), 70)
+                    target_doc["page_count"] = int(payload.get("page_count") or 0)
+                    target_doc["chunk_count"] = int(payload.get("chunk_count") or 0)
+            elif stage == "index_started":
+                job["phase"] = "indexing"
+                for item in documents:
+                    if str(item.get("status") or "") not in {"failed", "skipped"}:
+                        item["status"] = "indexing"
+                    item["progress"] = max(int(item.get("progress") or 0), 85)
+            elif stage == "index_completed":
+                job["phase"] = "indexing"
+                for item in documents:
+                    if str(item.get("status") or "") not in {"failed", "skipped"}:
+                        item["status"] = "indexed"
+                    item["progress"] = max(int(item.get("progress") or 0), 95)
+            elif stage == "persist_started":
+                job["phase"] = "persisting"
+                for item in documents:
+                    if str(item.get("status") or "") not in {"failed", "skipped"}:
+                        item["status"] = "persisting"
+                    item["progress"] = max(int(item.get("progress") or 0), 97)
+            elif stage == "persist_completed":
+                job["phase"] = "persisting"
+                job["added"] = int(payload.get("added") or job.get("added") or 0)
+                for item in documents:
+                    if str(item.get("status") or "") not in {"failed", "skipped"}:
+                        item["status"] = "persisted"
+                    item["progress"] = max(int(item.get("progress") or 0), 99)
+
+            _recompute_job_progress(job)
+
+    def _complete_rag_build_job(job_id: str, *, db_name: str, added: int) -> None:
+        with rag_build_jobs_lock:
+            job = rag_build_jobs.get(job_id)
+            if not isinstance(job, dict):
+                return
+            job["status"] = "completed"
+            job["phase"] = "completed"
+            job["added"] = int(added)
+            job["error"] = None
+            for item in list(job.get("documents") or []):
+                if not isinstance(item, dict):
+                    continue
+                item["progress"] = 100
+                if str(item.get("status") or "") not in {"failed", "skipped"}:
+                    item["status"] = "completed"
+            job["progress"] = 100
+            if rag_active_build_jobs.get(db_name) == job_id:
+                rag_active_build_jobs.pop(db_name, None)
+
+    def _fail_rag_build_job(job_id: str, *, db_name: str, error_text: str) -> None:
+        with rag_build_jobs_lock:
+            job = rag_build_jobs.get(job_id)
+            if not isinstance(job, dict):
+                return
+            job["status"] = "failed"
+            job["phase"] = "failed"
+            job["error"] = str(error_text or "")[:500]
+            for item in list(job.get("documents") or []):
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("status") or "") in {"queued", "loaded", "building", "indexed", "persisting"}:
+                    item["status"] = "failed"
+                    item["error"] = job["error"]
+            if rag_active_build_jobs.get(db_name) == job_id:
+                rag_active_build_jobs.pop(db_name, None)
+
+    def _execute_rag_build_job(job_id: str, db_name: str, mode: str, paths: list[str]) -> int:
+        with _scoped_rag_db(db_name):
+            engine = RAGEngine()
+            if mode == "rebuild":
+                _clear_db_index_artifacts(db_name)
+                added = engine.rebuild_index_from_paths(
+                    paths,
+                    progress_callback=lambda stage, payload: _update_rag_build_job(job_id, stage, payload),
+                )
+            else:
+                added = engine.add_documents_from_paths(
+                    paths,
+                    progress_callback=lambda stage, payload: _update_rag_build_job(job_id, stage, payload),
+                )
+            engine.clear_query_cache()
+            return int(added)
+
+    async def _run_rag_build_job(job_id: str, db_name: str, mode: str, paths: list[str]) -> None:
+        try:
+            added = await asyncio.to_thread(_execute_rag_build_job, job_id, db_name, mode, paths)
+        except Exception as exc:
+            logging.getLogger(__name__).exception("RAG build job failed")
+            _fail_rag_build_job(job_id, db_name=db_name, error_text=str(exc))
+            return
+        _complete_rag_build_job(job_id, db_name=db_name, added=added)
 
     def _compact_tree_document_summary(item: Any) -> dict[str, object]:
         payload = dict(item or {})
@@ -711,7 +943,6 @@ def create_app() -> FastAPI:
         if selected_db:
             if not _is_valid_db(selected_db):
                 raise HTTPException(status_code=404, detail="Database not found")
-            config.settings = config.settings.update(RAG_DB_NAME=selected_db)
             docs_dir = _db_docs_dir(selected_db)
             os.makedirs(docs_dir, exist_ok=True)
             paths = [
@@ -720,17 +951,28 @@ def create_app() -> FastAPI:
                 if os.path.isfile(os.path.join(docs_dir, name))
             ]
             paths.sort()
-            _clear_db_index_artifacts(selected_db)
+            if not paths:
+                return {"status": "ok", "documents": 0}
+            job = _register_rag_build_job(selected_db, "rebuild", [os.path.basename(path) for path in paths])
+            asyncio.create_task(_run_rag_build_job(job["job_id"], selected_db, "rebuild", paths))
+            return {**job, "status": "accepted"}
         try:
-            if selected_db:
-                count = await asyncio.to_thread(RAGEngine().rebuild_index_from_paths, paths) # type: ignore
-            else:
-                count = await asyncio.to_thread(RAGEngine().rebuild_index)
+            count = await asyncio.to_thread(RAGEngine().rebuild_index)
             RAGEngine().clear_query_cache()
         except Exception as exc:
             logging.getLogger(__name__).exception("RAG rebuild failed")
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"status": "ok", "documents": count}
+
+    @app.get("/api/rag/dbs/{db_name}/build-jobs/{job_id}")
+    async def rag_db_build_job_status(db_name: str, job_id: str):
+        name = _normalize_db_name(db_name)
+        if not _is_valid_db(name):
+            raise HTTPException(status_code=404, detail="Database not found")
+        payload = _snapshot_rag_build_job(job_id)
+        if payload is None or payload.get("database") != name:
+            raise HTTPException(status_code=404, detail="Build job not found")
+        return payload
 
     @app.get("/api/rag/dbs")
     async def rag_dbs():
@@ -986,20 +1228,12 @@ def create_app() -> FastAPI:
         if not saved_paths:
             raise HTTPException(status_code=400, detail="No valid files saved")
 
-        config.settings = config.settings.update(RAG_DB_NAME=name)
-        try:
-            added = await asyncio.to_thread(RAGEngine().add_documents_from_paths, saved_paths)
-            RAGEngine().clear_query_cache()
-        except Exception as exc:
-            logging.getLogger(__name__).exception("RAG db document upload failed")
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        job = _register_rag_build_job(name, "add", [os.path.basename(path) for path in saved_paths])
+        asyncio.create_task(_run_rag_build_job(job["job_id"], name, "add", saved_paths))
 
         return {
-            "status": "ok",
-            "database": name,
-            "files": len(saved_paths),
-            "added": added,
-            "documents": _list_db_docs(name),
+            **job,
+            "status": "accepted",
         }
 
     @app.delete("/api/rag/dbs/{db_name}/docs/{doc_name}")
@@ -1017,12 +1251,12 @@ def create_app() -> FastAPI:
 
         os.remove(target_doc)
         remaining_docs = _list_db_docs(name)
-        config.settings = config.settings.update(RAG_DB_NAME=name)
-        _clear_db_index_artifacts(name)
         paths = [os.path.join(_db_docs_dir(name), item) for item in remaining_docs]
         try:
-            rebuilt = await asyncio.to_thread(RAGEngine().rebuild_index_from_paths, paths)
-            RAGEngine().clear_query_cache()
+            with _scoped_rag_db(name):
+                _clear_db_index_artifacts(name)
+                rebuilt = await asyncio.to_thread(RAGEngine().rebuild_index_from_paths, paths)
+                RAGEngine().clear_query_cache()
         except Exception as exc:
             logging.getLogger(__name__).exception("RAG db document delete failed")
             raise HTTPException(status_code=500, detail=str(exc)) from exc

@@ -739,6 +739,14 @@ class RAGDocListInput(BaseModel):
 class RAGDocCatalogInput(BaseModel):
     doc_name: str = Field(description=_bi("文档名（优先文件名，如 'foo.pdf'；兼容相对路径）", "Document name (prefer file name like 'foo.pdf'; relative path also supported)"))
 
+class RAGKeywordSearchInput(BaseModel):
+    keyword_regex: str = Field(description=_bi("关键词正则表达式", "Keyword regex pattern"))
+    top_k: int = Field(default=-1, ge=-1, description=_bi("每个文档只保留前 top_k 个关键词；-1 表示不按数量截断", "Keep only the top_k keywords per document; -1 disables count truncation"))
+    top_k_percent: float = Field(default=0.5, ge=-1.0, le=1.0, description=_bi("每个文档只保留前 top_k_percent 的关键词；-1 表示不按百分比截断", "Keep only the top_k_percent keywords per document; -1 disables percentage truncation"))
+    return_top_k: int = Field(default=-1, ge=-1, description=_bi("仅返回最佳匹配关键词排名在前 top_k 内的文档；-1 表示不过滤", "Return only documents whose best matched keyword rank is within top_k; -1 disables the filter"))
+    return_top_k_percent: float = Field(default=-1.0, ge=-1.0, le=1.0, description=_bi("仅返回最佳匹配关键词排名百分比在前 top_k_percent 内的文档；-1 表示不过滤", "Return only documents whose best matched keyword rank percent is within top_k_percent; -1 disables the filter"))
+    document_ranker: Literal["rank_percent", "rank"] = Field(default="rank_percent", description=_bi("文档排序方式：按最佳关键词排名百分比或绝对排名升序排序", "Document ordering: ascending best keyword rank percent or absolute rank"))
+
 class RAGRegexSearchInput(BaseModel):
     regex: str = Field(description=_bi("正则表达式", "Regular expression"))
     doc_name: str = Field(default="", description=_bi("限定文档名称（优先文件名；空表示所有文档）", "Restrict document name (prefer file name; empty means all documents)"))
@@ -993,8 +1001,8 @@ class MathComputeTool(InputSugarTool):
 class RAGDocListTool(InputSugarTool):
     name: str = "rag_doc_list"
     description: str = _bi(
-        "列举当前RAG数据库中的所有文档标题、估计页数及TF-IDF关键词。",
-        "List all documents in the current RAG database with estimated page counts and TF-IDF keywords.",
+        "列举当前RAG数据库中的所有文档标题、估计页数及基于 logprobs 惊喜度融合排序的关键词。",
+        "List all documents in the current RAG database with estimated page counts and logprob-based fused surprise keywords.",
     )
     args_schema: Any = RAGDocListInput
 
@@ -1080,6 +1088,76 @@ class RAGDocCatalogTool(InputSugarTool):
             end_current_tool_call(call_id, output_text)
 
     def _run(self, doc_name: str) -> str:
+        raise NotImplementedError("Use async call")
+
+class RAGKeywordSearchTool(InputSugarTool):
+    name: str = "rag_keyword_search"
+    description: str = _bi(
+        "在当前 RAG 数据库所有文档的完整关键词列表中做正则匹配，可按每文档关键词 top_k / top_k_percent 过滤，并按最佳关键词排名或排名百分比对文档排序。⚠️注意，关键词更适合用于读取而非检索，请尽可能扩大检索范围，否则极容易返回空结果；同时关键词列表是基于 logprobs 融合的惊喜度排序，可能与直觉不完全一致，请谨慎使用并调整参数以获得更合理的结果。",
+        "Regex-match against the full keyword lists of all documents in the current RAG database, with per-document top_k / top_k_percent filtering and document ordering by best keyword rank or rank percent.⚠️ Note that keywords are more suitable for reading than retrieval; please expand the search scope as much as possible, or you may easily get empty results. Also, the keyword list is ordered by logprob-based fused surprise, which may not fully align with intuition. Use with caution and adjust parameters for more reasonable results.",
+    )
+    args_schema: Any = RAGKeywordSearchInput
+
+    async def _arun(
+        self,
+        keyword_regex: str,
+        top_k: int = -1,
+        top_k_percent: float = 0.5,
+        return_top_k: int = -1,
+        return_top_k_percent: float = -1.0,
+        document_ranker: Literal["rank_percent", "rank"] = "rank_percent",
+    ) -> str:
+        call_id = start_current_tool_call(
+            self.name,
+            {
+                "keyword_regex": keyword_regex,
+                "top_k": top_k,
+                "top_k_percent": top_k_percent,
+                "return_top_k": return_top_k,
+                "return_top_k_percent": return_top_k_percent,
+                "document_ranker": document_ranker,
+            },
+        )
+        output_text = ""
+        try:
+            scope_error = _require_selected_rag_db()
+            if scope_error:
+                output_text = scope_error
+                return output_text
+            result = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    rag_engine.keyword_search,
+                    keyword_regex,
+                    top_k,
+                    top_k_percent,
+                    return_top_k,
+                    return_top_k_percent,
+                    document_ranker,
+                ),
+                timeout=config.settings.RAG_TOOL_TIMEOUT,
+            )
+            payload = _to_json_safe(result)
+            pruned = _prune_empty_fields(payload)
+            if pruned is _EMPTY:
+                pruned = {}
+            output_text = json.dumps(pruned, ensure_ascii=False)
+            return output_text
+        except asyncio.TimeoutError:
+            output_text = _t("关键词检索超时。", "Keyword search timed out.")
+            return output_text
+        except Exception as exc:
+            logger.exception("rag_keyword_search failed")
+            output_text = (
+                _t(f"关键词检索失败: {str(exc)[:200]}", f"Keyword search failed: {str(exc)[:200]}")
+                if config.settings.ENV != "prod"
+                else _t("关键词检索失败。", "Keyword search failed.")
+            )
+            return output_text
+        finally:
+            end_current_tool_call(call_id, output_text)
+
+    def _run(self, **kwargs) -> str:
         raise NotImplementedError("Use async call")
 
 class RAGRegexSearchTool(InputSugarTool):
@@ -2196,6 +2274,7 @@ tools = [
     # RAG 工具
     RAGDocListTool(),
     RAGDocCatalogTool(),
+    RAGKeywordSearchTool(),
     RAGRegexSearchTool(),
     RAGVectorSearchTool(),
     RAGLastSearchPagingTool(),

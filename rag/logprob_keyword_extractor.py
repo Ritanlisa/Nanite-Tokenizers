@@ -201,6 +201,7 @@ def _filter_keyword_terms(terms: List[str], *, top_k: int, minlength: int) -> Li
     if not terms:
         return []
     min_chars = max(1, int(minlength))
+    limit = int(top_k)
     stop_words = _load_jieba_open_source_stop_words()
     result: List[str] = []
     seen: Set[str] = set()
@@ -217,7 +218,7 @@ def _filter_keyword_terms(terms: List[str], *, top_k: int, minlength: int) -> Li
             continue
         seen.add(token)
         result.append(token)
-        if len(result) >= max(1, int(top_k)):
+        if limit > 0 and len(result) >= limit:
             break
     return result
 
@@ -227,14 +228,17 @@ def logprobs_extract(
     *,
     top_k: int = 12,
     minlength: int = 2,
+    write_debug_payload: bool = False,
 ) -> Dict[str, List[str]]:
     if not texts_by_doc_name:
         return {}
 
     backend_name, backend_model_path, extract_fn = _get_or_create_logprob_backend()
 
-    output_dir = Path("tmp") / "logprobs_extract"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir: Optional[Path] = None
+    if write_debug_payload:
+        output_dir = Path("tmp") / "logprobs_extract"
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     keyword_map: Dict[str, List[str]] = {}
     for doc_name, texts in texts_by_doc_name.items():
@@ -314,7 +318,8 @@ def logprobs_extract(
         a_prob_upper, b_prob_lower = _estimate_ab_thresholds_from_probs(probs)
         ab_star_phrases: List[str] = []
 
-        rank_limit = max(int(top_k), min(300, int(top_k) * 6))
+        requested_top_k = int(top_k)
+        rank_limit = -1 if requested_top_k <= 0 else max(requested_top_k, min(300, requested_top_k * 6))
         dictionary_top_terms = _rank_unique_terms_by_sum_minus_log2(
             words=dictionary_words,
             probs=dictionary_probs,
@@ -322,10 +327,11 @@ def logprobs_extract(
         )
         min_chars = max(1, int(minlength))
         if _is_stopword_filter_enabled():
-            dictionary_top_terms = _filter_keyword_terms(dictionary_top_terms, top_k=top_k, minlength=min_chars)
+            dictionary_top_terms = _filter_keyword_terms(dictionary_top_terms, top_k=requested_top_k, minlength=min_chars)
         else:
             filtered_terms: List[str] = []
             seen_terms: Set[str] = set()
+            limit = requested_top_k
             for term in dictionary_top_terms:
                 token = str(term or "").strip()
                 if not token:
@@ -336,49 +342,52 @@ def logprobs_extract(
                     continue
                 seen_terms.add(token)
                 filtered_terms.append(token)
-                if len(filtered_terms) >= max(1, int(top_k)):
+                if limit > 0 and len(filtered_terms) >= limit:
                     break
             dictionary_top_terms = filtered_terms
 
-        safe_name = _sanitize_filename(doc_name)
-        payload_path = output_dir / f"{safe_name}.json"
-        with payload_path.open("w", encoding="utf-8") as fout:
-            json.dump(
-                {
-                    "doc_name": doc_name,
-                    "backend": backend_name,
-                    "model_path": str(backend_model_path),
-                    "token_count": len(tokens),
-                    "tokens": tokens,
-                    "logprobs": sanitized_logprobs,
-                    "invalid_logprob_count": invalid_logprob_count,
-                    "log2_logprobs": [math.log2(prob) for prob in probs],
-                    "minus_log2_logprobs": minus_log2_probs,
-                    "sampled_probs": sampled_probs,
-                    "sampled_minus_log2_probs": sampled_minus_log2_probs,
-                    "dictionary_words": dictionary_words,
-                    "dictionary_probs": dictionary_probs,
-                    "dictionary_minus_log2_probs": dictionary_minus_log2_probs,
-                    "token_to_dict_idx": token_to_dict_idx,
-                    "dictionary_method": get_active_dictionary_segmenter(),
-                    "transition_max_neg_log2_prob": TRANSITION_MAX_NEG_LOG2_PROB,
-                    "jieba_words": dictionary_words,
-                    "jieba_probs": dictionary_probs,
-                    "jieba_minus_log2_probs": dictionary_minus_log2_probs,
-                    "token_to_jieba_idx": token_to_dict_idx,
-                    "softmax_denominators": softmax_denominators,
-                    "softmax_denominator_log2": softmax_denominator_log2,
-                    "a_prob_upper": a_prob_upper,
-                    "b_prob_lower": b_prob_lower,
-                    "ab_star_phrases": ab_star_phrases,
-                    "ab_star_disabled": True,
-                    "top_k": int(top_k),
-                    "minlength": int(min_chars),
-                },
-                fout,
-                ensure_ascii=False,
-                indent=4,
-            )
+        if output_dir is not None:
+            safe_name = _sanitize_filename(doc_name)
+            payload_path = output_dir / f"{safe_name}.json"
+            with payload_path.open("w", encoding="utf-8") as fout:
+                json.dump(
+                    {
+                        "doc_name": doc_name,
+                        "backend": backend_name,
+                        "model_path": str(backend_model_path),
+                        "token_count": len(tokens),
+                        "tokens": tokens,
+                        "logprobs": sanitized_logprobs,
+                        "invalid_logprob_count": invalid_logprob_count,
+                        "log2_logprobs": [math.log2(prob) for prob in probs],
+                        "minus_log2_logprobs": minus_log2_probs,
+                        "sampled_probs": sampled_probs,
+                        "sampled_minus_log2_probs": sampled_minus_log2_probs,
+                        "dictionary_words": dictionary_words,
+                        "dictionary_probs": dictionary_probs,
+                        "dictionary_minus_log2_probs": dictionary_minus_log2_probs,
+                        "token_to_dict_idx": token_to_dict_idx,
+                        "dictionary_method": get_active_dictionary_segmenter(),
+                        "transition_max_neg_log2_prob": TRANSITION_MAX_NEG_LOG2_PROB,
+                        "jieba_words": dictionary_words,
+                        "jieba_probs": dictionary_probs,
+                        "jieba_minus_log2_probs": dictionary_minus_log2_probs,
+                        "token_to_jieba_idx": token_to_dict_idx,
+                        "softmax_denominators": softmax_denominators,
+                        "softmax_denominator_log2": softmax_denominator_log2,
+                        "a_prob_upper": a_prob_upper,
+                        "b_prob_lower": b_prob_lower,
+                        "ab_star_phrases": ab_star_phrases,
+                        "ab_star_disabled": True,
+                        "top_k": int(top_k),
+                        "minlength": int(min_chars),
+                        "keyword_ranking_mode": "square_surprise_plus_adjusted_total_granularity_rank_fusion",
+                        "keywords": dictionary_top_terms,
+                    },
+                    fout,
+                    ensure_ascii=False,
+                    indent=4,
+                )
 
         keyword_map[doc_name] = dictionary_top_terms
 
@@ -501,8 +510,8 @@ def _rank_unique_terms_by_sum_minus_log2(
     if not words or not probs:
         return []
 
-    limit = max(1, min(int(top_k), 100))
-    token_scores: Dict[str, float] = {}
+    limit = int(top_k)
+    token_metrics: Dict[str, Dict[str, float | int | str]] = {}
     first_positions: Dict[str, int] = {}
 
     normalized_words = [str(item).strip() for item in words]
@@ -538,18 +547,82 @@ def _rank_unique_terms_by_sum_minus_log2(
         if idx < len(covered_subword_positions) and covered_subword_positions[idx]:
             continue
 
-        # 与 debug 前端默认口径保持一致：按平方惊喜度（surprise^2）累计排序。
+        # 与 test_logprobs_extract 的双榜融合口径保持一致：
+        # 1. 平方惊喜度 sum(surprise^2)
+        # 2. 调整总精细度 sum(surprise) / log2(cnt + 1)
+        # 两个榜单分别按降序排，再对名次求和，最后按升序取词。
         surprise = -math.log2(max(prob_value, 1e-300))
-        score = surprise * surprise
-        token_scores[token] = float(token_scores.get(token, 0.0) + score)
+        metric = token_metrics.setdefault(
+            token,
+            {
+                "token": token,
+                "sum_minus_log2": 0.0,
+                "square_surprise": 0.0,
+                "count": 0,
+            },
+        )
+        metric["sum_minus_log2"] = float(metric.get("sum_minus_log2", 0.0)) + surprise
+        metric["square_surprise"] = float(metric.get("square_surprise", 0.0)) + surprise * surprise
+        metric["count"] = int(metric.get("count", 0)) + 1
         if token not in first_positions:
             first_positions[token] = idx
 
-    ranked = sorted(
-        token_scores.items(),
-        key=lambda item: (-item[1], first_positions.get(item[0], 10**9), item[0]),
+    if not token_metrics:
+        return []
+
+    ranked_rows: List[Dict[str, float | int | str]] = []
+    for token, row in token_metrics.items():
+        count = max(1, int(row.get("count", 0) or 0))
+        adjusted_total_granularity = float(row.get("sum_minus_log2", 0.0)) / max(math.log2(count + 1), 1e-12)
+        ranked_rows.append(
+            {
+                "token": token,
+                "count": count,
+                "square_surprise": float(row.get("square_surprise", 0.0)),
+                "adjusted_total_granularity": adjusted_total_granularity,
+                "first_position": int(first_positions.get(token, 10**9)),
+            }
+        )
+
+    square_ranked = sorted(
+        ranked_rows,
+        key=lambda item: (
+            -float(item.get("square_surprise", 0.0)),
+            -float(item.get("adjusted_total_granularity", 0.0)),
+            int(item.get("first_position", 10**9)),
+            str(item.get("token") or ""),
+        ),
     )
-    return [token for token, _ in ranked[:limit]]
+    for rank, item in enumerate(square_ranked, start=1):
+        item["square_rank"] = rank
+
+    granularity_ranked = sorted(
+        ranked_rows,
+        key=lambda item: (
+            -float(item.get("adjusted_total_granularity", 0.0)),
+            -float(item.get("square_surprise", 0.0)),
+            int(item.get("first_position", 10**9)),
+            str(item.get("token") or ""),
+        ),
+    )
+    for rank, item in enumerate(granularity_ranked, start=1):
+        item["granularity_rank"] = rank
+
+    fused_ranked = sorted(
+        ranked_rows,
+        key=lambda item: (
+            int(item.get("square_rank", 10**9)) + int(item.get("granularity_rank", 10**9)),
+            int(item.get("square_rank", 10**9)),
+            int(item.get("granularity_rank", 10**9)),
+            -float(item.get("square_surprise", 0.0)),
+            -float(item.get("adjusted_total_granularity", 0.0)),
+            int(item.get("first_position", 10**9)),
+            str(item.get("token") or ""),
+        ),
+    )
+    if limit > 0:
+        fused_ranked = fused_ranked[:limit]
+    return [str(item.get("token") or "") for item in fused_ranked if str(item.get("token") or "")]
 
 
 def _normalize_segmentation_context(

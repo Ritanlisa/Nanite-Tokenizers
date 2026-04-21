@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     RERANK_DEVICE: Literal["auto", "cpu", "cuda"] = "auto"
     RERANK_LOCAL_DIR: str = "./models/rerank"
     RERANK_TOP_N: int = Field(3, ge=1)
+    DOC_TREE_SUMMARY_KEYWORDS_LIMIT: int = Field(50, ge=1, le=500)
     RAG_CONFIDENCE_THRESHOLD: float = Field(0.8, ge=0.0, le=1.0)
     MIN_RAG_SOURCES: int = Field(1, ge=1)
     VECTOR_STORE_TYPE: Literal["chroma", "faiss"] = "chroma"

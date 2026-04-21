@@ -93,10 +93,11 @@ async def _run_rag_focus_scenarios(tools_by_name: dict[str, list[Any]], first_do
 
     rag_list_tool = tools_by_name.get("rag_doc_list", [None])[0]
     rag_catalog_tool = tools_by_name.get("rag_doc_catalog", [None])[0]
+    rag_keyword_tool = tools_by_name.get("rag_keyword_search", [None])[0]
     rag_regex_tool = tools_by_name.get("rag_regex_search", [None])[0]
     rag_vector_tool = tools_by_name.get("rag_vector_search", [None])[0]
 
-    if not all([rag_list_tool, rag_catalog_tool, rag_regex_tool, rag_vector_tool]):
+    if not all([rag_list_tool, rag_catalog_tool, rag_keyword_tool, rag_regex_tool, rag_vector_tool]):
         return [{"scenario": "rag_tools_presence", "ok": False, "error": "missing rag tools"}]
 
     list_result = await _call_tool_text(rag_list_tool, {})
@@ -108,6 +109,28 @@ async def _run_rag_focus_scenarios(tools_by_name: dict[str, list[Any]], first_do
             "ok": bool(list_result.get("ok")),
             "doc_count": doc_count,
             "result_preview": str(list_result.get("text", ""))[:300],
+        }
+    )
+
+    keyword_result = await _call_tool_text(
+        rag_keyword_tool,
+        {
+            "keyword_regex": ".+",
+            "top_k": -1,
+            "top_k_percent": 0.5,
+            "return_top_k": -1,
+            "return_top_k_percent": -1.0,
+            "document_ranker": "rank_percent",
+        },
+    )
+    keyword_data = _parse_json_safely(keyword_result.get("text", "")) if keyword_result.get("ok") else None
+    keyword_count = int(keyword_data.get("count", 0)) if isinstance(keyword_data, dict) else 0
+    reports.append(
+        {
+            "scenario": "rag_keyword_search::basic",
+            "ok": bool(keyword_result.get("ok")),
+            "count": keyword_count,
+            "result_preview": str(keyword_result.get("text", ""))[:280],
         }
     )
 

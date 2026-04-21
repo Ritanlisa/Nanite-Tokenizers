@@ -1551,6 +1551,9 @@
       let selectedRagDocName = "";
       let ragDocNames = [];
       let ragUploadingDocs = [];
+      let ragBuildJobId = "";
+      let ragBuildJobDbName = "";
+      let ragBuildJobPollTimer = null;
       let ragTreeDocuments = [];
       let ragCatalogRows = [];
       let ragRetrievePayload = null;
@@ -1906,6 +1909,7 @@
           ENABLE_RERANK: "Enable Rerank",
           RERANK_MODEL: "Rerank Model",
           RERANK_TOP_N: "Rerank Top N",
+          DOC_TREE_SUMMARY_KEYWORDS_LIMIT: "Doc Tree Summary Keywords Limit",
           RAG_CONFIDENCE_THRESHOLD: "RAG Confidence Threshold",
           MIN_RAG_SOURCES: "Min RAG Sources",
           VECTOR_STORE_TYPE: "Vector Store Type",
@@ -1960,6 +1964,7 @@
           ENABLE_RERANK: "启用重排",
           RERANK_MODEL: "重排模型",
           RERANK_TOP_N: "重排 Top N",
+          DOC_TREE_SUMMARY_KEYWORDS_LIMIT: "文档树摘要关键词上限",
           RAG_CONFIDENCE_THRESHOLD: "RAG 置信阈值",
           MIN_RAG_SOURCES: "最少 RAG 来源",
           VECTOR_STORE_TYPE: "向量库类型",
@@ -3976,11 +3981,100 @@
         });
       };
 
+      const clearRagBuildJobPolling = () => {
+        if (ragBuildJobPollTimer !== null) {
+          window.clearTimeout(ragBuildJobPollTimer);
+          ragBuildJobPollTimer = null;
+        }
+        ragBuildJobId = "";
+        ragBuildJobDbName = "";
+      };
+
+      const syncRagUploadingDocsFromJob = (job) => {
+        const docs = Array.isArray(job?.documents) ? job.documents : [];
+        ragUploadingDocs = docs
+          .map((item) => ({
+            name: String(item?.name || "").trim(),
+            progress: Math.max(0, Math.min(100, Number(item?.progress) || 0)),
+          }))
+          .filter((item) => item.name);
+        renderRagDocList();
+      };
+
+      const scheduleRagBuildJobPoll = (delayMs = 700) => {
+        if (!ragBuildJobId || !ragBuildJobDbName) return;
+        if (ragBuildJobPollTimer !== null) {
+          window.clearTimeout(ragBuildJobPollTimer);
+        }
+        ragBuildJobPollTimer = window.setTimeout(() => {
+          pollRagBuildJob();
+        }, delayMs);
+      };
+
+      const applyRagBuildJobPayload = async (job) => {
+        const jobStatus = String(job?.status || "").trim().toLowerCase();
+        const progress = Math.max(0, Math.min(100, Number(job?.progress) || 0));
+        syncRagUploadingDocsFromJob(job);
+
+        if (jobStatus === "failed") {
+          clearRagBuildJobPolling();
+          const errorText = String(job?.error || "").trim();
+          ragStatus.textContent = errorText ? `${t("ragFail")} ${errorText}` : t("ragFail");
+          return;
+        }
+
+        if (jobStatus === "completed") {
+          clearRagBuildJobPolling();
+          ragUploadingDocs = ragUploadingDocs.map((item) => ({ ...item, progress: 100 }));
+          renderRagDocList();
+          await loadRagDbDocs(String(job?.database || ragBuildJobDbName || ""));
+          ragUploadingDocs = [];
+          renderRagDocList();
+          ragStatus.textContent = `${t("ragSuccess")} (${Number(job?.added) || 0})`;
+          return;
+        }
+
+        ragStatus.textContent = `${t("ragBuilding")} ${progress}%`;
+        scheduleRagBuildJobPoll();
+      };
+
+      async function pollRagBuildJob() {
+        if (!ragBuildJobId || !ragBuildJobDbName) return;
+        try {
+          const response = await fetch(
+            `/api/rag/dbs/${encodeURIComponent(ragBuildJobDbName)}/build-jobs/${encodeURIComponent(ragBuildJobId)}`
+          );
+          if (!response.ok) {
+            const error = await response.text();
+            clearRagBuildJobPolling();
+            ragStatus.textContent = `${t("ragFail")} ${error}`;
+            return;
+          }
+          const job = await response.json();
+          await applyRagBuildJobPayload(job);
+        } catch (err) {
+          clearRagBuildJobPolling();
+          ragStatus.textContent = `${t("ragFail")} ${err}`;
+        }
+      }
+
+      async function startRagBuildJobPolling(dbName, job) {
+        clearRagBuildJobPolling();
+        ragBuildJobDbName = String(dbName || "").trim();
+        ragBuildJobId = String(job?.job_id || "").trim();
+        if (!ragBuildJobId || !ragBuildJobDbName) return;
+        await applyRagBuildJobPayload(job);
+      }
+
       const getMergedRagDocs = () => {
         const map = new Map();
         ragDocNames.forEach((name) => {
           map.set(name, { name, uploading: false, progress: 100 });
         });
+        const shouldMergeUploading = !ragBuildJobDbName || ragBuildJobDbName === getSelectedRagDb();
+        if (!shouldMergeUploading) {
+          return Array.from(map.values());
+        }
         ragUploadingDocs.forEach((item) => {
           map.set(item.name, {
             name: item.name,
@@ -4599,6 +4693,7 @@
         populateRagRetrieveDocScope();
         if (!dbName) {
           if (requestId !== ragDbDocsReqId) return;
+          clearRagBuildJobPolling();
           ragUploadingDocs = [];
           selectedRagDocName = "";
           renderRagDocList();
@@ -4668,6 +4763,10 @@
             return;
           }
           const data = await response.json();
+          if (data?.job_id) {
+            await startRagBuildJobPolling(dbName, data);
+            return;
+          }
           await loadRagDbDocs(dbName);
           ragStatus.textContent = `${t("ragSuccess")} (${data.documents || 0})`;
         } catch (err) {
@@ -4880,10 +4979,13 @@
             renderRagDocList();
             return;
           }
-          ragUploadingDocs = ragUploadingDocs.map((item) => ({ ...item, progress: 100 }));
-          renderRagDocList();
-          ragStatus.textContent = t("ragBuilding");
           const data = await response.json();
+          if (data?.job_id) {
+            await startRagBuildJobPolling(dbName, data);
+            return;
+          }
+          ragUploadingDocs = [];
+          renderRagDocList();
           ragStatus.textContent = `${t("ragSuccess")} (${data.added || 0})`;
           await loadRagDbDocs(dbName);
         } catch (err) {
@@ -4899,6 +5001,7 @@
         CHUNK_OVERLAP: { type: "range", min: 0, max: 200, step: 5 },
         SIMILARITY_TOP_K: { type: "range", min: 1, max: 20, step: 1 },
         RERANK_TOP_N: { type: "range", min: 1, max: 10, step: 1 },
+        DOC_TREE_SUMMARY_KEYWORDS_LIMIT: { type: "range", min: 1, max: 500, step: 1 },
         RAG_CONFIDENCE_THRESHOLD: { type: "range", min: 0, max: 1, step: 0.05 },
         MIN_RAG_SOURCES: { type: "range", min: 1, max: 10, step: 1 },
         SAMPLE_FOR_TRAINING: { type: "range", min: 1, max: 5000, step: 50 },
@@ -4947,6 +5050,7 @@
             "ENABLE_RERANK",
             "RERANK_MODEL",
             "RERANK_TOP_N",
+            "DOC_TREE_SUMMARY_KEYWORDS_LIMIT",
             "RAG_CONFIDENCE_THRESHOLD",
             "MIN_RAG_SOURCES",
             "VECTOR_STORE_TYPE",

@@ -1112,7 +1112,12 @@ def main() -> None:
 
             texts_by_doc_name = build_texts_by_doc_name(str(source_file))
             run_start = time.perf_counter()
-            keyword_map = logprobs_extract(texts_by_doc_name, top_k=top_k, minlength=minlength)
+            keyword_map = logprobs_extract(
+                texts_by_doc_name,
+                top_k=top_k,
+                minlength=minlength,
+                write_debug_payload=True,
+            )
             run_elapsed = time.perf_counter() - run_start
             extractor_total_seconds += run_elapsed
             extractor_total_calls += 1

@@ -13,7 +13,7 @@ import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from llama_index.core import Document
 
@@ -28,6 +28,20 @@ from rag.pdf_reader import get_pdf_reader
 logger = logging.getLogger(__name__)
 _UNO_BRIDGE_READY = False
 _NATIVE_PAGE_COUNT_ERROR_PREFIX = "NATIVE_PAGE_COUNT_ERROR:"
+BuildProgressCallback = Callable[[str, Dict[str, Any]], None]
+
+
+def _emit_build_progress(
+    progress_callback: Optional[BuildProgressCallback],
+    stage: str,
+    **payload: Any,
+) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(str(stage), {str(key): value for key, value in payload.items()})
+    except Exception as exc:
+        logger.debug("Ignoring build progress callback failure (%s): %s", stage, exc)
 
 
 def _expand_existing_paths(
@@ -2571,14 +2585,36 @@ def load_single_file_document(file_path: str, supported_extensions: Set[str]) ->
         return None
 
 
-def build_rag_db_documents(loaded_docs: Sequence[Document]) -> List[RAG_DB_Document]:
+def build_rag_db_documents(
+    loaded_docs: Sequence[Document],
+    *,
+    progress_callback: Optional[BuildProgressCallback] = None,
+) -> List[RAG_DB_Document]:
     rag_docs: List[RAG_DB_Document] = []
-    for loaded_doc in loaded_docs:
+    total_docs = len(loaded_docs)
+    for index, loaded_doc in enumerate(loaded_docs, start=1):
+        source_name = str((loaded_doc.metadata or {}).get("file_name") or loaded_doc.doc_id or "").strip()
+        display_name = os.path.basename(source_name) or source_name or f"document_{index}"
+        _emit_build_progress(
+            progress_callback,
+            "build_doc_started",
+            doc_name=display_name,
+            index=index,
+            total=total_docs,
+        )
         try:
             doc_id = stable_doc_id(loaded_doc)
             rag_doc = create_rag_db_document(loaded_doc, stable_doc_id=doc_id).build()
         except Exception as exc:
             logger.warning("Failed to build RAG_DB_Document for %s: %s", loaded_doc.doc_id, exc)
+            _emit_build_progress(
+                progress_callback,
+                "build_doc_failed",
+                doc_name=display_name,
+                index=index,
+                total=total_docs,
+                error=str(exc),
+            )
             continue
         chunk_docs = list(getattr(rag_doc, "chunk_documents", []) or [])
         tree_markdown = ""
@@ -2587,8 +2623,25 @@ def build_rag_db_documents(loaded_docs: Sequence[Document]) -> List[RAG_DB_Docum
         except Exception:
             tree_markdown = ""
         if not chunk_docs and not tree_markdown.strip():
+            _emit_build_progress(
+                progress_callback,
+                "build_doc_skipped",
+                doc_name=str(getattr(rag_doc, "doc_name", display_name) or display_name),
+                index=index,
+                total=total_docs,
+                reason="empty_document",
+            )
             continue
         rag_docs.append(rag_doc)
+        _emit_build_progress(
+            progress_callback,
+            "build_doc_completed",
+            doc_name=str(getattr(rag_doc, "doc_name", display_name) or display_name),
+            index=index,
+            total=total_docs,
+            page_count=int(getattr(rag_doc, "page_count", 0) or 0),
+            chunk_count=len(chunk_docs),
+        )
     return rag_docs
 
 
@@ -2604,18 +2657,56 @@ def prepare_documents_for_indexing_from_loaded_docs(loaded_docs: Sequence[Docume
     return chunk_documents_from_rag_documents(rag_docs)
 
 
-def load_rag_documents_from_paths(paths: Sequence[str], supported_extensions: Set[str]) -> List[RAG_DB_Document]:
+def load_rag_documents_from_paths(
+    paths: Sequence[str],
+    supported_extensions: Set[str],
+    *,
+    progress_callback: Optional[BuildProgressCallback] = None,
+) -> List[RAG_DB_Document]:
     loaded_docs: List[Document] = []
-    for file_path in paths:
+    total_paths = len(paths)
+    _emit_build_progress(progress_callback, "load_started", total=total_paths)
+    for index, file_path in enumerate(paths, start=1):
         ext = os.path.splitext(file_path)[1].lower()
         if ext not in supported_extensions:
             logger.warning("Skipping unsupported upload file %s", file_path)
+            _emit_build_progress(
+                progress_callback,
+                "load_doc_skipped",
+                doc_name=os.path.basename(file_path) or file_path,
+                index=index,
+                total=total_paths,
+                reason="unsupported_extension",
+            )
             continue
         loaded_doc = load_single_file_document(file_path, supported_extensions)
         if loaded_doc is None:
+            _emit_build_progress(
+                progress_callback,
+                "load_doc_skipped",
+                doc_name=os.path.basename(file_path) or file_path,
+                index=index,
+                total=total_paths,
+                reason="load_failed",
+            )
             continue
         loaded_docs.append(loaded_doc)
-    return build_rag_db_documents(loaded_docs)
+        _emit_build_progress(
+            progress_callback,
+            "load_doc_completed",
+            doc_name=os.path.basename(file_path) or file_path,
+            index=index,
+            total=total_paths,
+        )
+    rag_docs = build_rag_db_documents(loaded_docs, progress_callback=progress_callback)
+    _emit_build_progress(
+        progress_callback,
+        "load_completed",
+        total=total_paths,
+        loaded=len(loaded_docs),
+        built=len(rag_docs),
+    )
+    return rag_docs
 
 
 def load_chunk_documents_from_paths(paths: Sequence[str], supported_extensions: Set[str]) -> List[Document]:
