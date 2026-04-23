@@ -5,7 +5,7 @@ import json
 import logging
 import random
 import time
-from typing import Any, Literal
+from typing import Any, List, Literal, Optional
 
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -17,6 +17,26 @@ from exceptions import MCPFatalError
 from mcp_client.client import get_mcp_client
 from rag.documents import RAG_DB_Document
 from rag.engine import RAGEngine
+from sysml.sysml_manager import get_sysml_manager
+from sysml.sysml_model import (
+    AllocationUsage, 
+    AttributeDef, 
+    AttributeUsage, 
+    ConnectionEnd, 
+    ConnectionUsage, 
+    DirectionKind, 
+    InterfaceUsage, 
+    ItemDef, 
+    ItemUsage, 
+    Multiplicity, 
+    Package, 
+    PartDef, 
+    PartUsage, 
+    PortDef, 
+    PortUsage, 
+    RequirementDef, 
+    RequirementUsage
+)
 from tool_usage import (
     start_current_tool_call,
     end_current_tool_call,
@@ -2272,19 +2292,235 @@ def _build_skill_tools() -> list[BaseTool]:
 
 ### Below this are tools for building SysML-v2.0 Database Only
 
-class AddEntityTool(InputSugarTool):
-    name: str = "add_entity"
-    description: str = _bi("向数据库添加实体记录。", "Add an entity record to the database.")
-    args_schema: Any = BaseModel  # TODO: 定义具体的输入模型
+class AddEntityInput(BaseModel):
+    entity_type: Literal["part_def", "part_usage", "attribute_def", "attribute_usage",
+                         "port_def", "port_usage", "item_def", "item_usage",
+                         "requirement_def", "requirement_usage"] = Field(
+        description="实体类型（定义或使用）"
+    )
+    name: str = Field(description="实体名称")
+    parent_package: Optional[str] = Field(default=None, description="父包限定名，如未指定则加到根")
+    supertypes: Optional[List[str]] = Field(default=None, description="超类型列表（仅定义有效）")
+    type_refs: Optional[List[str]] = Field(default=None, description="类型引用（仅使用有效）")
+    direction: Optional[Literal["in", "out", "inout"]] = Field(default=None, description="方向")
+    multiplicity_lower: Optional[int] = Field(default=None, description="多重性下限")
+    multiplicity_upper: Optional[int] = Field(default=None, description="多重性上限")
+    is_reference: bool = Field(default=False, description="是否为引用（ref）")
 
-    pass
+
+class AddRelationInput(BaseModel):
+    relation_type: Literal["connection", "interface", "allocation"] = Field(
+        description="关系类型"
+    )
+    name: Optional[str] = Field(default=None, description="关系名称（可选）")
+    ends: List[str] = Field(description="连接端点，格式为 ['part1.port1', 'part2.port2'] 或简写")
+    parent_package: Optional[str] = Field(default=None, description="父包")
+    definition_ref: Optional[str] = Field(default=None, description="关系定义引用")
+
+
+class AddEntityTool(InputSugarTool):
+    name: str = "add_sysml_entity"
+    description: str = "向当前 SysML 模型中添加定义或使用实体。"
+    args_schema: Any = AddEntityInput
+
+    async def _arun(self, entity_type: str, name: str, parent_package: Optional[str] = None,
+                    supertypes: Optional[List[str]] = None, type_refs: Optional[List[str]] = None,
+                    direction: Optional[str] = None, multiplicity_lower: Optional[int] = None,
+                    multiplicity_upper: Optional[int] = None, is_reference: bool = False) -> str:
+        call_id = start_current_tool_call(self.name, locals())
+        output = ""
+        try:
+            mgr = get_sysml_manager()
+            # 确定父命名空间
+            parent_ns = None
+            if parent_package:
+                parent_ns = mgr.find_package(parent_package)
+                if parent_ns is None:
+                    # 创建新包
+                    parent_ns = Package(parent_package)
+                    mgr.add_element(parent_ns)
+            # 创建元素
+            if entity_type.endswith("_def"):
+                cls_map = {
+                    "part_def": PartDef, "attribute_def": AttributeDef,
+                    "port_def": PortDef, "item_def": ItemDef,
+                    "requirement_def": RequirementDef
+                }
+                elem = cls_map[entity_type](name)
+                if supertypes:
+                    elem.supertypes = supertypes
+            else:  # usage
+                cls_map = {
+                    "part_usage": PartUsage, "attribute_usage": AttributeUsage,
+                    "port_usage": PortUsage, "item_usage": ItemUsage,
+                    "requirement_usage": RequirementUsage
+                }
+                elem = cls_map[entity_type](name)
+                if type_refs:
+                    elem.type_refs = type_refs
+                if direction:
+                    elem.direction = DirectionKind(direction)
+                if multiplicity_lower is not None or multiplicity_upper is not None:
+                    lower = str(multiplicity_lower) if multiplicity_lower is not None else None
+                    upper = str(multiplicity_upper) if multiplicity_upper is not None else None
+                    elem.multiplicity = Multiplicity(lower, upper)
+                elem.is_reference = is_reference
+            mgr.add_element(elem, parent_ns)
+            output = f"成功添加实体: {elem.qualified_name or name}"
+        except Exception as e:
+            output = f"添加实体失败: {str(e)}"
+        finally:
+            end_current_tool_call(call_id, output)
+        return output
+
+    def _run(self, **kwargs) -> str:
+        raise NotImplementedError("Use async call")
+
 
 class AddRelationTool(InputSugarTool):
-    name: str = "add_relation"
-    description: str = _bi("向数据库添加关系记录。", "Add a relation record to the database.")
-    args_schema: Any = BaseModel  # TODO: 定义具体的输入模型
+    name: str = "add_sysml_relation"
+    description: str = "向当前 SysML 模型中添加关系（连接、接口、分配）。"
+    args_schema: Any = AddRelationInput
 
-    pass
+    async def _arun(self, relation_type: str, ends: List[str], name: Optional[str] = None,
+                    parent_package: Optional[str] = None, definition_ref: Optional[str] = None) -> str:
+        call_id = start_current_tool_call(self.name, locals())
+        output = ""
+        try:
+            mgr = get_sysml_manager()
+            parent_ns = None
+            if parent_package:
+                parent_ns = mgr.find_package(parent_package)
+                if parent_ns is None:
+                    parent_ns = Package(parent_package)
+                    mgr.add_element(parent_ns)
+
+            if relation_type == "connection":
+                if len(ends) == 2:
+                    rel = ConnectionUsage(name)
+                    rel.ends = [ConnectionEnd(ends[0]), ConnectionEnd(ends[1])]
+                else:
+                    raise ValueError("Connection 需要两个端点")
+            elif relation_type == "interface":
+                rel = InterfaceUsage(name)
+                if definition_ref:
+                    rel.type_refs = [definition_ref]
+                # 端点暂未详细处理，可后续扩展
+            elif relation_type == "allocation":
+                rel = AllocationUsage(name)
+                if definition_ref:
+                    rel.type_refs = [definition_ref]
+            else:
+                raise ValueError(f"不支持的关系类型: {relation_type}")
+            mgr.add_element(rel, parent_ns)
+            output = f"成功添加关系: {rel.qualified_name or name or 'anonymous'}"
+        except Exception as e:
+            output = f"添加关系失败: {str(e)}"
+        finally:
+            end_current_tool_call(call_id, output)
+        return output
+
+    def _run(self, **kwargs) -> str:
+        raise NotImplementedError("Use async call")
+
+
+# 扩展工具：加载模型、保存模型、查询模型
+class LoadModelInput(BaseModel):
+    file_path: str = Field(description="SysML 文本文件路径（相对于工作区）")
+
+class LoadModelTool(InputSugarTool):
+    name: str = "load_sysml_model"
+    description: str = "从文件加载 SysML 模型到当前会话。"
+    args_schema: Any = LoadModelInput
+
+    async def _arun(self, file_path: str) -> str:
+        call_id = start_current_tool_call(self.name, {"file_path": file_path})
+        output = ""
+        try:
+            mgr = get_sysml_manager()
+            mgr.load_from_file(file_path)
+            output = f"成功从 {file_path} 加载模型，包含 {len(mgr.root_elements)} 个顶层元素。"
+        except Exception as e:
+            output = f"加载失败: {str(e)}"
+        finally:
+            end_current_tool_call(call_id, output)
+        return output
+
+    def _run(self, **kwargs) -> str:
+        raise NotImplementedError("Use async call")
+
+
+class SaveModelInput(BaseModel):
+    file_path: Optional[str] = Field(default=None, description="保存路径，默认为当前加载的文件")
+
+class SaveModelTool(InputSugarTool):
+    name: str = "save_sysml_model"
+    description: str = "将当前会话中的 SysML 模型保存到文件。"
+    args_schema: Any = SaveModelInput
+
+    async def _arun(self, file_path: Optional[str] = None) -> str:
+        call_id = start_current_tool_call(self.name, {"file_path": file_path})
+        output = ""
+        try:
+            mgr = get_sysml_manager()
+            mgr.save_to_file(file_path)
+            output = f"模型已保存到 {mgr.current_model_file}"
+        except Exception as e:
+            output = f"保存失败: {str(e)}"
+        finally:
+            end_current_tool_call(call_id, output)
+        return output
+
+    def _run(self, **kwargs) -> str:
+        raise NotImplementedError("Use async call")
+
+
+class ListModelTool(InputSugarTool):
+    name: str = "list_sysml_entities"
+    description: str = "列出当前模型中所有实体（定义）和关系（连接/接口/分配）。"
+    args_schema: Any = BaseModel
+
+    async def _arun(self) -> str:
+        call_id = start_current_tool_call(self.name, {})
+        output = ""
+        try:
+            mgr = get_sysml_manager()
+            entities = mgr.get_all_entities()
+            relations = mgr.get_all_relations()
+            lines = ["=== 定义实体 ==="]
+            for e in entities:
+                lines.append(f"{e.__class__.__name__}: {e.qualified_name}")
+            lines.append("\n=== 关系 ===")
+            for r in relations:
+                lines.append(f"{r.__class__.__name__}: {r.qualified_name or 'anonymous'}")
+            output = "\n".join(lines)
+        except Exception as e:
+            output = f"查询失败: {str(e)}"
+        finally:
+            end_current_tool_call(call_id, output)
+        return output
+
+    def _run(self, **kwargs) -> str:
+        raise NotImplementedError("Use async call")
+
+"""
+Usage:
+
+# load & print
+from sysml_manager import get_sysml_manager
+mgr = get_sysml_manager()
+mgr.load_from_file("example.sysml")
+print(mgr.to_text())
+
+# add entities & relations
+add_sysml_entity(entity_type="part_def", name="Engine", parent_package="VehicleModel")
+add_sysml_entity(entity_type="part_usage", name="engine", type_refs=["Engine"], parent_package="VehicleModel")
+add_sysml_relation(relation_type="connection", ends=["engine.fuelInPort", "fuelTank.fuelOutPort"])
+
+# save
+save_sysml_model(file_path="output.sysml")
+"""
+
 
 tools = [
     # RAG 工具

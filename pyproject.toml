@@ -44,6 +44,7 @@ dependencies = [
   "transformers>=4.45.0",
   "jieba>=0.42.1",
   "line-profiler>=5.0.2",
+  "lark>=1.2.2",
 ]
 
 [project.scripts]
