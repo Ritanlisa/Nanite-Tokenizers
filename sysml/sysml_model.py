@@ -4,8 +4,7 @@ SysML 2.0 抽象语法模型及文本序列化。
 """
 
 from __future__ import annotations
-import re
-from typing import Optional, List, Union, Dict, Any
+from typing import Optional, List, Union
 from enum import Enum
 
 
@@ -311,17 +310,25 @@ class InterfaceDef(Definition):
     def def_kind(self) -> str:
         return "interface def"
 
-class InterfaceUsage(Usage):
+class InterfaceUsage(ConnectionUsage):   # 改为继承 ConnectionUsage
     def usage_kind(self) -> str:
         return "interface"
+
+    def to_text(self, indent: int = 0) -> str:
+        # 接口通常不使用 connect 简写，调用父级 Usage 的 to_text
+        return Usage.to_text(self, indent)
 
 class AllocationDef(Definition):
     def def_kind(self) -> str:
         return "allocation def"
 
-class AllocationUsage(Usage):
+class AllocationUsage(ConnectionUsage):  # 改为继承 ConnectionUsage
     def usage_kind(self) -> str:
         return "allocation"
+
+    def to_text(self, indent: int = 0) -> str:
+        # 分配同样不使用 connect 简写，调用父级 Usage 的 to_text
+        return Usage.to_text(self, indent)
 
 class RequirementDef(Definition):
     def def_kind(self) -> str:

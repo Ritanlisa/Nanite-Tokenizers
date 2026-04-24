@@ -21,21 +21,22 @@ from sysml.sysml_manager import get_sysml_manager
 from sysml.sysml_model import (
     AllocationUsage, 
     AttributeDef, 
-    AttributeUsage, 
+    AttributeUsage,
     ConnectionEnd, 
-    ConnectionUsage, 
-    DirectionKind, 
+    ConnectionUsage,
+    DirectionKind,
     InterfaceUsage, 
     ItemDef, 
     ItemUsage, 
-    Multiplicity, 
+    Multiplicity,
+    Namespace, 
     Package, 
     PartDef, 
     PartUsage, 
     PortDef, 
     PortUsage, 
     RequirementDef, 
-    RequirementUsage
+    RequirementUsage,
 )
 from tool_usage import (
     start_current_tool_call,
@@ -2292,6 +2293,10 @@ def _build_skill_tools() -> list[BaseTool]:
 
 ### Below this are tools for building SysML-v2.0 Database Only
 
+# 扩展工具：加载模型、保存模型、查询模型
+
+# ------------------ 实体 CRUD 输入模型 ------------------
+
 class AddEntityInput(BaseModel):
     entity_type: Literal["part_def", "part_usage", "attribute_def", "attribute_usage",
                          "port_def", "port_usage", "item_def", "item_usage",
@@ -2307,16 +2312,51 @@ class AddEntityInput(BaseModel):
     multiplicity_upper: Optional[int] = Field(default=None, description="多重性上限")
     is_reference: bool = Field(default=False, description="是否为引用（ref）")
 
+class QueryEntityInput(BaseModel):
+    qualified_name: Optional[str] = Field(default=None, description="实体限定名（如 Package::PartDef）")
+    name: Optional[str] = Field(default=None, description="实体简单名称（当限定名未指定时与 parent_package 一起使用）")
+    parent_package: Optional[str] = Field(default=None, description="父包限定名（可选）")
+
+class DeleteEntityInput(BaseModel):
+    qualified_name: Optional[str] = Field(default=None, description="要删除的实体限定名")
+    name: Optional[str] = Field(default=None, description="要删除的实体简单名称")
+    parent_package: Optional[str] = Field(default=None, description="父包限定名（可选）")
+
+class UpdateEntityInput(BaseModel):
+    qualified_name: Optional[str] = Field(default=None, description="要更新的实体限定名")
+    name: Optional[str] = Field(default=None, description="要更新的实体简单名称（作为查找条件）")
+    parent_package: Optional[str] = Field(default=None, description="父包限定名（可选）")
+    new_name: Optional[str] = Field(default=None, description="新名称")
+    supertypes: Optional[List[str]] = Field(default=None, description="更新定义超类型")
+    type_refs: Optional[List[str]] = Field(default=None, description="更新使用类型引用")
+    subsetted: Optional[List[str]] = Field(default=None, description="更新子集")
+    redefined: Optional[List[str]] = Field(default=None, description="更新重定义")
+
+# ------------------ 关系 CRUD 输入模型 ------------------
 
 class AddRelationInput(BaseModel):
-    relation_type: Literal["connection", "interface", "allocation"] = Field(
-        description="关系类型"
-    )
-    name: Optional[str] = Field(default=None, description="关系名称（可选）")
-    ends: List[str] = Field(description="连接端点，格式为 ['part1.port1', 'part2.port2'] 或简写")
+    relation_type: Literal["connection", "interface", "allocation"] = Field(description="关系类型")
+    name: str = Field(description="关系名称（必填，用于后续查询/删除/更新）")
+    ends: Optional[List[str]] = Field(default=None, description="端点列表，如 ['part1.port1', 'part2.port2']")
     parent_package: Optional[str] = Field(default=None, description="父包")
     definition_ref: Optional[str] = Field(default=None, description="关系定义引用")
 
+class QueryRelationInput(BaseModel):
+    name: str = Field(description="关系名称")
+    parent_package: Optional[str] = Field(default=None, description="父包限定名（可选）")
+
+class DeleteRelationInput(BaseModel):
+    name: str = Field(description="要删除的关系名称")
+    parent_package: Optional[str] = Field(default=None, description="父包限定名（可选）")
+
+class UpdateRelationInput(BaseModel):
+    name: str = Field(description="要更新的关系名称")
+    parent_package: Optional[str] = Field(default=None, description="父包限定名（可选）")
+    new_name: Optional[str] = Field(default=None, description="新名称")
+    ends: Optional[List[str]] = Field(default=None, description="新的端点列表")
+    definition_ref: Optional[str] = Field(default=None, description="新的关系定义引用")
+
+# ---------- 实体工具 ----------
 
 class AddEntityTool(InputSugarTool):
     name: str = "add_sysml_entity"
@@ -2331,15 +2371,15 @@ class AddEntityTool(InputSugarTool):
         output = ""
         try:
             mgr = get_sysml_manager()
-            # 确定父命名空间
             parent_ns = None
             if parent_package:
-                parent_ns = mgr.find_package(parent_package)
+                parent_ns = mgr.find_element(qualified_name=parent_package)
                 if parent_ns is None:
-                    # 创建新包
                     parent_ns = Package(parent_package)
                     mgr.add_element(parent_ns)
-            # 创建元素
+                elif not isinstance(parent_ns, Namespace):
+                    return f"错误: {parent_package} 不是一个命名空间"
+
             if entity_type.endswith("_def"):
                 cls_map = {
                     "part_def": PartDef, "attribute_def": AttributeDef,
@@ -2349,7 +2389,7 @@ class AddEntityTool(InputSugarTool):
                 elem = cls_map[entity_type](name)
                 if supertypes:
                     elem.supertypes = supertypes
-            else:  # usage
+            else:
                 cls_map = {
                     "part_usage": PartUsage, "attribute_usage": AttributeUsage,
                     "port_usage": PortUsage, "item_usage": ItemUsage,
@@ -2365,6 +2405,7 @@ class AddEntityTool(InputSugarTool):
                     upper = str(multiplicity_upper) if multiplicity_upper is not None else None
                     elem.multiplicity = Multiplicity(lower, upper)
                 elem.is_reference = is_reference
+
             mgr.add_element(elem, parent_ns)
             output = f"成功添加实体: {elem.qualified_name or name}"
         except Exception as e:
@@ -2377,43 +2418,154 @@ class AddEntityTool(InputSugarTool):
         raise NotImplementedError("Use async call")
 
 
+class DeleteEntityTool(InputSugarTool):
+    name: str = "delete_sysml_entity"
+    description: str = "从 SysML 模型中删除指定的实体（定义或使用）。"
+    args_schema: Any = DeleteEntityInput
+
+    async def _arun(self, qualified_name: Optional[str] = None,
+                    name: Optional[str] = None,
+                    parent_package: Optional[str] = None) -> str:
+        call_id = start_current_tool_call(self.name, locals())
+        output = ""
+        try:
+            mgr = get_sysml_manager()
+            elem = mgr.find_element(qualified_name=qualified_name, name=name, parent_package=parent_package)
+            if elem is None:
+                return "错误: 未找到指定的实体"
+            success = mgr.remove_element(elem)
+            if success:
+                output = f"成功删除实体: {elem.qualified_name or name}"
+            else:
+                output = "错误: 删除失败，实体可能不存在于任何命名空间中"
+        except Exception as e:
+            output = f"删除实体失败: {str(e)}"
+        finally:
+            end_current_tool_call(call_id, output)
+        return output
+
+    def _run(self, **kwargs) -> str:
+        raise NotImplementedError("Use async call")
+
+
+class UpdateEntityTool(InputSugarTool):
+    name: str = "update_sysml_entity"
+    description: str = "更新 SysML 模型中实体（定义/使用）的属性。"
+    args_schema: Any = UpdateEntityInput
+
+    async def _arun(self, qualified_name: Optional[str] = None,
+                    name: Optional[str] = None,
+                    parent_package: Optional[str] = None,
+                    new_name: Optional[str] = None,
+                    supertypes: Optional[List[str]] = None,
+                    type_refs: Optional[List[str]] = None,
+                    subsetted: Optional[List[str]] = None,
+                    redefined: Optional[List[str]] = None) -> str:
+        call_id = start_current_tool_call(self.name, locals())
+        output = ""
+        try:
+            mgr = get_sysml_manager()
+            elem = mgr.find_element(qualified_name=qualified_name, name=name, parent_package=parent_package)
+            if elem is None:
+                return "错误: 未找到指定的实体"
+            kwargs = {}
+            if new_name is not None:
+                kwargs['name'] = new_name
+            if supertypes is not None:
+                kwargs['supertypes'] = supertypes
+            if type_refs is not None:
+                kwargs['type_refs'] = type_refs
+            if subsetted is not None:
+                kwargs['subsetted'] = subsetted
+            if redefined is not None:
+                kwargs['redefined'] = redefined
+            mgr.update_element(elem, **kwargs)
+            output = f"成功更新实体: {elem.qualified_name or elem.name}"
+        except Exception as e:
+            output = f"更新实体失败: {str(e)}"
+        finally:
+            end_current_tool_call(call_id, output)
+        return output
+
+    def _run(self, **kwargs) -> str:
+        raise NotImplementedError("Use async call")
+
+
+class QueryEntityTool(InputSugarTool):
+    name: str = "query_sysml_entity"
+    description: str = "查询 SysML 模型中的实体（定义/使用），返回其文本表示。"
+    args_schema: Any = QueryEntityInput
+
+    async def _arun(self, qualified_name: Optional[str] = None,
+                    name: Optional[str] = None,
+                    parent_package: Optional[str] = None) -> str:
+        call_id = start_current_tool_call(self.name, locals())
+        output = ""
+        try:
+            mgr = get_sysml_manager()
+            elem = mgr.find_element(qualified_name=qualified_name, name=name, parent_package=parent_package)
+            if elem is None:
+                return "错误: 未找到指定的实体"
+            output = elem.to_text()
+        except Exception as e:
+            output = f"查询实体失败: {str(e)}"
+        finally:
+            end_current_tool_call(call_id, output)
+        return output
+
+    def _run(self, **kwargs) -> str:
+        raise NotImplementedError("Use async call")
+    
+# ---------- 关系工具 ----------
+
 class AddRelationTool(InputSugarTool):
     name: str = "add_sysml_relation"
-    description: str = "向当前 SysML 模型中添加关系（连接、接口、分配）。"
+    description: str = "向当前 SysML 模型中添加关系（连接、接口、分配）。关系必须有名称以便后续操作。"
     args_schema: Any = AddRelationInput
 
-    async def _arun(self, relation_type: str, ends: List[str], name: Optional[str] = None,
-                    parent_package: Optional[str] = None, definition_ref: Optional[str] = None) -> str:
+    async def _arun(self, relation_type: str, name: str,
+                    ends: Optional[List[str]] = None,
+                    parent_package: Optional[str] = None,
+                    definition_ref: Optional[str] = None) -> str:
         call_id = start_current_tool_call(self.name, locals())
         output = ""
         try:
             mgr = get_sysml_manager()
             parent_ns = None
             if parent_package:
-                parent_ns = mgr.find_package(parent_package)
+                parent_ns = mgr.find_element(qualified_name=parent_package)
                 if parent_ns is None:
                     parent_ns = Package(parent_package)
                     mgr.add_element(parent_ns)
+                elif not isinstance(parent_ns, Namespace):
+                    return f"错误: {parent_package} 不是一个命名空间"
 
             if relation_type == "connection":
-                if len(ends) == 2:
-                    rel = ConnectionUsage(name)
+                rel = ConnectionUsage(name=name)
+                if ends:
+                    if len(ends) != 2:
+                        return "错误: connection 需要两个端点"
                     rel.ends = [ConnectionEnd(ends[0]), ConnectionEnd(ends[1])]
-                else:
-                    raise ValueError("Connection 需要两个端点")
-            elif relation_type == "interface":
-                rel = InterfaceUsage(name)
                 if definition_ref:
                     rel.type_refs = [definition_ref]
-                # 端点暂未详细处理，可后续扩展
+            elif relation_type == "interface":
+                rel = InterfaceUsage(name=name)
+                if ends:
+                    # 接口端点视为连接端点
+                    rel.ends = [ConnectionEnd(e) for e in ends]
+                if definition_ref:
+                    rel.type_refs = [definition_ref]
             elif relation_type == "allocation":
-                rel = AllocationUsage(name)
+                rel = AllocationUsage(name=name)
+                if ends:
+                    rel.ends = [ConnectionEnd(e) for e in ends]
                 if definition_ref:
                     rel.type_refs = [definition_ref]
             else:
-                raise ValueError(f"不支持的关系类型: {relation_type}")
+                return f"不支持的关系类型: {relation_type}"
+
             mgr.add_element(rel, parent_ns)
-            output = f"成功添加关系: {rel.qualified_name or name or 'anonymous'}"
+            output = f"成功添加关系: {rel.qualified_name or name}"
         except Exception as e:
             output = f"添加关系失败: {str(e)}"
         finally:
@@ -2424,6 +2576,102 @@ class AddRelationTool(InputSugarTool):
         raise NotImplementedError("Use async call")
 
 
+class DeleteRelationTool(InputSugarTool):
+    name: str = "delete_sysml_relation"
+    description: str = "从 SysML 模型中删除指定的关系（连接/接口/分配）。"
+    args_schema: Any = DeleteRelationInput
+
+    async def _arun(self, name: str, parent_package: Optional[str] = None) -> str:
+        call_id = start_current_tool_call(self.name, locals())
+        output = ""
+        try:
+            mgr = get_sysml_manager()
+            elem = mgr.find_element(name=name, parent_package=parent_package)
+            if elem is None:
+                return "错误: 未找到指定的关系"
+            if not isinstance(elem, (ConnectionUsage, InterfaceUsage, AllocationUsage)):
+                return "错误: 找到的元素不是关系类型"
+            success = mgr.remove_element(elem)
+            if success:
+                output = f"成功删除关系: {elem.qualified_name or name}"
+            else:
+                output = "错误: 删除失败"
+        except Exception as e:
+            output = f"删除关系失败: {str(e)}"
+        finally:
+            end_current_tool_call(call_id, output)
+        return output
+
+    def _run(self, **kwargs) -> str:
+        raise NotImplementedError("Use async call")
+
+
+class UpdateRelationTool(InputSugarTool):
+    name: str = "update_sysml_relation"
+    description: str = "更新 SysML 模型中关系（连接/接口/分配）的属性。"
+    args_schema: Any = UpdateRelationInput
+
+    async def _arun(self, name: str, parent_package: Optional[str] = None,
+                    new_name: Optional[str] = None,
+                    ends: Optional[List[str]] = None,
+                    definition_ref: Optional[str] = None) -> str:
+        call_id = start_current_tool_call(self.name, locals())
+        output = ""
+        try:
+            mgr = get_sysml_manager()
+            elem = mgr.find_element(name=name, parent_package=parent_package)
+            if elem is None:
+                return "错误: 未找到指定的关系"
+            if not isinstance(elem, (ConnectionUsage, InterfaceUsage, AllocationUsage)):
+                return "错误: 找到的元素不是关系类型"
+
+            if new_name is not None:
+                elem.name = new_name
+            if ends is not None:
+                if hasattr(elem, 'ends'):
+                    elem.ends = [ConnectionEnd(e) for e in ends]
+            if definition_ref is not None:
+                if definition_ref:
+                    elem.type_refs = [definition_ref]
+                else:
+                    elem.type_refs = []
+            output = f"成功更新关系: {elem.qualified_name or elem.name}"
+        except Exception as e:
+            output = f"更新关系失败: {str(e)}"
+        finally:
+            end_current_tool_call(call_id, output)
+        return output
+
+    def _run(self, **kwargs) -> str:
+        raise NotImplementedError("Use async call")
+
+
+class QueryRelationTool(InputSugarTool):
+    name: str = "query_sysml_relation"
+    description: str = "查询 SysML 模型中的关系（连接/接口/分配），返回其文本表示。"
+    args_schema: Any = QueryRelationInput
+
+    async def _arun(self, name: str, parent_package: Optional[str] = None) -> str:
+        call_id = start_current_tool_call(self.name, locals())
+        output = ""
+        try:
+            mgr = get_sysml_manager()
+            elem = mgr.find_element(name=name, parent_package=parent_package)
+            if elem is None:
+                return "错误: 未找到指定的关系"
+            if not isinstance(elem, (ConnectionUsage, InterfaceUsage, AllocationUsage)):
+                return "错误: 找到的元素不是关系类型"
+            output = elem.to_text()
+        except Exception as e:
+            output = f"查询关系失败: {str(e)}"
+        finally:
+            end_current_tool_call(call_id, output)
+        return output
+
+    def _run(self, **kwargs) -> str:
+        raise NotImplementedError("Use async call")
+
+### 模型管理工具：加载、保存、列出模型
 # 扩展工具：加载模型、保存模型、查询模型
 class LoadModelInput(BaseModel):
     file_path: str = Field(description="SysML 文本文件路径（相对于工作区）")
@@ -2502,6 +2750,20 @@ class ListModelTool(InputSugarTool):
 
     def _run(self, **kwargs) -> str:
         raise NotImplementedError("Use async call")
+
+tools_for_sysml = [
+    AddEntityTool(),
+    DeleteEntityTool(),
+    UpdateEntityTool(),
+    QueryEntityTool(),
+    AddRelationTool(),
+    DeleteRelationTool(),
+    UpdateRelationTool(),
+    QueryRelationTool(),
+    LoadModelTool(),
+    SaveModelTool(),
+    ListModelTool(),
+]
 
 """
 Usage:
