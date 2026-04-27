@@ -15,37 +15,28 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-# 确保项目根目录在 path 中
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+from sysml.sysml_model import (
+    Package,
+    PartDef,
+    AttributeDef,
+    AttributeUsage,
+    RequirementDef,
+    ConnectionUsage,
+    ConnectionEnd,
+)
+from sysml.sysml_manager import SysMLManager
 
 from scripts.test_doc_tree_debug_gui import (
     _build_payload_and_rag_doc_from_file,
     SUPPORTED_RAG_EXTENSIONS,
 )
 
-from sysml.sysml_model import (
-    Package,
-    PartDef,
-    PartUsage,
-    AttributeDef,
-    AttributeUsage,
-    PortDef,
-    PortUsage,
-    RequirementDef,
-    RequirementUsage,
-    ConnectionUsage,
-    ConnectionEnd,
-    Definition,
-    Usage,
-    Namespace,
-)
-from sysml.sysml_manager import SysMLManager
+# 项目根目录，用于 SysML 管理器的 workspace_root
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 
 # ── 实体提取正则 ──────────────────────────────────────────────
 # 识别常见中文技术文档中的实体模式

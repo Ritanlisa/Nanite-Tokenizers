@@ -20,20 +20,13 @@ SysML RAG 检索 MCP 服务器
 from __future__ import annotations
 
 import json
-import os
-import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
-
-# 确保项目根在 path 中
-ROOT_DIR = Path(__file__).resolve().parent.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sysml.sysml_model import (
-    Package, SysMLElement, Namespace, Definition, Usage,
-    ConnectionUsage, ConnectionEnd, InterfaceUsage, AllocationUsage,
+    Package, SysMLElement, Definition, Usage,
+    ConnectionUsage, InterfaceUsage, AllocationUsage,
     InterfaceDef, AllocationDef,
     PartDef, PartUsage, AttributeDef, AttributeUsage,
     PortDef, PortUsage, ItemDef, ItemUsage,
@@ -41,6 +34,17 @@ from sysml.sysml_model import (
     ConnectionDef,
 )
 from sysml.sysml_manager import SysMLManager
+
+# 计算项目根目录（兼容直接作为脚本运行和包导入）
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
+try:
+    from scripts.demo_doc_to_sysml import build_sysml_model_from_doc_tree
+except Exception:
+    try:
+        from demo_doc_to_sysml import build_sysml_model_from_doc_tree
+    except Exception:
+        build_sysml_model_from_doc_tree = None
 
 # ── 全局模型注册表 ───────────────────────────────────────────
 _global_manager: Optional[SysMLManager] = None
@@ -108,12 +112,14 @@ def _entity_summary(entity: SysMLElement, include_body: bool = False) -> Dict[st
                 {"ref": e.ref, "role": e.role} for e in entity.ends
             ]
 
-    if include_body and hasattr(entity, "members"):
-        member_summaries = []
-        for m in entity.members:
-            member_summaries.append(_entity_summary(m, include_body=False))
-        if member_summaries:
-            info["members"] = member_summaries
+    if include_body:
+        members = getattr(entity, "members", None)
+        if members:
+            member_summaries = []
+            for m in members:
+                member_summaries.append(_entity_summary(m, include_body=False))
+            if member_summaries:
+                info["members"] = member_summaries
 
     return info
 
@@ -389,11 +395,12 @@ def sysml_export_submodel(entity_name: str, depth: int = 2) -> Dict[str, Any]:
             collected.add(name)
 
         if isinstance(item, ConnectionUsage) and hasattr(item, "ends"):
-            for end in item.ends:
-                collected.add(end.ref)
+            for end in getattr(item, "ends", []) or []:
+                collected.add(getattr(end, "ref", str(end)))
 
-        if hasattr(item, "members"):
-            for m in item.members:
+        members = getattr(item, "members", None)
+        if members:
+            for m in members:
                 collect_refs(m, d - 1)
 
     collect_refs(entity, depth)
@@ -448,10 +455,9 @@ def sysml_import_doc(file_path: str, output_path: Optional[str] = None) -> Dict[
     Returns:
         导入结果摘要
     """
-    try:
-        from scripts.demo_doc_to_sysml import build_sysml_model_from_doc_tree
-    except ImportError as exc:
-        return {"ok": False, "error": f"Failed to import doc_to_sysml: {exc}"}
+
+    if build_sysml_model_from_doc_tree is None:
+        return {"ok": False, "error": "demo_doc_to_sysml import not available"}
 
     try:
         mgr, payload = build_sysml_model_from_doc_tree(file_path)
@@ -523,17 +529,19 @@ def sysml_semantic_search(query: str, search_content: bool = True) -> Dict[str, 
         if hasattr(entity, "short_name") and entity.short_name:
             if query.lower() in str(entity.short_name).lower():
                 score = max(score, 0.6)
-                reasons.append(f"short_name_match")
+                reasons.append("short_name_match")
 
         # 搜索成员
-        if search_content and hasattr(entity, "members"):
-            member_texts = []
-            for m in entity.members:
-                member_texts.append(f"{_entity_type_name(m)} {getattr(m, 'name', '')}")
-            combined = " ".join(member_texts)
-            if query.lower() in combined.lower():
-                score = max(score, 0.5)
-                reasons.append("member_content_match")
+        if search_content:
+            members = getattr(entity, "members", None)
+            if members:
+                member_texts = []
+                for m in members:
+                    member_texts.append(f"{_entity_type_name(m)} {getattr(m, 'name', '')}")
+                combined = " ".join(member_texts)
+                if query.lower() in combined.lower():
+                    score = max(score, 0.5)
+                    reasons.append("member_content_match")
 
         if score > 0:
             summary = _entity_summary(entity, include_body=False)
