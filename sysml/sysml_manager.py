@@ -4,7 +4,7 @@ SysML 模型管理器：加载、保存、查询、修改模型。
 
 from pathlib import Path
 from typing import Optional, List, Union, TypeVar, cast
-from sysml_model import (
+from .sysml_model import (
     SysMLElement,
     Namespace,
     Package,
@@ -16,7 +16,7 @@ from sysml_model import (
     InterfaceUsage,
     AllocationUsage,
 )
-from sysml_parser import parse_sysml_text
+from .sysml_parser import parse_sysml_text
 
 T = TypeVar('T', bound=SysMLElement)
 
@@ -57,10 +57,10 @@ class SysMLManager:
             self.root_elements.append(element)
         else:
             # 确保 element 是 Namespace 允许的成员类型
-            if not isinstance(element, (Definition, Usage, Alias, Import)):
+            if not isinstance(element, (Definition, Usage, Alias, Import, Package)):
                 raise TypeError(
                     f"Cannot add element of type '{type(element).__name__}' to a namespace. "
-                    "Only Definition, Usage, Alias, or Import are allowed."
+                    "Only Definition, Usage, Alias, Import, or Package are allowed."
                 )
             parent.add_member(element)
 

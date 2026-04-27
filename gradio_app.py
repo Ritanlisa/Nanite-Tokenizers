@@ -6,7 +6,7 @@ import uuid
 import gradio as gr
 
 import config
-from agent.agent import SmartAgent
+from agent.agent import Agent
 from main import health_check, setup_logging
 from monitoring import start_metrics_server
 
@@ -34,12 +34,12 @@ def update_settings(args: argparse.Namespace) -> None:
 
 
 def build_ui(session_prefix: str) -> gr.Blocks:
-    def new_agent() -> SmartAgent:
+    def new_agent() -> Agent:
         suffix = uuid.uuid4().hex[:8]
         session_id = f"{session_prefix}-{suffix}" if session_prefix else suffix
-        return SmartAgent(session_id=session_id)
+        return Agent(session_id=session_id)
 
-    async def respond(message: str, history: list[tuple[str, str]], agent_state: SmartAgent | None):
+    async def respond(message: str, history: list[tuple[str, str]], agent_state: Agent | None):
         if not message.strip():
             return "", history, agent_state
         if agent_state is None:

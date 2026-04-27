@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 import config
 from capabilities import get_capabilities
-from agent.agent import SmartAgent
+from agent.agent import Agent
 from agent.tools import tools as registered_tools
 from main import health_check, setup_logging
 from monitoring import start_metrics_server
@@ -99,14 +99,17 @@ class DebugToolInvokeRequest(BaseModel):
     rag_db_names: Optional[list[str]] = None
 
 
-SESSION_STORE: dict[str, SmartAgent] = {}
+SESSION_STORE: dict[str, Agent] = {}
 SESSION_PARAMS: dict[str, dict[str, Optional[object]]] = {}
 
 
-def get_or_create_agent(session_id: str, model: Optional[str], temperature: Optional[float]) -> SmartAgent:
+def get_or_create_agent(session_id: str, model: Optional[str], temperature: Optional[float]) -> Agent:
     params = {"model": model, "temperature": temperature}
     if session_id not in SESSION_STORE or SESSION_PARAMS.get(session_id) != params:
-        SESSION_STORE[session_id] = SmartAgent(
+        existing = SESSION_STORE.get(session_id)
+        if existing is not None:
+            existing.close()
+        SESSION_STORE[session_id] = Agent(
             session_id=session_id,
             model=model,
             temperature=temperature,
@@ -116,7 +119,9 @@ def get_or_create_agent(session_id: str, model: Optional[str], temperature: Opti
 
 
 def clear_session(session_id: str) -> None:
-    SESSION_STORE.pop(session_id, None)
+    agent = SESSION_STORE.pop(session_id, None)
+    if agent is not None:
+        agent.close()
     SESSION_PARAMS.pop(session_id, None)
     reset_tool_usage(session_id)
 
@@ -134,16 +139,26 @@ def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         logger = logging.getLogger(__name__)
+        init_task: Optional[asyncio.Task] = None
         try:
             client = get_mcp_client()
-            await client.initialize()
+            init_task = asyncio.create_task(client.initialize())
+            # 启动阶段只等待一个很短的时间，避免首次运行被 MCP 初始化拖住。
+            # MCP 若较慢，会在后台继续初始化；首次实际使用时仍会确保 initialize 已完成。
+            startup_wait_s = min(2.0, float(getattr(config.settings, "MCP_INIT_TIMEOUT", 60)))
+            try:
+                await asyncio.wait_for(init_task, timeout=startup_wait_s)
+            except asyncio.TimeoutError:
+                logger.info("MCP init still running in background (waited %.1fs)", startup_wait_s)
             if getattr(client, "_fallback_mode", False):
                 logger.warning("MCP server unavailable or disabled; using direct HTTP fallback")
-            else:
+            elif getattr(client, "_initialized", False):
                 logger.info("MCP server reachable")
         except Exception as exc:
             logger.warning("MCP init failed at app startup: %s", exc)
         yield
+        if init_task is not None and not init_task.done():
+            init_task.cancel()
         await get_mcp_client().close()
 
     app = FastAPI(title="Nanite Agent API", lifespan=lifespan)

@@ -15,10 +15,6 @@ import webbrowser
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response
-import uvicorn
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -689,7 +685,8 @@ def _build_payload_from_file(file_path: str, *, include_build_debug: bool = Fals
     return payload
 
 
-def _save_upload(upload: UploadFile) -> Path:
+def _save_upload(upload: Any) -> Path:
+    from fastapi import HTTPException
     filename = _sanitize_filename(upload.filename or "uploaded")
     ext = Path(filename).suffix.lower()
     if ext not in SUPPORTED_RAG_EXTENSIONS:
@@ -702,6 +699,7 @@ def _save_upload(upload: UploadFile) -> Path:
 
 
 def _resolve_workspace_asset_path(raw_path: str) -> Path:
+    from fastapi import HTTPException
     asset_path = str(raw_path or "").strip()
     if not asset_path:
         raise HTTPException(status_code=400, detail="缺少资产路径")
@@ -723,6 +721,7 @@ def _resolve_workspace_asset_path(raw_path: str) -> Path:
 
 
 def _resolve_debug_image_asset(asset_id: str) -> Any:
+    from fastapi import HTTPException
     key = str(asset_id or "").strip()
     if not key:
         raise HTTPException(status_code=400, detail="缺少 asset_id")
@@ -2448,7 +2447,10 @@ def _build_page_html() -> str:
 """
 
 
-def create_app() -> FastAPI:
+def create_app() -> Any:
+    from fastapi import FastAPI
+    from fastapi.responses import HTMLResponse, Response, FileResponse
+    from fastapi import File, UploadFile, HTTPException
     app = FastAPI(title="Doc Tree Debug GUI")
 
     @app.get("/favicon.ico", include_in_schema=False)
@@ -2587,6 +2589,7 @@ def main() -> None:
     except Exception:
       pass
 
+  import uvicorn
   app = create_app()
   uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

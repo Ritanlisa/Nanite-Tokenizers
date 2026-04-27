@@ -588,7 +588,12 @@ class RAGEngine:
         if config.settings.CACHE_TYPE == "redis" and config.settings.REDIS_URL:
             try:
                 redis_client = Redis.from_url(
-                    config.settings.REDIS_URL, decode_responses=True
+                    config.settings.REDIS_URL,
+                    decode_responses=True,
+                    socket_connect_timeout=float(getattr(config.settings, "REDIS_CONNECT_TIMEOUT", 1.0)),
+                    socket_timeout=float(getattr(config.settings, "REDIS_SOCKET_TIMEOUT", 2.0)),
+                    retry_on_timeout=False,
+                    health_check_interval=30,
                 )
                 redis_client.ping()
                 return redis_client

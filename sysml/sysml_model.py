@@ -53,9 +53,9 @@ class Namespace(SysMLElement):
     """命名空间基类（包、定义、使用）"""
     def __init__(self, name: Optional[str] = None, short_name: Optional[str] = None):
         super().__init__(name, short_name)
-        self.members: List[Union[Definition, Usage, Alias, Import]] = []
+        self.members: List[Union[Definition, Usage, Alias, Import, "Package"]] = []
 
-    def add_member(self, member: Union[Definition, Usage, Alias, Import]):
+    def add_member(self, member: Union[Definition, Usage, Alias, Import, "Package"]):
         member.owner = self
         self.members.append(member)
         return member

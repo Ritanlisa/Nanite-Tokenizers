@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.messages import HumanMessage, messages_from_dict, messages_to_dict
@@ -21,11 +21,19 @@ class PersistentChatMemory:
         if config.settings.CACHE_TYPE == "redis" and config.settings.REDIS_URL:
             try:
                 self.redis_client = redis.Redis.from_url(
-                    config.settings.REDIS_URL, decode_responses=True
+                    config.settings.REDIS_URL,
+                    decode_responses=True,
+                    socket_connect_timeout=float(getattr(config.settings, "REDIS_CONNECT_TIMEOUT", 1.0)),
+                    socket_timeout=float(getattr(config.settings, "REDIS_SOCKET_TIMEOUT", 2.0)),
+                    retry_on_timeout=False,
+                    health_check_interval=30,
                 )
+                # 显式 ping，一旦不可用就快速回退，避免首次读写触发长时间阻塞
+                self.redis_client.ping()
                 self._load()
             except Exception as exc:
                 logger.warning("Redis unavailable, using in-memory history: %s", exc)
+                self.redis_client = None
 
     def _load(self) -> None:
         if not self.redis_client:
@@ -68,17 +76,28 @@ class PersistentChatMemory:
     def get_messages(self):
         return self.history.messages
 
+    def snapshot(self) -> list[dict[str, Any]]:
+        return messages_to_dict(self.history.messages)
+
+    def restore(self, messages: list[dict[str, Any]]) -> None:
+        self.history.clear()
+        for message in messages_from_dict(messages or []):
+            self.history.add_message(message)
+        self._trim_history()
+        self._save()
+
     def clear(self) -> None:
         self.history.clear()
         if self.redis_client:
             self.redis_client.delete(f"chat_history:{self.session_id}")
 
 
-_memory: Optional[PersistentChatMemory] = None
+_memories: dict[str, PersistentChatMemory] = {}
 
 
 def get_chat_memory(session_id: str) -> PersistentChatMemory:
-    global _memory
-    if _memory is None or _memory.session_id != session_id:
-        _memory = PersistentChatMemory(session_id)
-    return _memory
+    memory = _memories.get(session_id)
+    if memory is None:
+        memory = PersistentChatMemory(session_id)
+        _memories[session_id] = memory
+    return memory

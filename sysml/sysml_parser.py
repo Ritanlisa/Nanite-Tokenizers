@@ -5,7 +5,7 @@ SysML 2.0 文本解析器 (Lark 实现)
 from typing import cast
 
 from lark import Lark, Transformer, v_args
-from sysml_model import *
+from .sysml_model import *
 
 # 语法定义（SysML 2.0 子集）
 SYML_GRAMMAR = r"""

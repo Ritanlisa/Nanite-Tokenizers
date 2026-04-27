@@ -311,10 +311,10 @@ async def health_check(include_mcp: bool = True) -> None:
 
 
 async def batch_process(input_file: str, output_file: str | None = None):
-    from agent.agent import SmartAgent
+    from agent.agent import Agent
 
     logger = logging.getLogger(__name__)
-    agent = SmartAgent()
+    agent = Agent()
     with open(input_file, "r", encoding="utf-8") as handle:
         queries = [line.strip() for line in handle if line.strip()]
 
@@ -389,9 +389,9 @@ async def main() -> None:
         await batch_process(args.batch_file, args.output_file)
         return
 
-    from agent.agent import SmartAgent
+    from agent.agent import Agent
 
-    agent = SmartAgent(session_id=args.session)
+    agent = Agent(session_id=args.session)
     print("Agent ready (type 'exit' to quit)")
     while True:
         try:

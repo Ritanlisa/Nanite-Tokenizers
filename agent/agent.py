@@ -5,9 +5,12 @@ import ast
 import html
 import json
 import logging
+import queue
 import re
+import threading
 import time
-from typing import Any, Optional, cast
+from dataclasses import dataclass, field
+from typing import Any, Literal, Optional, cast
 from uuid import UUID
 
 from langchain.agents import create_agent
@@ -84,34 +87,191 @@ class TokenLimitCallback(BaseCallbackHandler):
         if self.max_tokens and self._count > self.max_tokens:
             raise TokenLimitExceeded("token limit exceeded")
 
-class SmartAgent:
+# Agent message types — used by the agent-to-agent messaging system
+AgentMessageKind = Literal["guided", "queued", "rollback"]
+
+
+@dataclass(slots=True)
+class _AgentMessage:
+    message_id: str
+    sender_session_id: str
+    recipient_session_id: str
+    kind: AgentMessageKind
+    payload: Any
+    created_at: float = field(default_factory=time.monotonic)
+
+
+@dataclass(slots=True)
+class AgentMessageReceipt:
+    message: _AgentMessage
+    processed_at: Optional[float] = None
+    result: Any = None
+    error: Optional[str] = None
+
+
+@dataclass(slots=True)
+class _PendingAgentMessage:
+    message: _AgentMessage
+    completion: threading.Event = field(default_factory=threading.Event)
+    processed_at: Optional[float] = None
+    result: Any = None
+    error: Optional[str] = None
+
+
+@dataclass(slots=True)
+class _AgentOperationState:
+    name: str
+    memory_snapshot: list[dict[str, Any]]
+
+
+class Agent:
+    _registry: dict[str, "Agent"] = {}
+    _registry_lock = threading.RLock()
+
     def __init__(
         self,
-        session_id: str,
+        session_id: str = "default",
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         api_url: Optional[str] = None,
         temperature: Optional[float] = None,
+        memory: Optional[Any] = None,
+        llm: Optional[ChatOpenAIWithReasoning] = None,
+        tools_list: Optional[list[BaseTool]] = None,
+        mcp_client: Optional[Any] = None,
     ) -> None:
         self.session_id = session_id
-        self.memory = get_chat_memory(session_id)
-        resolved_api_key = api_key or config.settings.OPENAI_API_KEY
-        self.llm = ChatOpenAIWithReasoning(
-            model=model or config.settings.LLM_MODEL,
-            temperature=(
-                temperature if temperature is not None else config.settings.TEMPERATURE
-            ),
-            api_key=SecretStr(resolved_api_key) if resolved_api_key else None,
-            base_url=api_url or config.settings.OPENAI_API_URL,
+        self.model = model or config.settings.LLM_MODEL
+        self.api_key = api_key or config.settings.OPENAI_API_KEY
+        self.api_url = api_url or config.settings.OPENAI_API_URL
+        self.temperature = temperature if temperature is not None else config.settings.TEMPERATURE
+
+        # ── lazy fields (built on first access) ──────────────────────
+        self._memory: Optional[Any] = memory
+        self._llm: Optional[ChatOpenAIWithReasoning] = llm
+        self._mcp_client: Optional[Any] = mcp_client
+        self._tools_list_provided = tools_list
+        self._tools: Optional[list[BaseTool]] = None
+        self._default_agent: Any = None
+
+        # ── agent infra (lightweight, always ready) ──────────────────
+        self.default_allowed_mcp_tools: list[str] = []
+        self._mailbox_lock = threading.RLock()
+        self._guided_messages: list[_PendingAgentMessage] = []
+        self._queued_messages: list[_PendingAgentMessage] = []
+        self._rollback_messages: list[_PendingAgentMessage] = []
+        self._processed_messages: queue.Queue[AgentMessageReceipt] = queue.Queue()
+        self._active_operation: Optional[_AgentOperationState] = None
+        self._idle = True
+        self._last_completed_snapshot: Optional[list[dict[str, Any]]] = None
+
+        self._register()
+
+    # ── lazy accessors ───────────────────────────────────────────────
+
+    @property
+    def memory(self):
+        if self._memory is None:
+            self._memory = get_chat_memory(self.session_id)
+            self._last_completed_snapshot = self._memory.snapshot()
+        return self._memory
+
+    @memory.setter
+    def memory(self, value):
+        self._memory = value
+
+    @property
+    def llm(self) -> ChatOpenAIWithReasoning:
+        if self._llm is None:
+            self._llm = ChatOpenAIWithReasoning(
+                model=self.model,
+                temperature=self.temperature,
+                api_key=SecretStr(self.api_key) if self.api_key else None,
+                base_url=self.api_url,
+                timeout=getattr(config.settings, "LLM_REQUEST_TIMEOUT", 120),
+                streaming=True,
+            )
+        return self._llm
+
+    def _build_llm(self) -> ChatOpenAIWithReasoning:
+        """Rebuild LLM (used by reconfigure_model)."""
+        self._llm = ChatOpenAIWithReasoning(
+            model=self.model,
+            temperature=self.temperature,
+            api_key=SecretStr(self.api_key) if self.api_key else None,
+            base_url=self.api_url,
             timeout=getattr(config.settings, "LLM_REQUEST_TIMEOUT", 120),
             streaming=True,
         )
-        caps = get_capabilities()
-        if caps.tool_calling_supported is False:
-            self.tools: list[BaseTool] = []
-        else:
-            self.tools = list(tools)
-        self.agent = self._create_agent()
+        return self._llm
+
+    @property
+    def mcp_client(self):
+        if self._mcp_client is None:
+            from mcp_client.client import get_mcp_client
+            self._mcp_client = get_mcp_client()
+        return self._mcp_client
+
+    @property
+    def tools(self) -> list[BaseTool]:
+        if self._tools is None:
+            if self._tools_list_provided is not None:
+                self._tools = list(self._tools_list_provided)
+            else:
+                caps = get_capabilities()
+                if caps.tool_calling_supported is False:
+                    self._tools = []
+                else:
+                    self._tools = list(tools)
+        return self._tools
+
+    @tools.setter
+    def tools(self, value: list[BaseTool]):
+        self._tools = value
+
+    @property
+    def agent(self):
+        """Lazy-built LangGraph agent runner."""
+        if self._default_agent is None:
+            self._default_agent = self._create_agent()
+        return self._default_agent
+
+    # ── registry ─────────────────────────────────────────────────────
+
+    def _register(self) -> None:
+        with self._registry_lock:
+            self._registry[self.session_id] = self
+
+    @classmethod
+    def get_registered(cls, session_id: str) -> Optional["Agent"]:
+        with cls._registry_lock:
+            return cls._registry.get(session_id)
+
+    def close(self) -> None:
+        with self._registry_lock:
+            if self._registry.get(self.session_id) is self:
+                self._registry.pop(self.session_id, None)
+
+    # ── model reconfiguration ────────────────────────────────────────
+
+    def reconfigure_model(
+        self,
+        *,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        api_key: Optional[str] = None,
+        api_url: Optional[str] = None,
+    ) -> None:
+        if model is not None:
+            self.model = model
+        if temperature is not None:
+            self.temperature = temperature
+        if api_key is not None:
+            self.api_key = api_key
+        if api_url is not None:
+            self.api_url = api_url
+        self._build_llm()
+        self._default_agent = None
 
     @staticmethod
     def _normalize_tool_names(values: Optional[list[str]]) -> list[str]:
@@ -452,7 +612,7 @@ class SmartAgent:
                         session_id,
                         call_id,
                         str(tool_name or "tool"),
-                        SmartAgent._short_debug_text(tool_input),
+                        Agent._short_debug_text(tool_input),
                     )
                 return call_id
 
@@ -493,7 +653,7 @@ class SmartAgent:
                     "[tool:end] session=%s call_id=%s output=%s",
                     session_id,
                     call_id,
-                    SmartAgent._short_debug_text(output),
+                    Agent._short_debug_text(output),
                 )
 
             def on_tool_error(self, error, **kwargs):
@@ -507,7 +667,7 @@ class SmartAgent:
                     "[tool:error] session=%s call_id=%s error=%s",
                     session_id,
                     call_id,
-                    SmartAgent._short_debug_text(error),
+                    Agent._short_debug_text(error),
                 )
 
         return ToolUsageCallback()

@@ -69,6 +69,9 @@ class Settings(BaseSettings):
 
     CACHE_TYPE: Literal["memory", "redis"] = "memory"
     REDIS_URL: Optional[str] = Field(None, validation_alias="REDIS_URL")
+    # Redis 连接若不可达，默认超时可能会拖慢启动；这里提供可配置的短超时
+    REDIS_CONNECT_TIMEOUT: float = Field(1.0, ge=0.1, le=30.0)
+    REDIS_SOCKET_TIMEOUT: float = Field(2.0, ge=0.1, le=30.0)
     CACHE_TTL: int = Field(3600, ge=60)
     MEMORY_CACHE_MAXSIZE: int = Field(1000, ge=10)
 
