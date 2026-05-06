@@ -2652,6 +2652,26 @@ def chunk_documents_from_rag_documents(rag_docs: Sequence[RAG_DB_Document]) -> L
     return docs
 
 
+def _populate_image_ocr_text(rag_docs: Sequence[RAG_DB_Document]) -> None:
+    from rag.document_interface import _OCR_RESULT_CACHE, ImageAsset
+
+    if not _OCR_RESULT_CACHE:
+        return
+
+    for rag_doc in rag_docs:
+        for page in rag_doc.iter_pages():
+            for idx, item in enumerate(page.assets.images):
+                asset = _normalize_image_value(item)
+                if not isinstance(asset, ImageAsset) or not asset.has_binary:
+                    continue
+                if asset.ocr_text:
+                    continue
+                cached = _OCR_RESULT_CACHE.get(asset.asset_id)
+                if cached:
+                    import dataclasses
+                    page.assets.images[idx] = dataclasses.replace(asset, ocr_text=cached)
+
+
 def prepare_documents_for_indexing_from_loaded_docs(loaded_docs: Sequence[Document]) -> List[Document]:
     rag_docs = build_rag_db_documents(loaded_docs)
     return chunk_documents_from_rag_documents(rag_docs)
@@ -2699,6 +2719,7 @@ def load_rag_documents_from_paths(
             total=total_paths,
         )
     rag_docs = build_rag_db_documents(loaded_docs, progress_callback=progress_callback)
+    _populate_image_ocr_text(rag_docs)
     _emit_build_progress(
         progress_callback,
         "load_completed",
