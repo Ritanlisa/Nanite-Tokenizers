@@ -32,6 +32,7 @@ class ImageAsset:
     caption: str = ""
     source: str = ""
     page: int = 0
+    ocr_text: str = ""
 
     @classmethod
     def from_bytes(
@@ -45,6 +46,7 @@ class ImageAsset:
         caption: str = "",
         source: str = "",
         page: Optional[int] = None,
+        ocr_text: str = "",
     ) -> "ImageAsset":
         payload = bytes(data or b"")
         name = str(filename or "").strip()
@@ -63,6 +65,7 @@ class ImageAsset:
             caption=str(caption or "").strip(),
             source=str(source or "").strip(),
             page=max(0, int(page or 0)),
+            ocr_text=str(ocr_text or "").strip(),
         )
 
     @classmethod
@@ -106,6 +109,7 @@ class ImageAsset:
             caption=str(payload.get("caption") or "").strip(),
             source=str(payload.get("source") or "").strip(),
             page=max(0, int(payload.get("page") or 0)),
+            ocr_text=str(payload.get("ocr_text") or "").strip(),
         )
 
     @property
@@ -128,6 +132,7 @@ class ImageAsset:
             "source": self.source,
             "page": self.page,
             "has_binary": self.has_binary,
+            "ocr_text": self.ocr_text,
         }
         if include_data and self.data:
             payload["data"] = base64.b64encode(self.data).decode("ascii")
@@ -154,6 +159,9 @@ def _image_asset_key(value: Any) -> str:
     if isinstance(normalized, ImageAsset):
         return f"image:{normalized.asset_id}"
     return f"text:{normalized}"
+
+
+_OCR_RESULT_CACHE: Dict[str, str] = {}
 
 
 def _dedupe_text_values(values: Sequence[Any]) -> List[str]:
@@ -1791,6 +1799,108 @@ class RAG_DB_Document(Chapter, ABC):
         return f"{heading}:\n{block}".strip()
 
     @staticmethod
+    def _append_ocr_comments_to_markdown(
+        markdown_text: str,
+        page_images: Optional[Sequence[Any]] = None,
+        page_number: Optional[int] = None,
+        page_image_indexes: Optional[Sequence[int]] = None,
+    ) -> str:
+        base = str(markdown_text or "").strip()
+        if not base:
+            return base
+
+        page_no = RAG_DB_Document.coerce_page_number(page_number)
+        if page_no is None or page_no <= 0:
+            return base
+
+        real_images = [
+            item for item in list(page_images or [])
+            if RAG_DB_Document._looks_like_real_image_asset(item)
+        ]
+        if not real_images:
+            return base
+
+        from rag.ocr import _ocr_image, ocr_enabled as _ocr_enabled
+        if not _ocr_enabled():
+            return base
+
+        normalized_pi = [
+            int(pi)
+            for pi in [RAG_DB_Document.coerce_page_number(item) for item in list(page_image_indexes or [])]
+            if pi is not None and int(pi) > 0
+        ]
+
+        def _url_index_to_real_pos(url_index: int) -> int:
+            for pos_idx, pi in enumerate(normalized_pi):
+                if pi == url_index:
+                    return pos_idx + 1
+            if 1 <= url_index <= len(real_images):
+                return url_index
+            return -1
+
+        ocr_by_pos: Dict[int, str] = {}
+        images_mutable = list(page_images or [])
+
+        def _get_ocr_for_image_pos(pos: int) -> str:
+            if pos in ocr_by_pos:
+                return ocr_by_pos[pos]
+            idx = pos - 1
+            if idx < 0 or idx >= len(real_images):
+                return ""
+            img = real_images[idx]
+            asset = _normalize_image_asset(img)
+            if not isinstance(asset, ImageAsset) or not asset.has_binary:
+                return ""
+            if asset.ocr_text:
+                ocr_by_pos[pos] = asset.ocr_text
+                return asset.ocr_text
+
+            cached = _OCR_RESULT_CACHE.get(asset.asset_id)
+            if cached is not None:
+                ocr_by_pos[pos] = cached
+                return cached
+
+            try:
+                ocr_result = _ocr_image(asset.data)
+            except Exception:
+                ocr_result = ""
+            if ocr_result:
+                _OCR_RESULT_CACHE[asset.asset_id] = ocr_result
+                ocr_by_pos[pos] = ocr_result
+                new_asset = ImageAsset(
+                    asset_id=asset.asset_id,
+                    filename=asset.filename,
+                    media_type=asset.media_type,
+                    data=asset.data,
+                    width=asset.width,
+                    height=asset.height,
+                    caption=asset.caption,
+                    source=asset.source,
+                    page=asset.page,
+                    ocr_text=ocr_result,
+                )
+                images_mutable[idx] = new_asset
+            return ocr_result
+
+        def _replace_image_token(match: re.Match) -> str:
+            token = match.group(0)
+            target = str(match.group(1) or "").strip()
+            m = re.fullmatch(rf"image://page-{int(page_no)}/(\d+)", target, flags=re.IGNORECASE)
+            if m is None:
+                return token
+            url_index = int(m.group(1))
+            real_pos = _url_index_to_real_pos(url_index)
+            if real_pos <= 0:
+                return token
+            ocr_text = _get_ocr_for_image_pos(real_pos)
+            if not ocr_text:
+                return token
+            safe_ocr = str(ocr_text or "").replace("--", "\\-\\-").strip()
+            return f"{token}\n<!-- OCR: {safe_ocr} -->"
+
+        return re.sub(r"!\[[^\]]*\]\(([^)]+)\)", _replace_image_token, base)
+
+    @staticmethod
     def _inject_citation_markers_into_text(text: str, citations: Optional[Sequence[str]]) -> str:
         base = str(text or "")
         rows = [str(item or "").strip() for item in list(citations or []) if str(item or "").strip()]
@@ -2428,7 +2538,13 @@ class RAG_DB_Document(Chapter, ABC):
             page_number=page_number,
             page_image_indexes=page_image_indexes,
         )
-        return self._append_citations_to_markdown(markdown_with_images, page_citations)
+        markdown_with_ocr = self._append_ocr_comments_to_markdown(
+            markdown_with_images,
+            page_images=page_images,
+            page_number=page_number,
+            page_image_indexes=page_image_indexes,
+        )
+        return self._append_citations_to_markdown(markdown_with_ocr, page_citations)
 
     @staticmethod
     def _is_markdown_table_block(block: str) -> bool:
