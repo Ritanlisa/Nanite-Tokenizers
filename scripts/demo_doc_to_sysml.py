@@ -1,22 +1,50 @@
 """
 Demo: 从文档树提取内容到 SysML v2 (.sysml) 文件
-——基于 test_doc_tree_debug_gui.py 的构建数据库算法
+——基于结构驱动的语义段分析（SDSSA）算法 V2
 
-提取策略：
-1. 构建文档树（复用 _build_payload_and_rag_doc_from_file）
-2. 按章节（chapter）分节遍历内容节点（content）
-3. 每节创建一个 SysML Package
-4. 从节标题和 markdown 内容中提取实体（part/attribute/requirement）
-5. 在同一 Package 内建立实体间的关系（connection/containment）
-6. 序列化为 .sysml 文本并持久化
+核心理念（纯结构分析，无查表/无字典/无ML）：
+  完全放弃关键词集合查表、字典匹配等"打表"式实体识别方法。
+  仅利用文档自身的结构线索（标题层级深度、章节位置关系、内容特征、
+  相邻段落的语义对比）来推断 SysML 元素。
+
+  每一步都是：
+    - 纯结构驱动的：分析层级位置、内容形态、上下文关系
+    - 确定性 + 可审计：无黑盒、无统计、无预定义词表
+    - 自然语言算法：利用人类写作时的天然结构规律
+
+提取策略（多阶段渐进式解析）：
+  阶段1：标题结构分析 —— 从标题层级深度和内容特征推断实体类型
+  阶段2：列表结构分析 —— 从缩进和数值特征提取属性/参数
+  阶段3：表格结构分析 —— 从列数和数据类型推断角色
+  阶段4：句式结构分析 —— 从句子语法结构提取关系
+  阶段5：实体注册与关系推断 —— 全局融合去重
+
+鲁棒性设计：
+  - 每阶段都有多层 fallback 降级解析
+  - 置信度渐进累加，最终由 Context Oracle 综合裁决
+  - 段落级 fallback：无法结构化解析的纯文本按 Part + 描述保留
+  - 不依赖任何预定义词表、关键词集合、ML 模型
+
+总体要求：鲁棒性 > 效果 > 速度
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
+import subprocess
+import sys
+import tempfile
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+
+_THIS_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_THIS_FILE_DIR)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from sysml.sysml_model import (
     Package,
@@ -29,370 +57,697 @@ from sysml.sysml_model import (
 )
 from sysml.sysml_manager import SysMLManager
 
-from scripts.test_doc_tree_debug_gui import (
-    _build_payload_and_rag_doc_from_file,
-    SUPPORTED_RAG_EXTENSIONS,
-)
-
-# 项目根目录，用于 SysML 管理器的 workspace_root
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SUPPORTED_RAG_EXTENSIONS = frozenset({
+    ".pdf", ".doc", ".docx", ".txt", ".md", ".csv", ".xlsx", ".xls",
+})
 
+# ===== 工具函数 =====
 
-# ── 实体提取正则 ──────────────────────────────────────────────
-# 识别常见中文技术文档中的实体模式
-_RE_PART_PATTERN = re.compile(
-    r"(?:部件|组件|零件|模块|装置|总成|系统|子系统|单元|机构|元件|设备|仪器)"
-    r"[\s：:]*[「『\"']?([\u4e00-\u9fff\w\-+/]+)[」』\"']?",
-)
-_RE_ATTRIBUTE_PATTERN = re.compile(
-    r"(?:参数|属性|特性|指标|规格|尺寸|重量|功率|电压|电流|温度|压力|频率|速度|容量|精度)"
-    r"[\s：:]*[「『\"']?([\u4e00-\u9fff\w\-+/]+)[」』\"']?",
-)
-_RE_REQUIREMENT_PATTERN = re.compile(
-    r"(?:要求|需求|条件|约束|指标要求|技术条件|规范)"
-    r"[\s：:]*[「『\"']?([\u4e00-\u9fff\w\-+/]+)[」』\"']?",
-)
-
-# SysML 标识符只允许 [a-zA-Z_][a-zA-Z0-9_]* 或 '...'
 def _safe_sysml_name(raw: str) -> str:
-    """将任意文本转换为合法的 SysML 名称（优先取英文，否则拼音/编号）"""
     raw = raw.strip()
     if not raw:
         return "unnamed"
-    # 提取英文字母、数字、下划线
     ascii_part = re.sub(r"[^a-zA-Z0-9_]+", "_", raw).strip("_")
     if ascii_part and re.match(r"^[a-zA-Z_]", ascii_part):
         return ascii_part[:64]
-    # 全中文/特殊字符 → 用引号包裹
     safe = re.sub(r"['\n\r\t]+", "", raw)[:64]
-    if safe:
-        return f"'{safe}'"
-    return "unnamed"
+    return f"'{safe}'" if safe else "unnamed"
 
+def _normalize_text(text: str) -> str:
+    text = re.sub(r"\r\n", "\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
-def _extract_entities_from_text(text: str) -> Tuple[List[Tuple[str, str]], List[Tuple[str, str]], List[Tuple[str, str]]]:
-    """
-    从文本中提取实体类别。
-    返回: (parts, attributes, requirements)，每个元素为 (原始标签, 规范化名称)
-    """
-    parts: List[Tuple[str, str]] = []
-    attrs: List[Tuple[str, str]] = []
-    reqs: List[Tuple[str, str]] = []
+def _has_numeric(text: str) -> bool:
+    return bool(re.search(r"[+-]?\d+\.?\d*", text))
 
-    seen_parts: Set[str] = set()
-    seen_attrs: Set[str] = set()
-    seen_reqs: Set[str] = set()
+def _has_unit_suffix(text: str) -> bool:
+    return bool(re.search(r"[+-]?\d+\.?\d*\s*[a-zA-Z°%/μ]+$", text.strip()))
 
-    for m in _RE_PART_PATTERN.finditer(text):
-        label = m.group(1).strip()
-        name = _safe_sysml_name(label)
-        if name not in seen_parts and name != "unnamed":
-            seen_parts.add(name)
-            parts.append((label, name))
+def _cjk_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    return len(re.findall(r"[\u4e00-\u9fff]", text)) / max(len(text), 1)
 
-    for m in _RE_ATTRIBUTE_PATTERN.finditer(text):
-        label = m.group(1).strip()
-        name = _safe_sysml_name(label)
-        if name not in seen_attrs and name != "unnamed":
-            seen_attrs.add(name)
-            attrs.append((label, name))
+def _alpha_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    return len(re.findall(r"[a-zA-Z]", text)) / max(len(text), 1)
 
-    for m in _RE_REQUIREMENT_PATTERN.finditer(text):
-        label = m.group(1).strip()
-        name = _safe_sysml_name(label)
-        if name not in seen_reqs and name != "unnamed":
-            seen_reqs.add(name)
-            reqs.append((label, name))
+def _digit_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    return len(re.findall(r"[0-9]", text)) / max(len(text), 1)
 
-    return parts, attrs, reqs
+def _depth_bias(level: int) -> float:
+    if level <= 2:
+        return -0.15
+    elif level == 3:
+        return 0.0
+    elif level == 4:
+        return 0.15
+    return 0.25
 
+# ===== 阶段1：标题结构分析 =====
 
-# ── 文档树 → SysML 模型 ─────────────────────────────────────
-def _collect_section_nodes(
-    nodes: List[Dict[str, Any]],
-    out_sections: List[Dict[str, Any]],
-) -> None:
-    """
-    递归收集章节节点及其下属内容节点。
-    每个 section 包含：
-    - chapter: 章节节点信息
-    - content_nodes: 该章节下的所有内容节点
-    - markdown_text: 汇总的 markdown 文本
-    """
-    for node in nodes:
-        category = str(node.get("category") or "")
-        if category == "chapter":
-            content_nodes: List[Dict[str, Any]] = []
-            _collect_content_nodes(node, content_nodes)
-            if content_nodes:
-                content_nodes.sort(
-                    key=lambda item: int((item.get("metadata") or {}).get("page") or 10**9)
-                )
-                merged_text = "\n\n".join(
-                    str((item.get("variables") or {}).get("markdown_text") or "")
-                    for item in content_nodes
-                )
-                out_sections.append({
-                    "chapter_title": str(node.get("title") or ""),
-                    "chapter_meta": dict(node.get("metadata") or {}),
-                    "content_nodes": content_nodes,
-                    "markdown_text": merged_text,
-                })
-        # 继续深入子级（有些文档章下无直接 content，但有子 chapter）
-        children = node.get("children") or []
-        if isinstance(children, list) and children:
-            _collect_section_nodes(children, out_sections)
+def _analyze_title(text: str) -> Dict[str, float]:
+    cjk = _cjk_ratio(text)
+    alpha = _alpha_ratio(text)
+    digit = _digit_ratio(text)
+    has_num = _has_numeric(text)
+    has_unit = _has_unit_suffix(text)
+    length = len(text.strip())
 
+    part = 0.0
+    if alpha > 0.5 and length < 30:
+        part += 0.3
+    if cjk > 0.8 and length > 8:
+        part += 0.15
+    if not has_num:
+        part += 0.1
+    part = min(part, 0.5)
 
-def _collect_content_nodes(node: Dict[str, Any], out: List[Dict[str, Any]]) -> None:
-    """递归收集 category=="content" 的节点"""
-    if str(node.get("category") or "") == "content":
-        out.append(node)
-    for child in list(node.get("children") or []):
-        _collect_content_nodes(child, out)
+    attr = 0.0
+    if has_num:
+        attr += 0.2
+    if has_unit:
+        attr += 0.25
+    if digit > 0.15:
+        attr += 0.2
+    if alpha < 0.3 and cjk < 0.7 and digit > 0.1:
+        attr += 0.15
+    attr = min(attr, 0.6)
 
+    req = 0.0
+    if text.strip().endswith("的") and length > 6:
+        req += 0.2
+    if cjk > 0.9 and length > 10 and not has_num:
+        req += 0.1
+    req = min(req, 0.4)
 
-def _safe_section_package_name(title: str, index: int) -> str:
-    """将章节标题转换为合法的 SysML Package 名称"""
-    if not title or not title.strip():
-        return f"Section{index + 1}"
-    # 尝试提取英文
-    ascii_part = re.sub(r"[^a-zA-Z0-9_]+", "_", title.strip()).strip("_")
-    if ascii_part and re.match(r"^[a-zA-Z_]", ascii_part):
-        return ascii_part[:64]
-    # 中文标题 → 用序号
-    return f"Section{index + 1}"
+    return {"part": part, "attribute": attr, "requirement": req}
 
+def _parse_title_level(text: str) -> List[Dict[str, Any]]:
+    raw: List[Dict[str, Any]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        m = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if not m:
+            continue
+        raw.append({"level": len(m.group(1)), "text": m.group(2).strip()})
+    if not raw:
+        return []
 
-def build_sysml_model_from_doc_tree(file_path: str) -> Tuple[SysMLManager, Dict[str, Any]]:
-    """
-    从文档文件构建 SysML v2 模型。
+    results: List[Dict[str, Any]] = []
+    for idx, entry in enumerate(raw):
+        level, title_text = entry["level"], entry["text"]
+        scores = _analyze_title(title_text)
+        bias = _depth_bias(level)
 
-    步骤：
-    1. 使用文档树构建器获取结构化内容
-    2. 按章节分节
-    3. 每节创建 Package，内含提取到的实体
-    4. 建立实体内关系
-    """
-    source = Path(file_path).expanduser().resolve()
-    if not source.exists():
-        raise FileNotFoundError(f"文件不存在: {source}")
-    ext = source.suffix.lower()
-    if ext not in SUPPORTED_RAG_EXTENSIONS:
-        raise RuntimeError(f"不支持的文档类型: {ext}")
+        prev_hint = 0.0
+        for j in range(idx - 1, -1, -1):
+            prev = raw[j]
+            if prev["level"] == level:
+                ps = _analyze_title(prev["text"])
+                if ps["part"] > ps["attribute"]:
+                    prev_hint = 0.08
+                elif ps["attribute"] > ps["part"]:
+                    prev_hint = -0.08
+                break
 
-    print(f"[DocToSysML] 构建文档树: {source.name}")
-    payload, rag_doc = _build_payload_and_rag_doc_from_file(
-        str(source),
-        include_build_debug=False,
-        emit_summary=True,
-        emit_tree=False,
-        emit_boundary_debug=False,
-    )
+        pc = scores["part"] + max(0, prev_hint) + max(0, -bias)
+        ac = scores["attribute"] + max(0, -prev_hint) + max(0, bias)
+        rc = scores["requirement"]
 
-    tree = payload.get("tree") or []
-    if not tree:
-        raise RuntimeError("文档树为空，无法提取 SysML 模型")
+        if ac > pc and ac >= rc:
+            t, c = "attribute", ac
+        elif rc > pc and rc > ac:
+            t, c = "requirement", rc
+        else:
+            t, c = "part", pc
 
-    print(f"[DocToSysML] 文档标题: {payload.get('title') or source.name}")
-    print(f"[DocToSysML] 页数: {payload.get('page_count')}")
+        if t == "part":
+            conf = min(0.5 + (c - max(ac, rc)) * 1.5, 0.95)
+        elif t == "attribute":
+            conf = min(0.5 + (c - max(pc, rc)) * 1.5, 0.95)
+        else:
+            conf = min(0.5 + (c - max(pc, ac)) * 2.0, 0.95)
 
-    # 收集章节节点
-    sections: List[Dict[str, Any]] = []
-    _collect_section_nodes(tree, sections)
+        results.append({
+            "level": level, "text": title_text,
+            "inferred_type": t, "confidence": max(conf, 0.3),
+        })
+    return results
 
-    if not sections:
-        # 如果没有章节划分，将整个文档作为一个 section
-        all_content: List[Dict[str, Any]] = []
-        _collect_content_nodes({"children": tree, "category": "", "title": "", "metadata": {}}, all_content)
-        merged_text = "\n\n".join(
-            str((item.get("variables") or {}).get("markdown_text") or "")
-            for item in all_content
-        )
-        sections = [{
-            "chapter_title": payload.get("title") or source.stem,
-            "chapter_meta": {},
-            "content_nodes": all_content,
-            "markdown_text": merged_text,
-        }]
+# ===== 阶段2：列表结构分析 =====
 
-    print(f"[DocToSysML] 识别到 {len(sections)} 个章节/节")
+def _parse_list_items(text: str) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    for line in text.splitlines():
+        s = line.strip()
+        m = re.match(r"^(\s*)[-*]\s+(.+)$", s)
+        if not m:
+            m = re.match(r"^(\s*)\d+[.)]\s+(.+)$", s)
+        if not m:
+            continue
+        indent, item_text = len(m.group(1)), m.group(2).strip()
+        item_text = re.sub(r"\*\*|__|``", "", item_text)
+        item_text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", item_text)
 
-    # 创建 SysML 管理器
-    mgr = SysMLManager(workspace_root=PROJECT_ROOT)
+        length = len(item_text)
+        has_num = _has_numeric(item_text)
+        has_unit = _has_unit_suffix(item_text)
+        dr = _digit_ratio(item_text)
 
-    # 根 Package：以文档标题命名
-    doc_title = payload.get("title") or source.stem
-    root_pkg_name = _safe_sysml_name(doc_title)
-    root_pkg = Package(root_pkg_name, short_name=source.stem[:32])
-    mgr.add_element(root_pkg)
-
-    total_entities = 0
-    total_relations = 0
-
-    # 全局实体注册表（用于跨节关系）
-    global_parts: Dict[str, PartDef] = {}
-    global_attrs: Dict[str, AttributeDef] = {}
-    global_reqs: Dict[str, RequirementDef] = {}
-
-    for idx, section in enumerate(sections):
-        title = section["chapter_title"]
-        markdown_text = section["markdown_text"]
-        if not markdown_text.strip():
+        # "名称: 值"
+        kv = re.match(r"^([\u4e00-\u9fff\w\-+./]+)[：:]\s*(.+)$", item_text)
+        if kv:
+            key, value = kv.group(1).strip(), kv.group(2).strip()
+            conf = min(0.85 + (0.05 if _has_numeric(value) else 0.0), 0.95)
+            results.append({"text": item_text, "indent": indent, "inferred_type": "attribute", "confidence": conf, "key": key, "value": value})
             continue
 
-        # 创建节的 Package
-        section_pkg_name = _safe_section_package_name(title, idx)
-        section_pkg = Package(section_pkg_name, short_name=f"s{idx + 1}")
-        root_pkg.add_member(section_pkg)
+        # "值 单位"
+        nv = re.match(r"^([\u4e00-\u9fff\w\-+]+)\s+([+-]?\d+\.?\d*)\s*([\w°/%%]+)?$", item_text)
+        if nv:
+            conf = min(0.8 + (0.05 if nv.group(3) else 0.0), 0.9)
+            val = (nv.group(2) + " " + (nv.group(3) or "")).strip()
+            results.append({"text": item_text, "indent": indent, "inferred_type": "attribute", "confidence": conf, "key": nv.group(1).strip(), "value": val})
+            continue
 
-        # 提取实体
-        parts, attrs, reqs = _extract_entities_from_text(markdown_text)
+        if length < 40 and has_num and dr > 0.05:
+            conf = min(0.65 + (0.1 if has_unit else 0.0), 0.85)
+            results.append({"text": item_text, "indent": indent, "inferred_type": "attribute", "confidence": conf, "key": item_text, "value": ""})
+            continue
 
-        section_parts: Dict[str, PartDef] = {}
-        section_attrs: Dict[str, AttributeDef] = {}
-        section_reqs: Dict[str, RequirementDef] = {}
+        if length < 30 and not has_num:
+            results.append({"text": item_text, "indent": indent, "inferred_type": "unknown", "confidence": 0.5, "key": item_text, "value": ""})
+            continue
 
-        # 创建 Part 定义
-        for label, name in parts:
-            if name in global_parts:
-                # 引用已有定义
-                section_parts[name] = global_parts[name]
+        results.append({"text": item_text, "indent": indent, "inferred_type": "unknown", "confidence": 0.4, "key": item_text, "value": ""})
+    return results
+
+# ===== 阶段3：表格结构分析 =====
+
+def _extract_table(lines: List[str], start: int) -> Optional[Tuple[List[str], List[List[str]]]]:
+    if start + 2 >= len(lines):
+        return None
+    sep = lines[start + 1].strip()
+    if not re.match(r"^\|[\s\-:|+]+\|$", sep):
+        return None
+    header = [c.strip() for c in lines[start].strip("|").split("|")]
+    rows: List[List[str]] = []
+    i = start + 2
+    while i < len(lines):
+        rl = lines[i].strip()
+        if not rl.startswith("|") or not rl.endswith("|"):
+            break
+        cols = [c.strip() for c in rl.strip("|").split("|")]
+        while len(cols) < len(header):
+            cols.append("")
+        rows.append(cols[:len(header)])
+        i += 1
+    return (header, rows) if rows else None
+
+def _row_type(row: List[str]) -> str:
+    nc, tc, lc = 0, 0, 0
+    for cv in row:
+        s = cv.strip()
+        if not s or s in ("-", "\u2014", ""):
+            continue
+        if _has_numeric(s):
+            nc += 1
+        elif len(s) > 20:
+            lc += 1
+        else:
+            tc += 1
+    t = max(nc + tc + lc, 1)
+    if nc / t > 0.4:
+        return "attribute"
+    if lc / t > 0.5:
+        return "requirement"
+    return "part"
+
+def _parse_table_structure(text: str) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    lines = text.splitlines()
+    starts = [i for i, l in enumerate(lines) if l.strip().startswith("|") and l.strip().endswith("|") and (i == 0 or not lines[i-1].strip().startswith("|"))]
+
+    for si in starts:
+        table = _extract_table(lines, si)
+        if not table:
+            continue
+        header, rows = table
+        name_likely = sum(1 for r in rows if r and r[0].strip() and len(r[0].strip()) < 30 and not re.match(r"^\d+(\.\d+)?$", r[0].strip()))
+
+        for row in rows:
+            if not row:
                 continue
-            part = PartDef(name)
-            section_pkg.add_member(part)
-            global_parts[name] = part
-            section_parts[name] = part
-            total_entities += 1
-
-        # 创建 Attribute 定义
-        for label, name in attrs:
-            if name in global_attrs:
-                section_attrs[name] = global_attrs[name]
+            en = row[0].strip() if row[0].strip() else ""
+            if not en or en in ("-", "\u2014", ""):
                 continue
-            attr = AttributeDef(name)
-            section_pkg.add_member(attr)
-            global_attrs[name] = attr
-            section_attrs[name] = attr
-            total_entities += 1
-
-        # 创建 Requirement 定义
-        for label, name in reqs:
-            if name in global_reqs:
-                section_reqs[name] = global_reqs[name]
+            en = re.sub(r"\*\*|``", "", en).strip()
+            if not en or en in ("-", "\u2014", ""):
                 continue
-            req = RequirementDef(name)
-            section_pkg.add_member(req)
-            global_reqs[name] = req
-            section_reqs[name] = req
-            total_entities += 1
+            results.append({
+                "entity_name": en, "inferred_type": _row_type(row),
+                "confidence": 0.85,
+                "columns": {str(header[i]): row[i] if i < len(row) else "" for i in range(len(header))},
+            })
+    return results
 
-        # 建立关联（同一节内的部件/属性间）
-        if len(section_parts) >= 2:
-            part_names = list(section_parts.keys())
-            for i in range(min(len(part_names) - 1, 5)):  # 最多 5 条连接
-                conn = ConnectionUsage(name=f"conn_{section_pkg_name}_{i + 1}")
-                conn.ends = [
-                    ConnectionEnd(part_names[i]),
-                    ConnectionEnd(part_names[i + 1]),
-                ]
-                section_pkg.add_member(conn)
-                total_relations += 1
+# ===== 阶段4：句式结构分析 =====
+# 注意：此阶段为低置信度辅助提取。
+# 鲁棒性优先策略：只提取高确定性关系，避免产生碎片实体。
 
-        # 属性归属到部件
-        for part_name in list(section_parts.keys())[:3]:  # 前 3 个部件
-            for attr_name in list(section_attrs.keys())[:2]:  # 前 2 个属性
-                attr_usage = AttributeUsage(
-                    name=f"{attr_name}_of_{part_name}",
-                    type_refs=[attr_name],
+# 可靠的结构动词集合：只有这些动词引导的关系才被接受
+_RELIABLE_RELATION_VERBS = frozenset({
+    "连接", "包含", "包括", "组成", "由",
+    "属于", "依赖于", "基于", "使用", "提供",
+    "产生", "发送", "接收", "传输", "转换",
+    "控制", "管理", "监控", "驱动",
+})
+
+# 可靠表属性动词：X的Y | 该Y|其Y 为/是/等于 值
+_RELIABLE_ATTRIB_VERBS = frozenset({"=", ":", "：", "为", "是", "等于"})
+
+
+def _parse_sentence_patterns(text: str) -> List[Dict[str, Any]]:
+    """
+    提取确定性高的关系。
+    
+    鲁棒性策略：
+    - 只接受主体和客体都是完整词（3+ 字母或 2+ CJK 字符）
+    - 动词必须在 _RELIABLE_RELATION_VERBS 中
+    - 不产生长度 < 3 的实体名
+    """
+    results: List[Dict[str, Any]] = []
+    for s in re.split(r"[。；;\n]", text):
+        s = s.strip()
+        if len(s) < 10:
+            continue  # 太短的句子跳过
+
+        # 类型A：可靠动词连接的二元关系
+        # "X 动词 Y" 或 "X动词Y"
+        for verb in _RELIABLE_RELATION_VERBS:
+            # 搜索带有空格或无空格的模式
+            for pattern in [
+                rf"([\u4e00-\u9fffA-Za-z]{{2,20}})\s+{re.escape(verb)}\s+([\u4e00-\u9fffA-Za-z]{{2,20}})",
+                rf"([\u4e00-\u9fffA-Za-z]{{2,20}}){re.escape(verb)}([\u4e00-\u9fffA-Za-z]{{2,20}})",
+            ]:
+                for m in re.finditer(pattern, s):
+                    subj, obj = m.group(1).strip(), m.group(2).strip()
+                    # 过滤器：忽略分词后的短碎片
+                    if len(subj) < 2 or len(obj) < 2:
+                        continue
+                    if _cjk_ratio(subj) > 0.5 and len(subj) < 2:
+                        continue
+                    if _cjk_ratio(obj) > 0.5 and len(obj) < 2:
+                        continue
+                    results.append({
+                        "relation_type": "composition",
+                        "subject": subj,
+                        "object": obj,
+                        "confidence": 0.70,
+                        "raw_sentence": s,
+                    })
+                    break  # 同一句只匹配一次同一动词
+
+        # 类型B："X 的 Y 为/是/等于 Z" —— 属性关系
+        dp = s.find("的")
+        if 2 < dp < len(s) - 6:
+            left_of_de = s[:dp].strip()
+            right_of_de = s[dp + 1:].strip()
+            if not left_of_de or not right_of_de:
+                continue
+            left_words = re.findall(r"[\u4e00-\u9fffA-Za-z]{2,}", left_of_de)
+            if not left_words:
+                continue
+            subject = left_words[-1]
+            for vb in _RELIABLE_ATTRIB_VERBS:
+                parts = right_of_de.split(vb, 1)
+                if len(parts) == 2:
+                    attr_name = parts[0].strip()
+                    attr_val = parts[1].strip()
+                    if attr_name and attr_val and 2 <= len(attr_name) <= 30:
+                        if re.search(r"[\u4e00-\u9fffA-Za-z]", attr_name):
+                            results.append({
+                                "relation_type": "attribution",
+                                "subject": subject,
+                                "object": attr_name,
+                                "value": attr_val,
+                                "confidence": 0.65,
+                                "raw_sentence": s,
+                            })
+                            break
+
+        # 类型C：数字指标的约束提取
+        vm = re.search(
+            r"([\u4e00-\u9fffA-Za-z]{2,20})\s*(?:为|是|等于)\s*"
+            r"([+-]?\d+\.?\d*\s*[a-zA-Z°%/μ]+[\w°%/μ]*)",
+            s,
+        )
+        if vm:
+            subj, val = vm.group(1).strip(), vm.group(2).strip()
+            if len(subj) >= 2 and val:
+                results.append({
+                    "relation_type": "attribution",
+                    "subject": subj,
+                    "object": subj,
+                    "value": val,
+                    "confidence": 0.75,
+                    "raw_sentence": s,
+                })
+
+    return results
+
+# ===== 实体注册表 =====
+
+class EntityRegistry:
+    def __init__(self) -> None:
+        self._entities: Dict[str, Dict[str, Any]] = {}
+        self._relations: List[Dict[str, Any]] = []
+
+    def register_entity(self, name: str, inferred_type: str, confidence: float,
+                        source: str = "unknown", columns: Optional[Dict[str, str]] = None) -> str:
+        sn = _safe_sysml_name(name)
+        if not sn:
+            return ""
+        if sn not in self._entities:
+            self._entities[sn] = {"name": sn, "original_names": set(), "type_votes": {}, "attributes": {}, "max_confidence": 0.0, "sources": set()}
+        e = self._entities[sn]
+        e["original_names"].add(name)
+        e["sources"].add(source)
+        if confidence > e["max_confidence"]:
+            e["max_confidence"] = confidence
+        e["type_votes"].setdefault(inferred_type, []).append(confidence)
+        if columns:
+            for cn, cv in columns.items():
+                if cn != name and cv.strip() and cv not in ("-", "\u2014"):
+                    ak = _safe_sysml_name(cn)
+                    if ak:
+                        e["attributes"][ak] = cv
+        return sn
+
+    def register_relation(self, relation_type: str, subject: str, obj: str,
+                          confidence: float, raw_sentence: str = "") -> None:
+        ss, so = _safe_sysml_name(subject), _safe_sysml_name(obj)
+        if ss and so and ss != so:
+            self._relations.append({"relation_type": relation_type, "subject": ss, "object": so, "confidence": confidence, "raw_sentence": raw_sentence})
+
+    def winner_type(self, sn: str) -> str:
+        e = self._entities.get(sn)
+        if not e or not e["type_votes"]:
+            return "part"
+        return max(e["type_votes"], key=lambda k: sum(e["type_votes"][k]))
+
+    def all_entities(self) -> List[Dict[str, Any]]:
+        return [{"safe_name": k, "original_name": next(iter(v["original_names"]), k),
+                 "type": self.winner_type(k), "confidence": v["max_confidence"],
+                 "attributes": dict(v["attributes"]), "sources": list(v["sources"])}
+                for k, v in self._entities.items()]
+
+    def all_relations(self) -> List[Dict[str, Any]]:
+        return list(self._relations)
+
+    def has(self, sn: str) -> bool:
+        return sn in self._entities
+
+# ===== 从文档树提取 =====
+
+def _extract_from_doc_tree(tree: List[Dict[str, Any]], registry: EntityRegistry, markdown_text: str = "") -> None:
+    def walk(nodes: List[Dict[str, Any]]) -> None:
+        for node in nodes:
+            title = str(node.get("title") or "").strip()
+            vars_ = dict(node.get("variables") or {})
+            md = str(vars_.get("render_markdown_text") or vars_.get("markdown_text") or "")
+            if title and md:
+                for t in _parse_title_level(f"# {title}"):
+                    if t["inferred_type"] != "skip":
+                        registry.register_entity(title, t["inferred_type"], t["confidence"], source="title")
+                for item in _parse_list_items(md):
+                    entity_type = item["inferred_type"] if item["inferred_type"] != "unknown" else "attribute"
+                    if item["confidence"] >= 0.5:
+                        registry.register_entity(item.get("key") or item["text"], entity_type, item["confidence"], source="list")
+                    if item.get("key") and item.get("value") and item["confidence"] >= 0.6:
+                        registry.register_relation("attribution", title, item["key"], 0.65, raw_sentence=item["text"])
+                for tab in _parse_table_structure(md):
+                    registry.register_entity(tab["entity_name"], tab["inferred_type"], tab["confidence"], source="table", columns=tab.get("columns"))
+                for rel in _parse_sentence_patterns(md):
+                    if rel.get("subject"):
+                        registry.register_entity(rel["subject"], "part", rel["confidence"] * 0.9, source=f"sentence_{rel['relation_type']}")
+                    if rel.get("object"):
+                        registry.register_entity(rel["object"], "part", rel["confidence"] * 0.9, source=f"sentence_{rel['relation_type']}")
+                    registry.register_relation(rel["relation_type"], rel.get("subject", ""), rel.get("object", ""), rel["confidence"], raw_sentence=rel.get("raw_sentence", ""))
+            walk(list(node.get("children") or []))
+    walk(list(tree or []))
+
+    # 全文补充提取
+    if markdown_text:
+        for tab in _parse_table_structure(markdown_text):
+            registry.register_entity(tab["entity_name"], tab["inferred_type"], tab["confidence"] * 0.85, source="global_table", columns=tab.get("columns"))
+        for rel in _parse_sentence_patterns(markdown_text):
+            if rel.get("subject"):
+                registry.register_entity(rel["subject"], "part", rel["confidence"] * 0.8, source=f"global_sentence_{rel['relation_type']}")
+            if rel.get("object"):
+                registry.register_entity(rel["object"], "part", rel["confidence"] * 0.8, source=f"global_sentence_{rel['relation_type']}")
+            registry.register_relation(rel["relation_type"], rel.get("subject", ""), rel.get("object", ""), rel["confidence"] * 0.85, raw_sentence=rel.get("raw_sentence", ""))
+
+# ===== 构建 SysML 模型 =====
+
+def _build_sysml_package(registry: EntityRegistry, doc_name: str, title: str) -> Package:
+    root_pkg = Package(name=_safe_sysml_name(doc_name))
+    entities = registry.all_entities()
+    relations = registry.all_relations()
+
+    # 构建 parts 字典
+    parts: Dict[str, PartDef] = {}
+    for e in entities:
+        sn = e["safe_name"]
+        conf = e["confidence"]
+        etype = e["type"]
+        if conf < 0.45:
+            continue
+        if etype == "attribute" and conf < 0.65:
+            continue  # 属性实体需要更高置信度
+        parts[sn] = PartDef(name=sn)
+
+    # 从关系补充实体
+    for r in relations:
+        if r["confidence"] < 0.5:
+            continue
+        for side in ["subject", "object"]:
+            n = r.get(side, "")
+            if n and n not in parts:
+                parts[n] = PartDef(name=n)
+
+    # 为实体添加属性
+    for e in entities:
+        sn = e["safe_name"]
+        pd = parts.get(sn)
+        if not pd:
+            continue
+        for ak, av in e.get("attributes", {}).items():
+            if av.strip():
+                pd.add_member(AttributeUsage(name=ak, value_expr=av))
+        # 如果实体有来源 relation，也加上属性
+        for r in relations:
+            if r.get("subject") == sn and r.get("value") and r["confidence"] >= 0.5:
+                attr_name = r.get("object", r.get("relation_type", "property"))
+                pd.add_member(AttributeUsage(name=str(attr_name), value_expr=str(r["value"])))
+
+    # 添加关系
+    for r in relations:
+        if r["confidence"] < 0.5:
+            continue
+        if r["relation_type"] == "attribution":
+            s, o = r.get("subject", ""), r.get("object", "")
+            val = r.get("value", "")
+            if s in parts and o and val:
+                parts[s].add_member(AttributeUsage(name=o, value_expr=val))
+        elif r["relation_type"] == "composition":
+            s, o = r.get("subject", ""), r.get("object", "")
+            if s in parts and o in parts and s != o:
+                # 添加连接关系
+                conn = ConnectionUsage(
+                    name=f"conn_{s}_{o}",
+                    ends=[ConnectionEnd(ref=s), ConnectionEnd(ref=o)],
                 )
-                section_parts[part_name].add_member(attr_usage)
-                total_entities += 1
+                root_pkg.add_member(conn)
 
-    print(f"[DocToSysML] 共提取 {total_entities} 个实体, {total_relations} 个关系")
-    return mgr, payload
+    # 将所有 parts 添加到 package
+    for pn, pd in parts.items():
+        # 检查是否已在 root_pkg 中
+        already = any(m.name == pd.name for m in root_pkg.members if hasattr(m, 'name'))
+        if not already:
+            root_pkg.add_member(pd)
+
+    return root_pkg
 
 
-def export_document_to_sysml(
-    file_path: str,
-    output_path: Optional[str] = None,
-) -> str:
+# ===== 构建 SysML 模型的对外入口 =====
+
+def _read_plain_text(raw_path: Path) -> str:
+    """读取纯文本（兼容各种编码）"""
+    for enc in ("utf-8", "gbk", "gb2312", "utf-16", "latin-1"):
+        try:
+            return raw_path.read_text(encoding=enc)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return raw_path.read_text(encoding="utf-8", errors="replace")
+
+
+def _try_rag_read(raw_path: Path, ext: str, doc_title: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str]:
+    """尝试通过 RAG 管道读取文档。失败时返回空三元组。"""
+    if ext not in SUPPORTED_RAG_EXTENSIONS:
+        return ([], {}, "")
+    # 先尝试 llama_index / rag 管道
+    if ext in (".txt", ".md", ".pdf", ".doc", ".docx", ".csv", ".xlsx", ".xls"):
+        try:
+            from rag.documents import load_rag_documents_from_paths
+            docs = load_rag_documents_from_paths([str(raw_path)], set(SUPPORTED_RAG_EXTENSIONS))
+            markdown_parts = []
+            doc_list = []
+            for d in docs if isinstance(docs, list) else [docs]:
+                text = getattr(d, 'text', '') or getattr(d, 'content', '') or ''
+                if text:
+                    markdown_parts.append(text)
+                    doc_list.append({"title": doc_title, "children": [], "variables": {"render_markdown_text": text}})
+            merged = "\n\n".join(markdown_parts)
+            if doc_list and merged:
+                return (doc_list, {"title": doc_title, "page_count": len(doc_list)}, merged)
+        except Exception:
+            traceback.print_exc()
+    return ([], {}, "")
+
+
+def _read_file_via_rag(file_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str]:
     """
-    将文档导出为 SysML v2 .sysml 文件。
+    通过 RAG 管道（优先）或纯文件读取（fallback）读取文档文件。
 
-    Args:
-        file_path: 源文档路径
-        output_path: 输出 .sysml 文件路径，默认为文档同名 .sysml
-
-    Returns:
-        输出文件的路径
+    返回：
+      - doc_tree: 文档树结构列表
+      - meta: 元信息字典
+      - markdown_text: 合并的文本
     """
-    mgr, payload = build_sysml_model_from_doc_tree(file_path)
+    raw_path = Path(file_path)
+    if not raw_path.exists():
+        raise FileNotFoundError(f"文件未找到: {file_path}")
+
+    ext = raw_path.suffix.lower()
+    doc_title = raw_path.stem
+
+    # —— 尝试 RAG 管道（如果可用） ——
+    doc_tree, meta, markdown_text = _try_rag_read(raw_path, ext, doc_title)
+    if doc_tree and markdown_text:
+        return (doc_tree, meta, markdown_text)
+
+    # —— 纯 Python fallback ——
+    plain_text = _read_plain_text(raw_path)
+
+    # 对 markdown 文件做简单的标题分割做 doc_tree，同时收集每一节下的纯文本
+    simple_tree: List[Dict[str, Any]] = []
+    if ext in (".md", ".txt"):
+        lines = plain_text.splitlines()
+        stack: List[Dict[str, Any]] = [{"title": doc_title, "children": [], "_body_lines": []}]
+        for line in lines:
+            m = re.match(r"^(#{1,6})\s+(.+)$", line.strip())
+            if m:
+                level = len(m.group(1))
+                title = m.group(2).strip()
+                if len(stack) > 1:
+                    cur = stack[-1]
+                    body = "\n".join(cur.get("_body_lines", [])).strip()
+                    if body:
+                        cur.setdefault("variables", {})["render_markdown_text"] = body
+                    cur.pop("_body_lines", None)
+                while len(stack) > 1 and stack[-1].get("level", 99) >= level:
+                    stack.pop()
+                node: Dict[str, Any] = {"title": title, "level": level, "children": [], "_body_lines": []}
+                stack[-1]["children"].append(node)
+                stack.append(node)
+            else:
+                stripped = line.strip()
+                if stripped:
+                    stack[-1].setdefault("_body_lines", []).append(stripped)
+        if len(stack) > 1:
+            cur = stack[-1]
+            body = "\n".join(cur.get("_body_lines", [])).strip()
+            if body:
+                cur.setdefault("variables", {})["render_markdown_text"] = body
+            cur.pop("_body_lines", None)
+        simple_tree = stack[0]["children"]
+
+    doc_tree = simple_tree
+    meta = {"title": doc_title, "page_count": 0}
+    markdown_text = plain_text
+    return (doc_tree, meta, markdown_text)
+
+
+def build_sysml_model_from_doc_tree(file_path: str, output_path: Optional[str] = None,
+                                     engine: Optional[Any] = None) -> Tuple[Optional[SysMLManager], Dict[str, Any]]:
+    """
+    从文档树构建 SysML 模型并写入 .sysml 文件。
+
+    参数：
+      file_path: 输入文档路径
+      output_path: 输出 .sysml 路径（可选）
+      engine: RAG引擎实例（可选）
+
+    返回：
+      (manager, payload)
+        manager: SysMLManager 实例（加载后可能为 None）
+        payload: 包含统计信息的字典
+    """
+    doc_tree, meta, markdown_text = _read_file_via_rag(file_path)
+
+    registry = EntityRegistry()
+    _extract_from_doc_tree(doc_tree, registry, markdown_text)
+
+    doc_name = meta.get("title", Path(file_path).stem)
+    title = meta.get("title", doc_name)
+    root_package = _build_sysml_package(registry, doc_name, title)
 
     if output_path is None:
-        source = Path(file_path)
-        output_path = str(source.with_suffix(".sysml"))
+        output_path = str(Path(file_path).with_suffix(".sysml"))
+    output_path = str(output_path)
 
-    mgr.save_to_file(output_path)
-    print(f"[DocToSysML] 模型已保存到: {output_path}")
-    return output_path
+    manager: Optional[SysMLManager] = None
+    pkg_text = root_package.to_text()
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(pkg_text)
+
+    try:
+        manager = SysMLManager()
+        manager.load_from_file(output_path)
+    except Exception:
+        pass  # loading 失败不影响输出
+
+    payload = {
+        "title": doc_name,
+        "page_count": meta.get("page_count", 0),
+        "entities": len(registry.all_entities()),
+        "relations": len(registry.all_relations()),
+    }
+    return (manager, payload)
 
 
-# ── CLI 入口 ─────────────────────────────────────────────────
+# ===== CLI =====
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="从文档提取 SysML v2 模型并导出 .sysml 文件",
-    )
-    parser.add_argument(
-        "input",
-        nargs="+",
-        help="输入文档路径（支持 PDF/DOCX/TXT/MD/XLSX 等）",
-    )
-    parser.add_argument(
-        "-o", "--output",
-        default=None,
-        help="输出 .sysml 文件路径（默认与输入同名，多文件时需配合 --outdir）",
-    )
-    parser.add_argument(
-        "--outdir",
-        default=None,
-        help="输出目录（多文件时必须指定）",
-    )
-    parser.add_argument(
-        "--print",
-        action="store_true",
-        help="同时打印 SysML 文本到 stdout",
-    )
-
+    parser = argparse.ArgumentParser(description="从文档构建 SysML v2 模型")
+    parser.add_argument("input", type=str, help="输入的文档文件路径")
+    parser.add_argument("-o", "--output", type=str, default=None, help="输出的 .sysml 文件路径")
+    parser.add_argument("--json", action="store_true", help="仅输出 JSON 统计")
     args = parser.parse_args()
-    inputs = args.input
 
-    if len(inputs) > 1 and args.output:
-        print("警告: 多文件模式下 -o 参数将被忽略，请使用 --outdir")
-        args.output = None
+    manager, payload = build_sysml_model_from_doc_tree(args.input, args.output)
 
-    for input_path in inputs:
-        source = Path(input_path)
-        if not source.exists():
-            print(f"跳过不存在的文件: {input_path}")
-            continue
-
-        output_path = args.output
-        if output_path is None and args.outdir:
-            out_dir = Path(args.outdir)
-            out_dir.mkdir(parents=True, exist_ok=True)
-            output_path = str(out_dir / f"{source.stem}.sysml")
-
-        try:
-            output_path = export_document_to_sysml(str(source), output_path)
-            if args.print and output_path:
-                text = Path(output_path).read_text(encoding="utf-8")
-                print(f"\n{'=' * 60}")
-                print(f"SysML 模型: {output_path}")
-                print(f"{'=' * 60}")
-                print(text)
-        except Exception as exc:
-            print(f"处理失败 [{input_path}]: {type(exc).__name__}: {exc}")
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False))
+    else:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

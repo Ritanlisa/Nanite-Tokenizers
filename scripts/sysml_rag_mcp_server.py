@@ -24,6 +24,15 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import os
+
+# 如果直接以脚本方式运行，确保项目根目录在 sys.path 中，
+# 这样顶级包 `sysml` 可以被导入。
+_THIS_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_THIS_FILE_DIR)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from sysml.sysml_model import (
     Package, SysMLElement, Definition, Usage,
     ConnectionUsage, InterfaceUsage, AllocationUsage,
@@ -460,22 +469,60 @@ def sysml_import_doc(file_path: str, output_path: Optional[str] = None) -> Dict[
         return {"ok": False, "error": "demo_doc_to_sysml import not available"}
 
     try:
-        mgr, payload = build_sysml_model_from_doc_tree(file_path)
+        # 兼容性：`build_sysml_model_from_doc_tree` 可能返回多种类型：
+        #  - (SysMLManager, payload_dict)
+        #  - sysml_text (str)
+        result = build_sysml_model_from_doc_tree(file_path, output_path)
 
+        mgr: Optional[SysMLManager] = None
+        payload: Dict[str, Any] = {}
+
+        # 如果返回的是二元组 (mgr, payload)
+        if isinstance(result, tuple) and len(result) >= 1:
+            # 允许 (mgr, payload) 或 (mgr,)
+            mgr = result[0]
+            if len(result) >= 2 and isinstance(result[1], dict):
+                payload = result[1]
+
+        # 如果返回的是 sysml 文本
+        elif isinstance(result, str):
+            sysml_text = result
+            # 确保有输出路径可写入
+            if output_path is None:
+                output_path = str(Path(file_path).with_suffix(".sysml"))
+            outp = Path(output_path)
+            outp.parent.mkdir(parents=True, exist_ok=True)
+            outp.write_text(sysml_text, encoding="utf-8")
+
+            # 通过 SysMLManager 加载写出的文件
+            mgr = SysMLManager(workspace_root=ROOT_DIR)
+            mgr.load_from_file(outp)
+
+        # 如果仍未得到 mgr，则返回错误
+        if not isinstance(mgr, SysMLManager):
+            return {"ok": False, "error": "Failed to build SysML manager from document"}
+
+        # 如果返回的是 manager 对象但未保存到文件，确保保存到 output_path
         if output_path is None:
             output_path = str(Path(file_path).with_suffix(".sysml"))
-
-        mgr.save_to_file(output_path)
+        try:
+            mgr.save_to_file(output_path)
+        except Exception:
+            # save 失败不影响后续（例如 mgr 可能已经代表只读模型）
+            pass
 
         # 同时加载到全局管理器
         global_mgr = _get_manager()
-        # 合并元素
-        for elem in mgr.root_elements:
-            # 简单追加（实际可由用户决定是否替换）
+        # 合并元素（简单追加）
+        for elem in getattr(mgr, "root_elements", []) or []:
             global_mgr.root_elements.append(elem)
 
         entity_count = len(mgr.get_all_entities())
         rel_count = len(mgr.get_all_relations())
+
+        # payload 可能不是 dict（或为空），因此用安全取值
+        doc_title = payload.get("title", "") if isinstance(payload, dict) else ""
+        page_count = payload.get("page_count", 0) if isinstance(payload, dict) else 0
 
         return {
             "ok": True,
@@ -483,8 +530,8 @@ def sysml_import_doc(file_path: str, output_path: Optional[str] = None) -> Dict[
             "output_sysml": output_path,
             "entities_extracted": entity_count,
             "relations_extracted": rel_count,
-            "document_title": payload.get("title", ""),
-            "page_count": payload.get("page_count", 0),
+            "document_title": doc_title,
+            "page_count": page_count,
         }
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
