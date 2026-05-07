@@ -2292,6 +2292,10 @@ def _build_skill_tools() -> list[BaseTool]:
     return [SkillBridgeTool(skill=skill) for skill in get_agent_skills()]
 
 ### Below this are tools for building SysML-v2.0 Database Only
+###
+### DEPRECATED: 这些 SysML 工具功能已迁移到 MCP 服务器 (scripts/sysml_rag_mcp_server.py)。
+### Build Agent 将通过 MCP 协议调用，而非直接使用这些 LangChain 工具。
+### 该部分代码保留作为参考，不再使用。参见 mcp_client/tool_wrapper.py。
 
 # 扩展工具：加载模型、保存模型、查询模型
 

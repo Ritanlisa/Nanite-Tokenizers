@@ -2,24 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shlex
 import sys
-from contextlib import AsyncExitStack
 from typing import Optional
 
 import httpx
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 
 import config
 from exceptions import MCPConnectionError, MCPFatalError, MCPTimeoutError
 from monitoring import mcp_restart_count
+from .mcp_session import MCPSession
 
 logger = logging.getLogger(__name__)
 
 
 class MCPFetchClient:
-    _instance = None
+    """MCP Fetch 客户端（基于 MCPSession），用于网页内容抓取"""
+    _instance: Optional["MCPFetchClient"] = None
 
     def __new__(cls):
         if cls._instance is None:
@@ -32,9 +30,8 @@ class MCPFetchClient:
     def __init__(self) -> None:
         if self._configured:
             return
-        self._restart_count = 0
-        self._max_restart = config.settings.MCP_MAX_RESTART
         self._fallback_mode = False
+        self._session: Optional[MCPSession] = None
         self._configured = True
 
     async def initialize(self) -> None:
@@ -45,24 +42,19 @@ class MCPFetchClient:
             if not command or command.lower() == "disabled":
                 self._enable_fallback("fetch server disabled")
                 return
-            self.exit_stack = AsyncExitStack()
-            parts = shlex.split(command)
-            if parts and parts[0] in {"python", "python3"}:
-                parts[0] = sys.executable
-            server_params = StdioServerParameters(command=parts[0], args=parts[1:])
             try:
-                stdio_transport = await self.exit_stack.enter_async_context(
-                    stdio_client(server_params)
+                self._session = MCPSession(
+                    server_command=command,
+                    server_name="mcp-fetch",
+                    max_restart=config.settings.MCP_MAX_RESTART,
+                    retry_delay=config.settings.MCP_RETRY_DELAY,
+                    timeout=config.settings.MCP_TIMEOUT,
                 )
-                read, write = stdio_transport
-                self.session = await self.exit_stack.enter_async_context(ClientSession(read, write))
-                await self.session.initialize()
+                await self._session.initialize()
                 self._initialized = True
-                self._restart_count = 0
                 logger.info("MCP fetch server connected")
             except Exception as exc:
                 logger.warning("MCP init failed (%s), falling back to direct HTTP", exc)
-                await self.exit_stack.aclose()
                 self._enable_fallback("mcp init failed")
 
     async def fetch(self, url: str, timeout: Optional[float] = None) -> str:
@@ -77,42 +69,20 @@ class MCPFetchClient:
             logger.warning("MCP fetch timeout: %s", url)
             raise MCPTimeoutError("Fetch timed out")
         except (ConnectionError, BrokenPipeError, OSError) as exc:
-            if self._restart_count >= self._max_restart:
-                raise MCPFatalError(
-                    "MCP service unavailable: restart limit exceeded"
-                ) from exc
-            self._restart_count += 1
-            mcp_restart_count.inc()
-            logger.warning(
-                "MCP connection dropped, restarting (%s/%s)",
-                self._restart_count,
-                self._max_restart,
-            )
-            await asyncio.sleep(config.settings.MCP_RETRY_DELAY)
             await self._reinitialize()
-            return await self._fetch_internal(url, timeout)
+            raise MCPConnectionError(f"Fetch failed: {type(exc).__name__}") from exc
         except Exception as exc:
             logger.exception("MCP fetch failed: %s", url)
-            await self._reinitialize()
             raise MCPConnectionError(f"Fetch failed: {type(exc).__name__}") from exc
 
     async def _fetch_internal(self, url: str, timeout: float) -> str:
+        if self._session is None:
+            raise MCPConnectionError("Fetch session not initialized")
         result = await asyncio.wait_for(
-            self.session.call_tool("fetch", arguments={"url": url}),
+            self._session.call_tool("fetch", {"url": url}),
             timeout=timeout,
         )
-        self._restart_count = 0
-        content = result.content
-        if isinstance(content, list) and content:
-            return getattr(content[0], "text", "")
-        return str(content)
-
-    async def _reinitialize(self) -> None:
-        try:
-            await self.close()
-        except Exception:
-            pass
-        await self.initialize()
+        return result
 
     async def _fetch_http(self, url: str, timeout: float) -> str:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -125,21 +95,19 @@ class MCPFetchClient:
         self._initialized = True
         logger.info("MCP fetch fallback enabled: %s", reason)
 
-    async def close(self) -> None:
-        if not hasattr(self, "exit_stack"):
-            self._initialized = False
-            return
-
+    async def _reinitialize(self) -> None:
         try:
-            await self.exit_stack.aclose()
-        except RuntimeError as exc:
-            if "Event loop is closed" in str(exc):
-                logger.debug("Skipping MCP close on closed event loop")
-            else:
-                raise
-        finally:
-            self._initialized = False
-            logger.info("MCP client closed")
+            await self.close()
+        except Exception:
+            pass
+        await self.initialize()
+
+    async def close(self) -> None:
+        if self._session is not None:
+            await self._session.close()
+            self._session = None
+        self._initialized = False
+        logger.info("MCP client closed")
 
 
 _mcp_client = MCPFetchClient()

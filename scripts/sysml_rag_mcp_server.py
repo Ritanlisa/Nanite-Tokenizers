@@ -1,20 +1,36 @@
 #!/usr/bin/env python3
 """
-SysML RAG 检索 MCP 服务器
-——面向 SysML v2 模型的知识检索工具
+SysML RAG MCP 服务器
+——面向 SysML v2 模型的知识图谱构建与检索工具
 
 提供工具：
-  1. sysml_load_model       - 加载 .sysml 模型文件
-  2. sysml_list_entities    - 列出所有实体（部件/属性/需求等）
-  3. sysml_list_relations   - 列出所有关系（连接/接口/分配）
-  4. sysml_search_entity    - 按名称搜索实体（支持模糊匹配）
-  5. sysml_get_entity       - 获取实体详情（含子特征）
-  6. sysml_get_connections  - 获取某实体的所有连接关系
-  7. sysml_export_submodel  - 导出子模型（以实体为中心的局部视图）
-  8. sysml_import_doc       - 从文档导入并构建 SysML 模型
-  9. sysml_semantic_search  - 基于内容的语义搜索（遍历树结构）
+  # 实体 CRUD
+  sysml_add_entity        - 创建实体（含别名/属性/来源）
+  sysml_update_entity     - 补充/合并实体信息
+  sysml_delete_entity     - 删除实体
+  # 搜索
+  sysml_search_entity     - 多策略搜索（精确→别名→子串→正则→Token重叠）
+  sysml_get_entity        - 实体详情
+  sysml_normalize_name    - 名称归一化
+  sysml_list_entities     - 全部实体列表
+  sysml_add_alias         - 追加别名
+  # 关系 CRUD
+  sysml_add_relation      - 创建关系
+  sysml_delete_relation   - 删除关系
+  sysml_get_connections   - 实体关联查询
+  sysml_list_relations    - 全部关系列表
+  # 合并/去重
+  sysml_suggest_merge     - 全局去重建议
+  sysml_merge_entities    - 执行合并
+  # 模型 I/O
+  sysml_load_model        - 加载 .sysml 文件
+  sysml_save_model        - 保存 .sysml 文件
+  sysml_export_submodel   - 子模型导出
+  sysml_model_summary     - 全局统计
+  sysml_semantic_search   - 语义搜索
+  sysml_import_doc        - 从文档导入
 
-可作为独立 MCP 服务器运行，也可在 agent/tools.py 中注册为 LangChain 工具。
+可作为独立 MCP 服务器运行，供 Build Agent 通过 MCP 协议调用。
 """
 
 from __future__ import annotations
@@ -22,6 +38,12 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+
+# 计算项目根目录并加入 sys.path（必须在导入 sysml 之前）
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sysml.sysml_model import (
@@ -33,10 +55,7 @@ from sysml.sysml_model import (
     RequirementDef, RequirementUsage,
     ConnectionDef,
 )
-from sysml.sysml_manager import SysMLManager
-
-# 计算项目根目录（兼容直接作为脚本运行和包导入）
-ROOT_DIR = Path(__file__).resolve().parent.parent
+from sysml.sysml_manager import SysMLManager, AliasRegistry
 
 try:
     from scripts.demo_doc_to_sysml import build_sysml_model_from_doc_tree
@@ -161,6 +180,13 @@ def _fuzzy_match_name(query: str, candidates: List[str]) -> List[Tuple[str, floa
 # MCP 工具函数
 # ══════════════════════════════════════════════════════════════
 
+def _sysml_save_model(file_path: Optional[str] = None) -> Dict[str, Any]:
+    """保存当前模型到 .sysml 文件"""
+    mgr = _get_manager()
+    mgr.save_to_file(file_path)
+    return {"ok": True, "file": str(mgr.current_model_file)}
+
+
 def sysml_load_model(file_path: str) -> Dict[str, Any]:
     """
     加载一个 .sysml 模型文件到全局管理器。
@@ -249,42 +275,29 @@ def sysml_list_relations(include_details: bool = False) -> Dict[str, Any]:
     return result
 
 
-def sysml_search_entity(query: str) -> Dict[str, Any]:
+def sysml_search_entity(query: str, threshold: float = 0.3,
+                       regex_pattern: Optional[str] = None) -> Dict[str, Any]:
     """
-    按名称模糊搜索实体。
+    按名称多策略搜索实体（精确→归一化→别名→子串→正则→Token重叠）。
 
     Args:
-        query: 搜索关键词（支持部分名称、拼音、首字母等）
+        query: 搜索关键词
+        threshold: 最低匹配阈值 (0.0~1.0)
+        regex_pattern: 可选正则表达式辅助匹配
 
     Returns:
-        匹配的实体列表
+        匹配的实体列表及置信度
     """
     mgr = _get_manager()
-    entities = mgr.get_all_entities()
-    entity_names: Dict[str, Definition] = {}
+    results = mgr.search_entities(query, threshold=threshold, regex_pattern=regex_pattern)
 
-    for entity in entities:
-        name = getattr(entity, "name", "")
-        if name:
-            # 可能有重名的情况，保留第一个
-            if name not in entity_names:
-                entity_names[name] = entity
-
-    matches = _fuzzy_match_name(query, list(entity_names.keys()))
-
-    result = {
+    return {
+        "ok": True,
         "query": query,
-        "total_matches": len(matches),
-        "matches": [],
+        "threshold": threshold,
+        "total_matches": len(results),
+        "matches": results,
     }
-
-    for name, score in matches:
-        entity = entity_names[name]
-        summary = _entity_summary(entity, include_body=False)
-        summary["match_score"] = round(score, 3)
-        result["matches"].append(summary)
-
-    return result
 
 
 def sysml_get_entity(entity_name: str) -> Dict[str, Any]:
@@ -575,7 +588,6 @@ def sysml_model_summary() -> Dict[str, Any]:
         t = _entity_type_name(e)
         type_dist[t] = type_dist.get(t, 0) + 1
 
-    # 顶层元素
     root_elements = [
         {"name": getattr(e, "name", ""), "type": _entity_type_name(e)}
         for e in mgr.root_elements
@@ -592,16 +604,348 @@ def sysml_model_summary() -> Dict[str, Any]:
 
 
 # ══════════════════════════════════════════════════════════════
+# 新增：实体 CRUD 工具
+# ══════════════════════════════════════════════════════════════
+
+def sysml_add_entity(
+    entity_type: str,
+    name: str,
+    parent_package: Optional[str] = None,
+    description: Optional[str] = None,
+    aliases: Optional[List[str]] = None,
+    source_sections: Optional[List[str]] = None,
+    source_text: Optional[str] = None,
+    properties: Optional[Dict[str, Any]] = None,
+    supertypes: Optional[List[str]] = None,
+    short_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    创建新实体（PartDef/AttributeDef/RequirementDef/PortDef/ItemDef/Package 等）。
+
+    Args:
+        entity_type: 实体类型 (PartDef, AttributeDef, PortDef, ItemDef, RequirementDef 及对应的 Usage 变体, Package)
+        name: 实体名称
+        parent_package: 父包限定名（可选，不指定则放在顶层）
+        description: 实体描述
+        aliases: 别名列表
+        source_sections: 来源章节列表
+        source_text: 原始文本
+        properties: 属性字典
+        supertypes: 父类型列表（仅 Definition）
+        short_name: 短名称
+
+    Returns:
+        创建结果
+    """
+    mgr = _get_manager()
+    element = mgr.add_entity_with_metadata(
+        entity_type=entity_type,
+        name=name,
+        parent_package=parent_package,
+        description=description,
+        aliases=aliases,
+        source_sections=source_sections,
+        source_text=source_text,
+        properties=properties,
+        supertypes=supertypes,
+        short_name=short_name,
+    )
+    if element is None:
+        return {"ok": False, "error": f"Invalid entity_type: {entity_type}"}
+    return {
+        "ok": True,
+        "qualified_name": element.qualified_name,
+        "name": element.name,
+        "type": type(element).__name__,
+    }
+
+
+def sysml_update_entity(
+    qualified_name: str,
+    append_description: Optional[str] = None,
+    append_source_sections: Optional[List[str]] = None,
+    merge_aliases: Optional[List[str]] = None,
+    update_properties: Optional[Dict[str, Any]] = None,
+    new_name: Optional[str] = None,
+    supertypes: Optional[List[str]] = None,
+    type_refs: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """
+    更新实体信息（追加描述、合并别名、添加来源章节、更新属性）。
+
+    Args:
+        qualified_name: 实体限定名
+        append_description: 追加描述文本
+        append_source_sections: 追加来源章节
+        merge_aliases: 合并别名列表
+        update_properties: 更新属性字典
+        new_name: 重命名实体
+        supertypes: 更新父类型 (Definition)
+        type_refs: 更新类型引用 (Usage)
+
+    Returns:
+        更新结果
+    """
+    mgr = _get_manager()
+    ok = mgr.update_entity_metadata(
+        qualified_name=qualified_name,
+        append_description=append_description,
+        append_source_sections=append_source_sections or [],
+        merge_aliases=merge_aliases or [],
+        update_properties=update_properties or {},
+        new_name=new_name or "",
+        supertypes=supertypes or [],
+        type_refs=type_refs or [],
+    )
+    if not ok:
+        return {"ok": False, "error": f"Entity not found: {qualified_name}"}
+    return {"ok": True, "qualified_name": qualified_name}
+
+
+def sysml_delete_entity(qualified_name: str) -> Dict[str, Any]:
+    """
+    删除指定实体及其元数据、别名。
+
+    Args:
+        qualified_name: 实体限定名
+
+    Returns:
+        删除结果
+    """
+    mgr = _get_manager()
+    ok = mgr.delete_entity(qualified_name)
+    if not ok:
+        return {"ok": False, "error": f"Entity not found: {qualified_name}"}
+    return {"ok": True, "deleted": qualified_name}
+
+
+def sysml_normalize_name(name: str) -> Dict[str, Any]:
+    """
+    对名称进行归一化处理（去标点、小写、全半角统一）。
+
+    Args:
+        name: 原始名称
+
+    Returns:
+        归一化结果
+    """
+    normalized = AliasRegistry.normalize(name)
+    return {"ok": True, "original": name, "normalized": normalized}
+
+
+def sysml_add_alias(qualified_name: str, alias: str) -> Dict[str, Any]:
+    """
+    为已有实体追加别名。
+
+    Args:
+        qualified_name: 实体限定名
+        alias: 新别名
+
+    Returns:
+        操作结果
+    """
+    mgr = _get_manager()
+    ok = mgr.add_alias(qualified_name, alias)
+    if not ok:
+        return {"ok": False, "error": f"Entity not found: {qualified_name}"}
+    return {"ok": True, "qualified_name": qualified_name, "alias_added": alias}
+
+
+# ══════════════════════════════════════════════════════════════
+# 新增：关系 CRUD 工具
+# ══════════════════════════════════════════════════════════════
+
+def sysml_add_relation(
+    relation_type: str,
+    source: str,
+    target: str,
+    name: Optional[str] = None,
+    parent_package: Optional[str] = None,
+    description: Optional[str] = None,
+    role_source: Optional[str] = None,
+    role_target: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    创建关系（connection / interface / allocation）。
+
+    Args:
+        relation_type: 关系类型 ("connection", "interface", "allocation")
+        source: 源实体名称
+        target: 目标实体名称
+        name: 关系名称（可选）
+        parent_package: 父包限定名（可选）
+        description: 关系描述
+        role_source: 源端角色名
+        role_target: 目标端角色名
+
+    Returns:
+        创建结果
+    """
+    mgr = _get_manager()
+    rel = mgr.add_relation(
+        relation_type=relation_type,
+        source_name=source,
+        target_name=target,
+        name=name,
+        parent_package=parent_package,
+        description=description,
+        role_source=role_source,
+        role_target=role_target,
+    )
+    if rel is None:
+        return {"ok": False, "error": f"Invalid relation_type: {relation_type}"}
+    return {
+        "ok": True,
+        "qualified_name": rel.qualified_name,
+        "name": rel.name,
+        "type": type(rel).__name__,
+        "source": source,
+        "target": target,
+    }
+
+
+def sysml_delete_relation(name: str, parent_package: Optional[str] = None) -> Dict[str, Any]:
+    """
+    删除指定关系。
+
+    Args:
+        name: 关系名称
+        parent_package: 父包限定名（可选）
+
+    Returns:
+        删除结果
+    """
+    mgr = _get_manager()
+    ok = mgr.delete_relation(name, parent_package=parent_package)
+    if not ok:
+        return {"ok": False, "error": f"Relation not found: {name}"}
+    return {"ok": True, "deleted": name}
+
+
+# ══════════════════════════════════════════════════════════════
+# 新增：合并/去重工具
+# ══════════════════════════════════════════════════════════════
+
+def sysml_suggest_merge(threshold: float = 0.6) -> Dict[str, Any]:
+    """
+    分析当前模型中的重复实体，返回合并建议。
+
+    Args:
+        threshold: 最低置信度阈值 (0.0~1.0)
+
+    Returns:
+        合并建议列表
+    """
+    mgr = _get_manager()
+    suggestions = mgr.suggest_merges(threshold=threshold)
+    return {
+        "ok": True,
+        "threshold": threshold,
+        "total_suggestions": len(suggestions),
+        "suggestions": suggestions,
+    }
+
+
+def sysml_merge_entities(source: str, target: str) -> Dict[str, Any]:
+    """
+    将 source 实体合并到 target 实体（转移别名、描述、来源章节、属性）。
+
+    Args:
+        source: 源实体限定名（将被删除）
+        target: 目标实体限定名（保留）
+
+    Returns:
+        合并结果
+    """
+    mgr = _get_manager()
+    result_qn = mgr.merge_entities(source, target)
+    if result_qn is None:
+        return {"ok": False, "error": "Merge failed: source or target not found"}
+    return {"ok": True, "merged_from": source, "merged_into": target, "result": result_qn}
+
+
+# ══════════════════════════════════════════════════════════════
 # MCP 服务器入口
 # ══════════════════════════════════════════════════════════════
 
 # 工具元数据（供 MCP/LangChain 使用）
 TOOL_DEFINITIONS = {
+    # ── 模型 I/O ──
     "sysml_load_model": {
         "function": sysml_load_model,
         "description": "加载一个 .sysml 模型文件到当前会话",
         "parameters": {
             "file_path": {"type": "string", "description": ".sysml 文件路径"},
+        },
+    },
+    "sysml_save_model": {
+        "function": _sysml_save_model,
+        "description": "保存当前模型到 .sysml 文件（同时写入 .meta.json 元数据）",
+        "parameters": {
+            "file_path": {"type": "string", "description": "输出 .sysml 路径（默认使用当前文件）", "default": None},
+        },
+    },
+    # ── 实体 CRUD ──
+    "sysml_add_entity": {
+        "function": sysml_add_entity,
+        "description": "创建新实体（PartDef/AttributeDef/RequirementDef/PortDef/ItemDef/Package 及对应的 Usage），含别名、描述、来源、属性",
+        "parameters": {
+            "entity_type": {"type": "string", "description": "实体类型: PartDef, PartUsage, AttributeDef, AttributeUsage, PortDef, PortUsage, ItemDef, ItemUsage, RequirementDef, RequirementUsage, Package"},
+            "name": {"type": "string", "description": "实体名称"},
+            "parent_package": {"type": "string", "description": "父包限定名（可选）", "default": None},
+            "description": {"type": "string", "description": "实体描述（可选）", "default": None},
+            "aliases": {"type": "array", "items": {"type": "string"}, "description": "别名列表（可选）", "default": None},
+            "source_sections": {"type": "array", "items": {"type": "string"}, "description": "来源章节列表（可选）", "default": None},
+            "source_text": {"type": "string", "description": "原始出处文本（可选）", "default": None},
+            "properties": {"type": "object", "description": "属性字典（可选）", "default": None},
+            "supertypes": {"type": "array", "items": {"type": "string"}, "description": "父类型列表（仅 Definition）", "default": None},
+            "short_name": {"type": "string", "description": "短名称（可选）", "default": None},
+        },
+    },
+    "sysml_update_entity": {
+        "function": sysml_update_entity,
+        "description": "更新实体（追加描述、合并别名、追加来源、更新属性、重命名）",
+        "parameters": {
+            "qualified_name": {"type": "string", "description": "实体限定名"},
+            "append_description": {"type": "string", "description": "追加描述文本（可选）", "default": None},
+            "append_source_sections": {"type": "array", "items": {"type": "string"}, "description": "追加来源章节（可选）", "default": None},
+            "merge_aliases": {"type": "array", "items": {"type": "string"}, "description": "合并别名（可选）", "default": None},
+            "update_properties": {"type": "object", "description": "更新属性（可选）", "default": None},
+            "new_name": {"type": "string", "description": "重命名（可选）", "default": None},
+            "supertypes": {"type": "array", "items": {"type": "string"}, "description": "更新父类型（可选）", "default": None},
+            "type_refs": {"type": "array", "items": {"type": "string"}, "description": "更新类型引用（可选）", "default": None},
+        },
+    },
+    "sysml_delete_entity": {
+        "function": sysml_delete_entity,
+        "description": "删除指定实体（含别名和元数据）",
+        "parameters": {
+            "qualified_name": {"type": "string", "description": "实体限定名"},
+        },
+    },
+    "sysml_normalize_name": {
+        "function": sysml_normalize_name,
+        "description": "对名称进行归一化处理（去标点、小写、全半角统一），用于名称比较",
+        "parameters": {
+            "name": {"type": "string", "description": "原始名称"},
+        },
+    },
+    "sysml_add_alias": {
+        "function": sysml_add_alias,
+        "description": "为已有实体追加别名",
+        "parameters": {
+            "qualified_name": {"type": "string", "description": "实体限定名"},
+            "alias": {"type": "string", "description": "新别名"},
+        },
+    },
+    # ── 搜索 ──
+    "sysml_search_entity": {
+        "function": sysml_search_entity,
+        "description": "多策略搜索实体（精确→归一化→别名→子串→正则→Token重叠），返回匹配列表与置信度",
+        "parameters": {
+            "query": {"type": "string", "description": "搜索关键词"},
+            "threshold": {"type": "number", "description": "最低置信度阈值 (0.0~1.0)", "default": 0.3},
+            "regex_pattern": {"type": "string", "description": "可选正则辅助匹配", "default": None},
         },
     },
     "sysml_list_entities": {
@@ -611,25 +955,34 @@ TOOL_DEFINITIONS = {
             "include_details": {"type": "boolean", "description": "是否包含详细成员", "default": False},
         },
     },
-    "sysml_list_relations": {
-        "function": sysml_list_relations,
-        "description": "列出当前模型中所有关系（连接/接口/分配）",
-        "parameters": {
-            "include_details": {"type": "boolean", "description": "是否包含详细信息", "default": False},
-        },
-    },
-    "sysml_search_entity": {
-        "function": sysml_search_entity,
-        "description": "按名称模糊搜索实体",
-        "parameters": {
-            "query": {"type": "string", "description": "搜索关键词"},
-        },
-    },
     "sysml_get_entity": {
         "function": sysml_get_entity,
         "description": "获取实体详情（含子特征和关联关系）",
         "parameters": {
             "entity_name": {"type": "string", "description": "实体名称"},
+        },
+    },
+    # ── 关系 CRUD ──
+    "sysml_add_relation": {
+        "function": sysml_add_relation,
+        "description": "创建关系（connection/interface/allocation）",
+        "parameters": {
+            "relation_type": {"type": "string", "description": "关系类型: connection, interface, allocation"},
+            "source": {"type": "string", "description": "源实体名称"},
+            "target": {"type": "string", "description": "目标实体名称"},
+            "name": {"type": "string", "description": "关系名称（可选）", "default": None},
+            "parent_package": {"type": "string", "description": "父包限定名（可选）", "default": None},
+            "description": {"type": "string", "description": "关系描述（可选）", "default": None},
+            "role_source": {"type": "string", "description": "源端角色名（可选）", "default": None},
+            "role_target": {"type": "string", "description": "目标端角色名（可选）", "default": None},
+        },
+    },
+    "sysml_delete_relation": {
+        "function": sysml_delete_relation,
+        "description": "删除指定关系",
+        "parameters": {
+            "name": {"type": "string", "description": "关系名称"},
+            "parent_package": {"type": "string", "description": "父包限定名（可选）", "default": None},
         },
     },
     "sysml_get_connections": {
@@ -639,6 +992,30 @@ TOOL_DEFINITIONS = {
             "entity_name": {"type": "string", "description": "实体名称"},
         },
     },
+    "sysml_list_relations": {
+        "function": sysml_list_relations,
+        "description": "列出当前模型中所有关系（连接/接口/分配）",
+        "parameters": {
+            "include_details": {"type": "boolean", "description": "是否包含详细信息", "default": False},
+        },
+    },
+    # ── 合并/去重 ──
+    "sysml_suggest_merge": {
+        "function": sysml_suggest_merge,
+        "description": "分析模型中的重复实体，返回合并建议列表（基于名称相似度和共享别名）",
+        "parameters": {
+            "threshold": {"type": "number", "description": "最低置信度阈值 (0.0~1.0)", "default": 0.6},
+        },
+    },
+    "sysml_merge_entities": {
+        "function": sysml_merge_entities,
+        "description": "将 source 实体合并到 target 实体（转移别名、描述、来源、属性后删除 source）",
+        "parameters": {
+            "source": {"type": "string", "description": "源实体限定名（将被删除）"},
+            "target": {"type": "string", "description": "目标实体限定名（保留）"},
+        },
+    },
+    # ── 其他 ──
     "sysml_export_submodel": {
         "function": sysml_export_submodel,
         "description": "导出以实体为中心的子模型视图（SysML 文本）",
@@ -689,7 +1066,7 @@ def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> str:
 # 遵循 MCP 协议：通过 stdin/stdout 收发 JSON-RPC
 def _mcp_serve() -> None:
     """启动 MCP stdio 服务器"""
-    print("[SysML RAG MCP] Server starting on stdio...", flush=True)
+    print("[SysML RAG MCP] Server starting on stdio...", file=sys.stderr, flush=True)
 
     for line in sys.stdin:
         line = line.strip()
@@ -707,16 +1084,24 @@ def _mcp_serve() -> None:
         if method == "tools/list":
             tools = []
             for name, defn in TOOL_DEFINITIONS.items():
+                properties = {}
+                required = []
+                for k, v in defn["parameters"].items():
+                    entry = {"type": v["type"], "description": v.get("description", "")}
+                    if v.get("default") is not None:
+                        entry["default"] = v["default"]
+                    else:
+                        required.append(k)
+                    if v.get("items"):
+                        entry["items"] = v["items"]
+                    properties[k] = entry
                 tools.append({
                     "name": name,
                     "description": defn["description"],
                     "inputSchema": {
                         "type": "object",
-                        "properties": {
-                            k: {"type": v["type"], "description": v["description"]}
-                            for k, v in defn["parameters"].items()
-                        },
-                        "required": list(defn["parameters"].keys()),
+                        "properties": properties,
+                        "required": required,
                     },
                 })
             response = json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"tools": tools}})

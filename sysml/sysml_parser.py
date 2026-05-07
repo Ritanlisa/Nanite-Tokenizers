@@ -1,20 +1,19 @@
 """
-SysML 2.0 文本解析器 (Lark 实现)
+SysML 2.0 文本解析器 (Lark 1.x 兼容实现)
+使用子规则替代内联命名捕获，Earley 解析器 + 后置 Transformer。
 """
-
 from typing import cast
-
 from lark import Lark, Transformer, v_args
 from .sysml_model import *
 
-# 语法定义（SysML 2.0 子集）
 SYML_GRAMMAR = r"""
-    start: (package | definition | usage | import_stmt | alias_stmt)*
+    start: (package | definition | usage | import_stmt | alias_stmt | connect_usage)*
 
-    package: "package" name=IDENTIFIER ("{" members+=member* "}" | ";")
-    member: definition | usage | import_stmt | alias_stmt
+    package: "package" IDENTIFIER package_body
+    package_body: "{" member* "}" | ";"
+    member: definition | usage | import_stmt | alias_stmt | connect_usage
 
-    definition: def_prefix def_kind name=IDENTIFIER supertypes? ("{" members+=member* "}" | ";")
+    definition: def_prefix def_kind IDENTIFIER supertypes_opt? definition_body
     def_prefix: (ABSTRACT? VARIATION? | ABSTRACT | VARIATION)?
     def_kind: "part" "def" -> part_def
             | "attribute" "def" -> attribute_def
@@ -24,9 +23,10 @@ SYML_GRAMMAR = r"""
             | "interface" "def" -> interface_def
             | "allocation" "def" -> allocation_def
             | "requirement" "def" -> requirement_def
+    definition_body: "{" member* "}" | ";"
 
-    usage: usage_prefix usage_kind name=IDENTIFIER multiplicity? specialization? value? ("{" members+=member* "}" | ";")
-    usage_prefix: (direction? DERIVED? ABSTRACT? CONSTANT? REF?) | (direction | DERIVED | ABSTRACT | CONSTANT | REF)*
+    usage: usage_prefix usage_kind IDENTIFIER multiplicity_opt? specialization_opt? value_opt? usage_body
+    usage_prefix: (direction_opt? DERIVED? ABSTRACT? CONSTANT? REF?) | (direction | DERIVED | ABSTRACT | CONSTANT | REF)*
     usage_kind: "part" -> part_usage
               | "attribute" -> attribute_usage
               | "port" -> port_usage
@@ -35,27 +35,33 @@ SYML_GRAMMAR = r"""
               | "interface" -> interface_usage
               | "allocation" -> allocation_usage
               | "requirement" -> requirement_usage
+    usage_body: "{" member* "}" | ";"
 
     direction: "in" | "out" | "inout"
-    multiplicity: "[" lower=NUMBER? ".." upper=NUMBER? "]" (ORDERED? NONUNIQUE?)?
+    direction_opt: ["in" | "out" | "inout"]
+    multiplicity: "[" NUMBER? ".." NUMBER? "]" (ORDERED? NONUNIQUE?)?
+    multiplicity_opt: [multiplicity]
     ORDERED: "ordered"
     NONUNIQUE: "nonunique"
 
     specialization: (":" type_refs | "subsets" subset_refs | "redefines" redef_refs)+
+    specialization_opt: [specialization]
     type_refs: IDENTIFIER ("," IDENTIFIER)*
     subset_refs: IDENTIFIER ("," IDENTIFIER)*
     redef_refs: IDENTIFIER ("," IDENTIFIER)*
 
     value: "=" expr
+    value_opt: [value]
 
     supertypes: ":>" IDENTIFIER ("," IDENTIFIER)*
+    supertypes_opt: [supertypes]
 
-    import_stmt: visibility? "import" imported_path ("::**" | "::*")? ";"
-    alias_stmt: visibility? "alias" alias_name=IDENTIFIER "for" target_path=IDENTIFIER ";"
-    visibility: "public" | "private" | "protected"
+    import_stmt: visibility_opt? "import" IDENTIFIER ("::**" | "::*")? ";"
+    alias_stmt: visibility_opt? "alias" IDENTIFIER "for" IDENTIFIER ";"
+    visibility_opt: ["public" | "private" | "protected"]
 
     // 连接简写
-    connection_usage: "connect" src=IDENTIFIER "to" tgt=IDENTIFIER ";"
+    connect_usage: "connect" IDENTIFIER "to" IDENTIFIER ";"
 
     expr: /[^;\n]+/
 
@@ -65,7 +71,7 @@ SYML_GRAMMAR = r"""
     CONSTANT: "constant"
     REF: "ref"
 
-    IDENTIFIER: /[a-zA-Z_][a-zA-Z0-9_]*/ | "'" /[^']+/ "'"
+    IDENTIFIER: /[a-zA-Z_\u4e00-\u9fff\u3400-\u4dbf][a-zA-Z0-9_\u4e00-\u9fff\u3400-\u4dbf]*/ | "'" /[^']+/ "'"
     NUMBER: /\d+/
 
     %import common.WS
@@ -76,102 +82,121 @@ SYML_GRAMMAR = r"""
 
 @v_args(inline=True)
 class SysMLTransformer(Transformer):
-    def __init__(self):
-        super().__init__()
-        self.current_package = None
-
     def start(self, *items):
         return list(items)
 
-    def package(self, name, *members):
-        pkg = Package(str(name))
-        for m in members:
-            if isinstance(m, list):
-                for item in m:
-                    pkg.add_member(item)
-            else:
-                pkg.add_member(m)
+    def package(self, name_token, body):
+        pkg = Package(self._id_str(name_token))
+        members, _ = body
+        for m in (members or []):
+            pkg.add_member(m)
         return pkg
+
+    def package_body(self, *items):
+        braces = []
+        for item in items:
+            if isinstance(item, list):
+                braces.append(item)
+        if braces:
+            return (braces[0], None)
+        return ([], None)
 
     def member(self, item):
         return item
 
-    def part_def(self, name, supertypes=None):
-        defn = PartDef(str(name))
+    def definition(self, prefix, kind, name_token, supertypes, body):
+        defn = kind
+        defn.name = str(name_token).strip("'")
         if supertypes:
             defn.supertypes = [str(t) for t in supertypes]
+        members, _ = body
+        for m in (members or []):
+            defn.add_member(m)
         return defn
 
-    def attribute_def(self, name, supertypes=None):
-        defn = AttributeDef(str(name))
-        if supertypes:
-            defn.supertypes = [str(t) for t in supertypes]
-        return defn
+    def definition_body(self, *items):
+        braces = []
+        for item in items:
+            if isinstance(item, list):
+                braces.append(item)
+        if braces:
+            return (braces[0], None)
+        return ([], None)
 
-    def port_def(self, name, supertypes=None):
-        defn = PortDef(str(name))
-        if supertypes:
-            defn.supertypes = [str(t) for t in supertypes]
-        return defn
+    def def_prefix(self, *tokens):
+        return None
 
-    def item_def(self, name, supertypes=None):
-        defn = ItemDef(str(name))
-        if supertypes:
-            defn.supertypes = [str(t) for t in supertypes]
-        return defn
+    # ── def_kind 方法 ──
+    def part_def(self):
+        return PartDef()
 
-    def connection_def(self, name, supertypes=None):
-        defn = ConnectionDef(str(name))
-        if supertypes:
-            defn.supertypes = [str(t) for t in supertypes]
-        return defn
+    def attribute_def(self):
+        return AttributeDef()
 
-    def interface_def(self, name, supertypes=None):
-        defn = InterfaceDef(str(name))
-        if supertypes:
-            defn.supertypes = [str(t) for t in supertypes]
-        return defn
+    def port_def(self):
+        return PortDef()
 
-    def allocation_def(self, name, supertypes=None):
-        defn = AllocationDef(str(name))
-        if supertypes:
-            defn.supertypes = [str(t) for t in supertypes]
-        return defn
+    def item_def(self):
+        return ItemDef()
 
-    def requirement_def(self, name, supertypes=None):
-        defn = RequirementDef(str(name))
-        if supertypes:
-            defn.supertypes = [str(t) for t in supertypes]
-        return defn
+    def connection_def(self):
+        return ConnectionDef()
 
-    def part_usage(self, name, multiplicity=None, specialization=None, value=None):
-        usage = PartUsage(str(name))
-        self._apply_usage_props(usage, multiplicity, specialization, value)
-        return usage
+    def interface_def(self):
+        return InterfaceDef()
 
-    def attribute_usage(self, name, multiplicity=None, specialization=None, value=None):
-        usage = AttributeUsage(str(name))
-        self._apply_usage_props(usage, multiplicity, specialization, value)
-        return usage
+    def allocation_def(self):
+        return AllocationDef()
 
-    def port_usage(self, name, multiplicity=None, specialization=None, value=None):
-        usage = PortUsage(str(name))
-        self._apply_usage_props(usage, multiplicity, specialization, value)
-        return usage
+    def requirement_def(self):
+        return RequirementDef()
 
-    def item_usage(self, name, multiplicity=None, specialization=None, value=None):
-        usage = ItemUsage(str(name))
-        self._apply_usage_props(usage, multiplicity, specialization, value)
-        return usage
+    # ── usage ──
+    def usage(self, prefix, kind, name_token, multiplicity, specialization, value, body):
+        usage_obj = kind
+        usage_obj.name = str(name_token).strip("'")
+        self._apply_usage_props(usage_obj, multiplicity, specialization, value)
+        members, _ = body
+        for m in (members or []):
+            usage_obj.add_member(m)
+        return usage_obj
 
-    def connection_usage(self, name=None, multiplicity=None, specialization=None, value=None):
-        # 连接简写处理在 connect 规则
-        pass
+    def usage_body(self, *items):
+        braces = []
+        for item in items:
+            if isinstance(item, list):
+                braces.append(item)
+        if braces:
+            return (braces[0], None)
+        return ([], None)
 
-    def connect(self, src, tgt):
-        usage = ConnectionUsage()
-        usage.ends = [ConnectionEnd(str(src)), ConnectionEnd(str(tgt))]
-        return usage
+    def usage_prefix(self, *tokens):
+        return None
+
+    # ── usage_kind 方法 ──
+    def part_usage(self):
+        return PartUsage()
+
+    def attribute_usage(self):
+        return AttributeUsage()
+
+    def port_usage(self):
+        return PortUsage()
+
+    def item_usage(self):
+        return ItemUsage()
+
+    def connection_usage(self):
+        return ConnectionUsage()
+
+    def interface_usage(self):
+        return InterfaceUsage()
+
+    def allocation_usage(self):
+        return AllocationUsage()
+
+    def requirement_usage(self):
+        return RequirementUsage()
 
     def _apply_usage_props(self, usage, multiplicity, specialization, value):
         if multiplicity:
@@ -184,52 +209,86 @@ class SysMLTransformer(Transformer):
         if value:
             usage.value_expr = str(value)
 
+    # ── 连接简写 ──
+    def connect_usage(self, src, tgt):
+        usage = ConnectionUsage()
+        usage.ends = [ConnectionEnd(str(src).strip("'")), ConnectionEnd(str(tgt).strip("'"))]
+        return usage
+
+    # ── 辅助规则 ──
+    def direction(self, token):
+        return str(token)
+
+    def direction_opt(self, token=None):
+        return str(token) if token else None
+
     def multiplicity(self, lower=None, upper=None, ordered=False, nonunique=False):
-        lower = str(lower) if lower else None
-        upper = str(upper) if upper else None
+        lower = str(lower) if lower is not None else None
+        upper = str(upper) if upper is not None else None
         return Multiplicity(lower, upper, ordered=bool(ordered), unique=not nonunique)
+
+    def multiplicity_opt(self, mult=None):
+        return mult
 
     def specialization(self, *parts):
         result = {'type': [], 'subsets': [], 'redefines': []}
         i = 0
         while i < len(parts):
             if parts[i] == ':':
-                result['type'] = [str(t) for t in parts[i+1]]
+                if i + 1 < len(parts) and isinstance(parts[i+1], list):
+                    result['type'] = [str(t) for t in parts[i+1]]
                 i += 2
             elif parts[i] == 'subsets':
-                result['subsets'] = [str(t) for t in parts[i+1]]
+                if i + 1 < len(parts) and isinstance(parts[i+1], list):
+                    result['subsets'] = [str(t) for t in parts[i+1]]
                 i += 2
             elif parts[i] == 'redefines':
-                result['redefines'] = [str(t) for t in parts[i+1]]
+                if i + 1 < len(parts) and isinstance(parts[i+1], list):
+                    result['redefines'] = [str(t) for t in parts[i+1]]
                 i += 2
             else:
                 i += 1
         return result
 
+    def specialization_opt(self, spec=None):
+        return spec
+
     def type_refs(self, *refs):
-        return [str(r) for r in refs]
+        r = [str(x) for x in refs if not isinstance(x, str) or x != ',']
+        return r
 
     def subset_refs(self, *refs):
-        return [str(r) for r in refs]
+        r = [str(x) for x in refs if not isinstance(x, str) or x != ',']
+        return r
 
     def redef_refs(self, *refs):
-        return [str(r) for r in refs]
+        r = [str(x) for x in refs if not isinstance(x, str) or x != ',']
+        return r
+
+    def value(self, expr_token):
+        return str(expr_token).strip()
+
+    def value_opt(self, val=None):
+        return val
 
     def supertypes(self, *types):
-        return [str(t) for t in types]
+        return [str(t) for t in types if not isinstance(t, str) or t != ',']
 
-    def import_stmt(self, visibility=None, imported_path=None, recursive=None):
-        vis = VisibilityKind(visibility) if visibility else VisibilityKind.PRIVATE
-        is_rec = recursive == "::**"
-        is_all = recursive == "::*"
-        return Import(str(imported_path), vis, is_rec, is_all)
+    def supertypes_opt(self, types=None):
+        return types
 
-    def alias_stmt(self, visibility=None, alias_name=None, target_path=None):
-        vis = VisibilityKind(visibility) if visibility else VisibilityKind.PUBLIC
-        return Alias(str(alias_name), str(target_path), vis)
+    def import_stmt(self, visibility, imported_path, suffix=None):
+        vis = VisibilityKind(str(visibility)) if visibility else VisibilityKind.PRIVATE
+        is_rec = str(suffix).strip() == "::**" if suffix else False
+        is_all = str(suffix).strip() == "::*" if suffix else False
+        return Import(str(imported_path).strip("'"), vis, is_rec, is_all)
 
-    def visibility(self, token):
-        return str(token)
+    def alias_stmt(self, visibility, alias_name, target_path):
+        vis = VisibilityKind(str(visibility)) if visibility else VisibilityKind.PUBLIC
+        return Alias(str(alias_name).strip("'"), str(target_path).strip("'"), vis)
+
+    def visibility_opt(self, token=None):
+        return str(token) if token else None
 
     def expr(self, token):
         return str(token).strip()
@@ -237,9 +296,19 @@ class SysMLTransformer(Transformer):
     def IDENTIFIER(self, token):
         return str(token).strip("'")
 
+    def NUMBER(self, token):
+        return str(token)
+
+    @staticmethod
+    def _id_str(value):
+        if isinstance(value, (str,)):
+            return value.strip("'")
+        return str(value)
+
 
 def parse_sysml_text(text: str) -> List[SysMLElement]:
-    parser = Lark(SYML_GRAMMAR, parser='lalr', transformer=SysMLTransformer())
-    result = parser.parse(text)
-    # transformer 的 start 方法返回 List[SysMLElement]
+    parser = Lark(SYML_GRAMMAR)
+    tree = parser.parse(text)
+    transformer = SysMLTransformer()
+    result = transformer.transform(tree)
     return cast(List[SysMLElement], result)

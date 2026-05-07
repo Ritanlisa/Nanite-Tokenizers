@@ -547,6 +547,25 @@ def create_app() -> FastAPI:
                         item["status"] = "persisted"
                     item["progress"] = max(int(item.get("progress") or 0), 99)
 
+            elif stage == "kg_build_started":
+                job["phase"] = "kg_building"
+                job["progress"] = max(int(job.get("progress") or 0), 72)
+                if target_doc is not None:
+                    target_doc["status"] = "kg_extracting"
+                    target_doc["progress"] = 73
+            elif stage == "kg_build_completed":
+                job["phase"] = "kg_building"
+                job["progress"] = max(int(job.get("progress") or 0), 80)
+                if target_doc is not None:
+                    target_doc["status"] = "kg_done"
+                    target_doc["progress"] = 80
+            elif stage == "kg_build_error":
+                job["phase"] = "kg_building"
+                if target_doc is not None:
+                    target_doc["status"] = "kg_error"
+                    target_doc["progress"] = 80
+                    target_doc["error"] = str(payload.get("error") or "")[:500] or None
+
             _recompute_job_progress(job)
 
     def _complete_rag_build_job(job_id: str, *, db_name: str, added: int) -> None:
@@ -609,7 +628,157 @@ def create_app() -> FastAPI:
             logging.getLogger(__name__).exception("RAG build job failed")
             _fail_rag_build_job(job_id, db_name=db_name, error_text=str(exc))
             return
+
+        if config.settings.KG_EXTRACTION_ENABLED:
+            try:
+                await _run_kg_build_for_job(job_id, db_name)
+            except Exception as exc:
+                logging.getLogger(__name__).warning("KG build failed, continuing: %s", exc)
+                _update_rag_build_job(job_id, "kg_build_error", {"error": str(exc)})
+
         _complete_rag_build_job(job_id, db_name=db_name, added=added)
+
+    async def _run_kg_build_for_job(job_id: str, db_name: str) -> None:
+        """异步运行知识图谱构建"""
+        from rag.documents import load_rag_documents_from_persist_dir
+        from agent.kg_build_agent import KGBuildAgent, SectionInfo
+
+        persist_dir = os.path.join(config.settings.PERSIST_DIR, db_name)
+        if not os.path.isdir(persist_dir):
+            return
+
+        callback = lambda stage, payload: _update_rag_build_job(job_id, stage, payload)
+        callback("kg_build_started", {"doc_name": db_name})
+
+        rag_docs = load_rag_documents_from_persist_dir(persist_dir, SUPPORTED_RAG_EXTENSIONS)
+        if not rag_docs:
+            callback("kg_build_completed", {"doc_name": db_name})
+            return
+
+        agent = KGBuildAgent(db_name=db_name)
+        for rag_doc in rag_docs:
+            sections = _extract_sections_from_rag_doc(rag_doc)
+            if not sections:
+                continue
+            try:
+                await agent.build_kg_for_sections(getattr(rag_doc, "doc_name", db_name), sections)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "KG build failed for doc '%s': %s",
+                    getattr(rag_doc, "doc_name", db_name), exc,
+                )
+
+        await agent.close()
+        callback("kg_build_completed", {"doc_name": db_name})
+
+
+def _extract_sections_from_rag_doc(rag_doc: Any) -> list:
+    """从 RAG_DB_Document 中提取 SectionInfo 列表（跳过封面/目录，智能分段）"""
+    from agent.kg_build_agent import SectionInfo
+    from rag.document_interface import PageType
+
+    sections = []
+    try:
+        mono_pages = rag_doc.get_mono_pages()
+    except Exception:
+        return sections
+
+    # Build page → catalog info mapping
+    page_catalog: dict = {}
+    try:
+        for cat_item in rag_doc.catalog_payload() or []:
+            if not isinstance(cat_item, dict):
+                continue
+            start = int(cat_item.get("page") or 0)
+            title = str(cat_item.get("title") or "").strip()
+            parent = str(cat_item.get("parent_title") or "").strip()
+            if start > 0 and title:
+                page_catalog.setdefault(start, []).append({"title": title, "parent": parent})
+    except Exception:
+        pass
+
+    # Collect all content text in order, tracking catalog transitions
+    all_text_parts: list = []  # [(page_num, text, title, parent)]
+    prev_page_num = None
+
+    for page in mono_pages:
+        text = (getattr(page, "markdown_text", "") or "").strip()
+        if not text or len(text) < 50:
+            continue
+        cat = getattr(page, "category", "")
+        if cat in (PageType.COVER, PageType.CATALOGUE):
+            continue
+
+        page_num = int(getattr(page, "page_number", 0) or 0)
+        title = ""
+        parent = ""
+
+        # Check if catalog has an entry for this page
+        for cat_page, cat_entries in sorted(page_catalog.items()):
+            if cat_page >= page_num:
+                candidates = cat_entries
+                if candidates:
+                    title = candidates[0]["title"]
+                    parent = candidates[0].get("parent", "")
+                break
+
+        if not title:
+            title = (getattr(page, "title", "") or "").strip()
+        if not title:
+            # Extract title from first markdown heading in text
+            m = re.match(r'#+\s*(.+)', text)
+            if m:
+                title = m.group(1).strip()
+
+        all_text_parts.append((page_num, text, title, parent))
+        prev_page_num = page_num
+
+    if not all_text_parts:
+        return sections
+
+    # Merge consecutive fragments on same page, then chunk long pages
+    CHUNK_SIZE = 2000
+    TOC_PATTERN = re.compile(r'^\s*(#+\s+.*|第[一二三四五六七八九十\d]+章\s|[\d\.]+\s+\w+)')
+    
+    current_page = all_text_parts[0][0]
+    current_text = ""
+    current_title = all_text_parts[0][2]
+    current_parent = all_text_parts[0][3]
+
+    for page_num, text, title, parent in all_text_parts:
+        if page_num == current_page and len(current_text) + len(text) < CHUNK_SIZE:
+            current_text += "\n\n" + text
+        else:
+            if current_text.strip():
+                # Skip TOC-like sections (mainly chapter lists, no prose)
+                lines = current_text.strip().splitlines()
+                toc_lines = sum(1 for l in lines if TOC_PATTERN.match(l))
+                if len(lines) > 0 and toc_lines / len(lines) < 0.5:
+                    sections.append(SectionInfo(
+                        section_id=f"sec-{len(sections)}",
+                        title=current_title or f"Section {len(sections)+1}",
+                        text=current_text.strip()[:4000],
+                        parent_title=current_parent,
+                        page=current_page,
+                    ))
+            current_page = page_num
+            current_text = text
+            current_title = title
+            current_parent = parent
+
+    if current_text.strip():
+        lines = current_text.strip().splitlines()
+        toc_lines = sum(1 for l in lines if TOC_PATTERN.match(l))
+        if len(lines) > 0 and toc_lines / len(lines) < 0.5:
+            sections.append(SectionInfo(
+                section_id=f"sec-{len(sections)}",
+                title=current_title or f"Section {len(sections)+1}",
+                text=current_text.strip()[:4000],
+                parent_title=current_parent,
+                page=current_page,
+            ))
+
+    return sections
 
     def _compact_tree_document_summary(item: Any) -> dict[str, object]:
         payload = dict(item or {})
@@ -1324,6 +1493,192 @@ def create_app() -> FastAPI:
             "documents": remaining_docs,
             "rebuilt": rebuilt,
         }
+
+    # ═══════════════════════════════════════════════════════════
+    # KG (知识图谱) API 端点
+    # ═══════════════════════════════════════════════════════════
+
+    def _kg_file(db_name: str) -> str:
+        return os.path.join(_db_dir(db_name), "knowledge_graph.sysml")
+
+    def _kg_meta_file(db_name: str) -> str:
+        return os.path.join(_db_dir(db_name), "knowledge_graph.meta.json")
+
+    def _load_kg_manager(db_name: str) -> Any:
+        """加载数据库的 KG 到 SysMLManager"""
+        from sysml.sysml_manager import SysMLManager
+        kg_file = _kg_file(db_name)
+        mgr = SysMLManager()
+        if os.path.isfile(kg_file):
+            mgr.load_from_file(kg_file)
+        return mgr
+
+    def _kg_entity_detail(mgr: Any, entity: Any) -> dict:
+        from scripts.sysml_rag_mcp_server import _entity_summary, _entity_type_name
+        summary = _entity_summary(entity, include_body=True)
+
+        # 获取关联关系
+        relations = []
+        all_rels = mgr.get_all_relations()
+        entity_name = getattr(entity, "name", "")
+        for rel in all_rels:
+            if hasattr(rel, "ends") and rel.ends:
+                for end in rel.ends:
+                    if end.ref == entity_name or end.ref == entity.qualified_name.split("::")[-1]:
+                        rel_info = _entity_summary(rel, include_body=False)
+                        relations.append(rel_info)
+                        break
+
+        meta = mgr.get_entity_metadata(entity.qualified_name)
+        return {
+            "qualified_name": entity.qualified_name,
+            "name": entity.name,
+            "type": type(entity).__name__,
+            "human_type": _entity_type_name(entity),
+            "description": meta.get("description", ""),
+            "aliases": mgr._alias_registry.get_aliases(entity.qualified_name),
+            "source_sections": meta.get("source_sections", []),
+            "source_text": meta.get("source_text", ""),
+            "properties": meta.get("properties", {}),
+            "related_relations": relations,
+        }
+
+    @app.get("/api/rag/dbs/{db_name}/kg/export")
+    async def kg_export(db_name: str):
+        name = _normalize_db_name(db_name)
+        if not _is_valid_db(name):
+            raise HTTPException(status_code=404, detail="Database not found")
+        kg_file = _kg_file(name)
+        if not os.path.isfile(kg_file):
+            raise HTTPException(status_code=404, detail="Knowledge graph not built yet")
+        return FileResponse(kg_file, media_type="text/plain",
+                           filename=f"{name}_knowledge_graph.sysml")
+
+    @app.get("/api/rag/dbs/{db_name}/kg/summary")
+    async def kg_summary(db_name: str):
+        name = _normalize_db_name(db_name)
+        if not _is_valid_db(name):
+            raise HTTPException(status_code=404, detail="Database not found")
+        mgr = _load_kg_manager(name)
+        entities = mgr.get_all_entities()
+        relations = mgr.get_all_relations()
+
+        type_dist: dict = {}
+        for e in entities:
+            t = type(e).__name__
+            type_dist[t] = type_dist.get(t, 0) + 1
+
+        return {
+            "database": name,
+            "kg_file": _kg_file(name),
+            "has_kg": os.path.isfile(_kg_file(name)),
+            "total_entities": len(entities),
+            "total_relations": len(relations),
+            "type_distribution": type_dist,
+        }
+
+    @app.get("/api/rag/dbs/{db_name}/kg/entities")
+    async def kg_entities(db_name: str, type_filter: str = "", name_filter: str = ""):
+        name = _normalize_db_name(db_name)
+        if not _is_valid_db(name):
+            raise HTTPException(status_code=404, detail="Database not found")
+        mgr = _load_kg_manager(name)
+        entities = mgr.get_all_entities()
+
+        result = []
+        for e in entities:
+            e_type = type(e).__name__
+            e_name = getattr(e, "name", "")
+            if type_filter and type_filter != e_type:
+                continue
+            if name_filter and name_filter.lower() not in e_name.lower():
+                continue
+            meta = mgr.get_entity_metadata(e.qualified_name)
+            result.append({
+                "qualified_name": e.qualified_name,
+                "name": e_name,
+                "type": e_type,
+                "description": meta.get("description", "")[:200],
+                "aliases": mgr._alias_registry.get_aliases(e.qualified_name),
+                "source_sections": meta.get("source_sections", []),
+            })
+
+        return {
+            "database": name,
+            "total": len(result),
+            "entities": result,
+        }
+
+    @app.get("/api/rag/dbs/{db_name}/kg/entity/{entity_name:path}")
+    async def kg_entity(db_name: str, entity_name: str):
+        name = _normalize_db_name(db_name)
+        if not _is_valid_db(name):
+            raise HTTPException(status_code=404, detail="Database not found")
+        mgr = _load_kg_manager(name)
+
+        entity = mgr.find_definition(entity_name)
+        if entity is None:
+            found = mgr.find_element(qualified_name=entity_name)
+            if found is not None:
+                entity = found
+        if entity is None:
+            raise HTTPException(status_code=404, detail=f"Entity not found: {entity_name}")
+
+        return _kg_entity_detail(mgr, entity)
+
+    @app.post("/api/rag/dbs/{db_name}/kg/search")
+    async def kg_search(db_name: str, request: dict):
+        name = _normalize_db_name(db_name)
+        if not _is_valid_db(name):
+            raise HTTPException(status_code=404, detail="Database not found")
+        query = str(request.get("query") or "").strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="query is required")
+
+        mgr = _load_kg_manager(name)
+        try:
+            threshold = float(request.get("threshold", 0.3))
+        except (TypeError, ValueError):
+            threshold = 0.3
+        regex = request.get("regex_pattern")
+
+        results = mgr.search_entities(query, threshold=threshold, regex_pattern=regex)
+        return {
+            "database": name,
+            "query": query,
+            "threshold": threshold,
+            "total_matches": len(results),
+            "matches": results,
+        }
+
+    @app.post("/api/rag/dbs/{db_name}/kg/re-extract")
+    async def kg_re_extract(db_name: str):
+        name = _normalize_db_name(db_name)
+        if not _is_valid_db(name):
+            raise HTTPException(status_code=404, detail="Database not found")
+
+        docs_dir = _db_docs_dir(name)
+        os.makedirs(docs_dir, exist_ok=True)
+        paths = [
+            os.path.join(docs_dir, item)
+            for item in os.listdir(docs_dir)
+            if os.path.isfile(os.path.join(docs_dir, item))
+        ]
+        paths.sort()
+        if not paths:
+            return {"status": "ok", "message": "No documents to process"}
+
+        # Remove old KG to force rebuild
+        kg_file = _kg_file(name)
+        if os.path.isfile(kg_file):
+            os.remove(kg_file)
+        meta_file = _kg_meta_file(name)
+        if os.path.isfile(meta_file):
+            os.remove(meta_file)
+
+        job = _register_rag_build_job(name, "rebuild", [os.path.basename(p) for p in paths])
+        asyncio.create_task(_run_rag_build_job(job["job_id"], name, "rebuild", paths))
+        return {**job, "status": "accepted"}
 
     @app.post("/api/settings")
     async def update_settings_endpoint(request: SettingsUpdateRequest):
