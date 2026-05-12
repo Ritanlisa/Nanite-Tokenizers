@@ -5,31 +5,17 @@ Goals
 -----
 - Separate training, inference demos, and tooling into clear modules.
 - Provide a reusable package layout under `src/`.
-- Keep legacy entry scripts working as wrappers.
 
 Project layout
 --------------
-- `src/nanite_tokenizers/cli.py`: unified CLI entrypoint
-- `src/nanite_tokenizers/training/`: training routines
-- `src/nanite_tokenizers/inference/`: demo and inference scripts
-- `src/nanite_tokenizers/models/`: model and compression code
-- `src/nanite_tokenizers/data/`: datasets
-- `src/nanite_tokenizers/tools/`: download utilities
-- `src/nanite_tokenizers/utils/`: shared helpers
+- `src/nanite_tokenizers/`: main package
+- `web_server.py`: **入口 / single entry point** — FastAPI web server + static UI
 
 Quickstart
 ----------
 - Install dependencies: `uv sync`
-- Demo: `python -m nanite_tokenizers demo`
-- Train: `python -m nanite_tokenizers train --model-index 0`
-- Download tokenizer: `python -m nanite_tokenizers download`
-
-Legacy entrypoints
-------------------
-These files remain as thin wrappers:
-- `simplier.py`
-- `download.py`
-- `compressor.py`
+- Start API + UI: `python web_server.py --host 0.0.0.0 --port 7860`
+- Open: `http://localhost:7860`
 
 RAG + MCP Agent
 ---------------
@@ -69,18 +55,8 @@ Examples:
 - `tool[-1][3]["link"] | regex https?://(.*?)/ $1`
 - `tool[-1][3]["link"] | regex https?://(.*?)\.(.*?)\.(.*?)/ $1 $2 $3`
 
-Run the agent
--------------
-- Configure `settings.yaml` (set `OPENAI_API_KEY`)
-- Start: `python main.py`
-
-Run the Gradio GUI
-------------------
-- Install Gradio: `python -m pip install gradio`
-- Start: `python gradio_app.py --host 0.0.0.0 --port 7860`
-
-Run the static Web UI
----------------------
+Run the Web UI
+--------------
 - Install web deps: `python -m pip install fastapi uvicorn`
 - Start API + UI: `python web_server.py --host 0.0.0.0 --port 7860`
 - Open: `http://localhost:7860`

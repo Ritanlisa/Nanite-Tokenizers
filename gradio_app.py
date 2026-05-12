@@ -85,7 +85,3 @@ def main() -> None:
 
     demo = build_ui(args.session)
     demo.launch(server_name=args.host, server_port=args.port, share=args.share)
-
-
-if __name__ == "__main__":
-    main()
