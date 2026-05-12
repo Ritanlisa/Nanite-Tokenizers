@@ -47,7 +47,7 @@ if str(ROOT_DIR) not in sys.path:
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sysml.sysml_model import (
-    Package, SysMLElement, Definition, Usage,
+    Package, SysMLElement, Definition, Usage, Doc,
     ConnectionUsage, InterfaceUsage, AllocationUsage,
     InterfaceDef, AllocationDef,
     PartDef, PartUsage, AttributeDef, AttributeUsage,
@@ -56,6 +56,7 @@ from sysml.sysml_model import (
     ConnectionDef,
 )
 from sysml.sysml_manager import SysMLManager, AliasRegistry
+from sysml.hv_resolver import HVResolver
 
 try:
     from scripts.demo_doc_to_sysml import build_sysml_model_from_doc_tree
@@ -211,6 +212,9 @@ def sysml_load_model(file_path: str) -> Dict[str, Any]:
         _loaded_files[path.stem] = str(path)
         entity_count = len(mgr.get_all_entities())
         rel_count = len(mgr.get_all_relations())
+        # 重建超变量解析器
+        global _HV_RESOLVER
+        _HV_RESOLVER = HVResolver()
         return {
             "ok": True,
             "file": str(path),
@@ -865,6 +869,392 @@ def sysml_merge_entities(source: str, target: str) -> Dict[str, Any]:
 
 
 # ══════════════════════════════════════════════════════════════
+# 超变量 / 文档章节工具
+# ══════════════════════════════════════════════════════════════
+
+_HV_RESOLVER: Optional[HVResolver] = None
+
+
+def _get_resolver() -> HVResolver:
+    global _HV_RESOLVER
+    if _HV_RESOLVER is None:
+        _HV_RESOLVER = HVResolver()
+    return _HV_RESOLVER
+
+
+def _get_hv_config(mgr: SysMLManager, hv_id: str) -> Optional[dict]:
+    """Extract HV configuration (source, selector, unit, hv_type) from the SysML model."""
+    HV_TYPES = {"InstantVariable", "BlockVariable", "ModifierVariable", "Parameter", "Operation"}
+
+    def walk(items):
+        for item in (items or []):
+            name = getattr(item, "name", None)
+            if name == hv_id:
+                type_refs = getattr(item, "type_refs", []) or []
+                hv_type = next((t for t in type_refs if t in HV_TYPES), None)
+                if hv_type:
+                    info = {"name": name, "hv_type": hv_type}
+                    for m in getattr(item, "members", []) or []:
+                        m_name = getattr(m, "name", "")
+                        value = getattr(m, "value_expr", None)
+                        if m_name and value is not None:
+                            info[m_name] = str(value).strip("'\" ")
+                    return info
+            members = getattr(item, "members", None)
+            if members:
+                result = walk(members)
+                if result:
+                    return result
+        return None
+
+    return walk(mgr.root_elements)
+
+
+def _build_hv_lookup(mgr: SysMLManager, text: str) -> dict[str, tuple[str, str]]:
+    """Build a lookup dict {hv_id: (source, selector)} from all HV tags in text."""
+    import re
+    lookup = {}
+    for m in re.finditer(r'<(\w+):([a-zA-Z_][a-zA-Z0-9_]*):([^>]+)>', text):
+        hv_id = m.group(2)
+        if hv_id not in lookup:
+            cfg = _get_hv_config(mgr, hv_id)
+            if cfg:
+                lookup[hv_id] = (cfg.get("source", ""), cfg.get("selector", ""))
+    return lookup
+
+
+def _find_sections(manager: SysMLManager) -> list[PartUsage]:
+    """Collect all DocumentSection instances from the model tree."""
+    sections = []
+    entities = manager.get_all_entities()
+    # Also check root-level usage elements
+    for e in manager.root_elements:
+        if isinstance(e, PartUsage):
+            entities.append(e)
+        # Walk into packages
+        def walk(ns):
+            for m in getattr(ns, "members", []) or []:
+                if isinstance(m, PartUsage):
+                    entities.append(m)
+                if hasattr(m, "members"):
+                    walk(m)
+        if hasattr(e, "members"):
+            walk(e)
+    for e in entities:
+        type_refs = getattr(e, "type_refs", []) or []
+        if "DocumentSection" in type_refs:
+            sections.append(e)
+    return sections
+
+
+def _get_doc_texts(part: PartUsage) -> list[str]:
+    """Get all doc texts from a part's members."""
+    texts = []
+    for m in getattr(part, "members", []) or []:
+        if isinstance(m, Doc):
+            texts.append(m.text)
+    return texts
+
+
+def _get_attr_value(part: PartUsage, attr_name: str) -> str:
+    """Get a string attribute value from a part's members (quotes stripped)."""
+    for m in getattr(part, "members", []) or []:
+        if isinstance(m, AttributeUsage) and m.name == attr_name:
+            raw = getattr(m, "value_expr", None)
+            if raw:
+                return str(raw).strip("'\" ")
+    return ""
+
+
+def sysml_search_sections(query: str, max_results: int = 20) -> Dict[str, Any]:
+    """
+    搜索文档章节（按标题或 doc 文本内容）。
+
+    在所有 DocumentSection 实例中搜索匹配名称、标题或文档文本的章节。
+
+    Args:
+        query: 搜索关键词
+        max_results: 最大返回数
+
+    Returns:
+        匹配的章节列表（含 ID、标题、摘要）
+    """
+    mgr = _get_manager()
+    sections = _find_sections(mgr)
+    query_lower = query.lower().strip()
+    results = []
+
+    for sec in sections:
+        title = _get_attr_value(sec, "title")
+        chapter = _get_attr_value(sec, "chapter")
+        name = getattr(sec, "name", "") or ""
+        docs = _get_doc_texts(sec)
+
+        score = 0.0
+        reason = ""
+        match_text = ""
+
+        # Name match
+        if query_lower in name.lower():
+            score = max(score, 1.0)
+            reason = "name_match"
+            match_text = name
+        # Title match
+        if title and query_lower in title.lower():
+            if score < 0.9:
+                score = max(score, 0.9)
+                reason = "title_match"
+                match_text = title
+        # Doc text match
+        for d in docs:
+            if d and query_lower in d.lower():
+                idx = d.lower().index(query_lower)
+                start = max(0, idx - 40)
+                end = min(len(d), idx + len(query) + 40)
+                match_text = ("..." if start > 0 else "") + d[start:end] + ("..." if end < len(d) else "")
+                if score < 0.7:
+                    score = max(score, 0.7)
+                    reason = "doc_match"
+                break
+
+        if score > 0:
+            results.append({
+                "id": name,
+                "title": title or name,
+                "chapter": chapter,
+                "score": round(score, 3),
+                "match_reason": reason,
+                "snippet": match_text[:200],
+            })
+
+    results.sort(key=lambda x: -x["score"])
+    results = results[:max_results]
+
+    return {
+        "ok": True,
+        "query": query,
+        "total_matches": len(results),
+        "sections": results,
+    }
+
+
+def sysml_get_section(section_id: str, enrich: bool = True) -> Dict[str, Any]:
+    """
+    获取文档章节详情。
+
+    返回章节的标题、章节号、原始 doc 文本，以及可选的超变量解析后的富文本。
+    当 `enrich=True` 时，doc 文本中的 `<instvar:id:Name>` 等标签会被替换为实时值。
+
+    Args:
+        section_id: 章节 ID（如 sec4_1, sec5_3_1）
+        enrich: 是否解析并注入超变量值
+
+    Returns:
+        章节详情（含原始文本和富文本）
+    """
+    mgr = _get_manager()
+    sections = _find_sections(mgr)
+    target = None
+    for sec in sections:
+        if getattr(sec, "name", "") == section_id:
+            target = sec
+            break
+
+    if target is None:
+        return {"ok": False, "error": f"Section not found: {section_id}"}
+
+    title = _get_attr_value(target, "title")
+    chapter = _get_attr_value(target, "chapter")
+    name = getattr(target, "name", "") or ""
+    docs = _get_doc_texts(target)
+    full_text = "\n".join(docs)
+
+    result = {
+        "ok": True,
+        "id": name,
+        "title": title or name,
+        "chapter": chapter,
+        "doc_count": len(docs),
+        "raw_text": full_text,
+    }
+
+    if enrich:
+        resolver = _get_resolver()
+        mgr = _get_manager()
+        lookup = _build_hv_lookup(mgr, full_text)
+        enriched = resolver.enrich_text(full_text, lookup=lookup)
+        result["enriched_text"] = enriched
+
+    return result
+
+
+def sysml_resolve_hv(hv_id: str) -> Dict[str, Any]:
+    """
+    解析超变量，返回当前实时值。
+
+    根据 Hypervariable 的 source/selector 配置，通过对应协议驱动获取值。
+
+    Args:
+        hv_id: 超变量 ID（如 fan_speed, SystemHealth, ThresholdParam）
+
+    Returns:
+        hv_id 对应的当前值
+    """
+    mgr = _get_manager()
+    cfg = _get_hv_config(mgr, hv_id)
+    if cfg is None:
+        return {"ok": False, "error": f"Hypervariable not found: {hv_id}"}
+
+    source = cfg.get("source", "")
+    selector = cfg.get("selector", "")
+    unit = cfg.get("unit", "")
+
+    if not source and not selector:
+        return {"ok": True, "id": hv_id, "type": cfg.get("hv_type", ""), "value": f"[{hv_id}]"}
+
+    resolver = _get_resolver()
+    value = resolver.resolve(source, selector)
+
+    if unit and value and not value.startswith("[") and not value.startswith("["):
+        value = f"{value} {unit}".strip()
+
+    return {
+        "ok": True,
+        "id": hv_id,
+        "type": cfg.get("hv_type", ""),
+        "value": value,
+        "source": source,
+        "selector": selector,
+    }
+
+
+def sysml_set_parameter(param_id: str, value: str) -> Dict[str, Any]:
+    """
+    设置参数型超变量（Parameter）的值。
+
+    向 source 指向的目标写入新值，影响系统行为。
+
+    Args:
+        param_id: 参数 ID（如 fan_curve, threshold）
+        value: 要设置的字符串值
+
+    Returns:
+        写入结果
+    """
+    mgr = _get_manager()
+    cfg = _get_hv_config(mgr, param_id)
+    if cfg is None:
+        return {"ok": False, "error": f"Parameter not found: {param_id}"}
+
+    hv_type = cfg.get("hv_type", "")
+    if hv_type != "Parameter":
+        return {"ok": False, "error": f"'{param_id}' is a {hv_type}, not a Parameter"}
+
+    source = cfg.get("source", "")
+    selector = cfg.get("selector", "")
+    resolver = _get_resolver()
+    ok = resolver.write(source, selector, value)
+    return {
+        "ok": ok,
+        "id": param_id,
+        "set_value": value,
+    }
+
+
+def sysml_execute_operation(op_id: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    执行操作型超变量（Operation）。
+
+    触发 source 指向的可执行操作，返回执行结果。
+
+    Args:
+        op_id: 操作 ID（如 underclock, LogDownload）
+        params: 操作参数字典（可选）
+
+    Returns:
+        执行结果
+    """
+    mgr = _get_manager()
+    cfg = _get_hv_config(mgr, op_id)
+    if cfg is None:
+        return {"ok": False, "error": f"Operation not found: {op_id}"}
+
+    hv_type = cfg.get("hv_type", "")
+    if hv_type != "Operation":
+        return {"ok": False, "error": f"'{op_id}' is a {hv_type}, not an Operation"}
+
+    source = cfg.get("source", "")
+    selector = cfg.get("selector", "")
+    resolver = _get_resolver()
+    result = resolver.execute(source, selector, params or {})
+    return {
+        "ok": True,
+        "id": op_id,
+        "result": result,
+    }
+
+
+def sysml_list_hvs(entity_name: Optional[str] = None) -> Dict[str, Any]:
+    """
+    列出超变量（Hypervariable）。
+
+    如果不指定 entity_name，返回所有超变量；如果指定，返回该实体的 ref 槽位中关联的超变量。
+
+    Args:
+        entity_name: 实体名称（可选）。指定时列出该实体通过 ref 关联的超变量。
+
+    Returns:
+        超变量列表
+    """
+    mgr = _get_manager()
+    HV_TYPES = {"InstantVariable", "BlockVariable", "ModifierVariable", "Parameter", "Operation"}
+
+    def walk(items):
+        """Walk all elements including usages."""
+        visited = set()
+        def _w(items):
+            for item in (items or []):
+                iid = id(item)
+                if iid in visited:
+                    continue
+                visited.add(iid)
+                yield item
+                for m in (getattr(item, "members", None) or []):
+                    yield from _w([m])
+        return _w(items)
+
+    if entity_name:
+        # List HVs linked via ref slots on this entity
+        for item in walk(mgr.root_elements):
+            if getattr(item, "name", None) != entity_name:
+                continue
+            hvs = []
+            for m in getattr(item, "members", []) or []:
+                if getattr(m, "is_reference", False):
+                    hvs.append({
+                        "slot": m.name,
+                        "target": getattr(m, "value_expr", None) or "",
+                        "type": (getattr(m, "type_refs", [None]) or [None])[0],
+                    })
+            return {"ok": True, "entity_name": entity_name, "total": len(hvs), "hypervariables": hvs}
+        return {"ok": False, "error": f"Entity not found: {entity_name}"}
+
+    # List ALL HVs in the model
+    all_hvs = []
+    for item in walk(mgr.root_elements):
+        type_refs = getattr(item, "type_refs", []) or []
+        for tr in type_refs:
+            if tr in HV_TYPES:
+                all_hvs.append({
+                    "id": getattr(item, "name", ""),
+                    "type": tr,
+                    "qualified_name": getattr(item, "qualified_name", ""),
+                })
+                break
+    return {"ok": True, "total": len(all_hvs), "hypervariables": all_hvs}
+
+
+# ══════════════════════════════════════════════════════════════
 # MCP 服务器入口
 # ══════════════════════════════════════════════════════════════
 
@@ -1044,6 +1434,53 @@ TOOL_DEFINITIONS = {
         "function": sysml_model_summary,
         "description": "获取当前已加载模型的全局摘要统计",
         "parameters": {},
+    },
+    # ── 超变量 / 文档章节 ──
+    "sysml_search_sections": {
+        "function": sysml_search_sections,
+        "description": "搜索文档章节（按标题或 doc 文本内容），返回匹配的章节 ID、标题和摘要",
+        "parameters": {
+            "query": {"type": "string", "description": "搜索关键词"},
+            "max_results": {"type": "integer", "description": "最大返回数", "default": 20},
+        },
+    },
+    "sysml_get_section": {
+        "function": sysml_get_section,
+        "description": "获取文档章节详情。返回原始 doc 文本，选择性地返回超变量解析后的富文本（enrich=True 时自动注入实时值）",
+        "parameters": {
+            "section_id": {"type": "string", "description": "章节 ID（如 sec4_1, sec5_3_1）"},
+            "enrich": {"type": "boolean", "description": "是否解析并注入超变量值", "default": True},
+        },
+    },
+    "sysml_resolve_hv": {
+        "function": sysml_resolve_hv,
+        "description": "解析超变量，返回当前实时值。支持 InstantVariable（即时读取）、BlockVariable（阻塞读取）",
+        "parameters": {
+            "hv_id": {"type": "string", "description": "超变量 ID（如 fan_speed, SystemHealth）"},
+        },
+    },
+    "sysml_set_parameter": {
+        "function": sysml_set_parameter,
+        "description": "设置参数型超变量（Parameter）的值，影响系统行为",
+        "parameters": {
+            "param_id": {"type": "string", "description": "参数 ID（如 fan_curve, threshold）"},
+            "value": {"type": "string", "description": "要设置的字符串值"},
+        },
+    },
+    "sysml_execute_operation": {
+        "function": sysml_execute_operation,
+        "description": "执行操作型超变量（Operation），触发可执行操作并返回执行结果",
+        "parameters": {
+            "op_id": {"type": "string", "description": "操作 ID（如 underclock, LogDownload）"},
+            "params": {"type": "object", "description": "操作参数（可选）", "default": None},
+        },
+    },
+    "sysml_list_hvs": {
+        "function": sysml_list_hvs,
+        "description": "列出超变量。不指定 entity_name 时返回所有超变量；指定时返回该实体 ref 槽位关联的超变量",
+        "parameters": {
+            "entity_name": {"type": "string", "description": "实体名称（可选）", "default": None},
+        },
     },
 }
 

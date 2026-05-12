@@ -1680,6 +1680,53 @@ def _extract_sections_from_rag_doc(rag_doc: Any) -> list:
         asyncio.create_task(_run_rag_build_job(job["job_id"], name, "rebuild", paths))
         return {**job, "status": "accepted"}
 
+    # ═══════════════════════════════════════════════════════════
+    # SysML 知识图谱对话
+    # ═══════════════════════════════════════════════════════════
+
+    _SYSML_CHAT_SESSIONS: dict[str, Any] = {}
+
+    async def _get_sysml_chat_agent(session_id: str):
+        """Get or create a SysML chat agent for this session."""
+        if session_id not in _SYSML_CHAT_SESSIONS:
+            from importlib import util as _util
+            _chat_file = os.path.join(os.path.dirname(__file__), "scripts", "sysml_chat_agent.py")
+            _spec = _util.spec_from_file_location("sysml_chat_agent", _chat_file)
+            _chat_mod = _util.module_from_spec(_spec)
+            _spec.loader.exec_module(_chat_mod)
+            agent = _chat_mod.SysMLChatAgent()
+            await agent.initialize()
+            _SYSML_CHAT_SESSIONS[session_id] = agent
+        return _SYSML_CHAT_SESSIONS[session_id]
+
+    @app.post("/api/kg/chat")
+    async def kg_chat(request: dict):
+        """Chat with the SysML Knowledge Graph agent.
+
+        Body:
+            message (str): User message
+            session_id (str): Session ID (default: "sysml-default")
+            history (list[dict], optional): Chat history
+            stream (bool): Whether to stream response
+
+        Returns:
+            dict with "response" field
+        """
+        message = request.get("message", "")
+        if not message:
+            raise HTTPException(status_code=400, detail="message is required")
+
+        session_id = request.get("session_id", "sysml-default")
+        history = request.get("history")
+        stream = request.get("stream", False)
+
+        agent = await _get_sysml_chat_agent(session_id)
+        try:
+            response = await agent.chat(message, history=history)
+            return {"response": response}
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
     @app.post("/api/settings")
     async def update_settings_endpoint(request: SettingsUpdateRequest):
         try:

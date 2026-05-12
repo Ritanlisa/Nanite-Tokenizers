@@ -27,7 +27,7 @@ SYML_GRAMMAR = r"""
     definition_body: "{" member* "}" | ";"
 
     usage: usage_prefix usage_kind IDENTIFIER multiplicity_opt? specialization_opt? value_opt? usage_body
-    usage_prefix: (direction_opt? DERIVED? ABSTRACT? CONSTANT? REF?) | (direction | DERIVED | ABSTRACT | CONSTANT | REF)*
+    usage_prefix: (direction | DERIVED | ABSTRACT | CONSTANT | REF)*
     usage_kind: "part" -> part_usage
               | "attribute" -> attribute_usage
               | "port" -> port_usage
@@ -157,10 +157,19 @@ class SysMLTransformer(Transformer):
     def usage(self, prefix, kind, name_token, multiplicity, specialization, value, body):
         usage_obj = kind
         usage_obj.name = str(name_token).strip("'")
+        if prefix:
+            usage_obj.is_reference = "ref" in prefix
+            usage_obj.is_abstract = "abstract" in prefix
+            usage_obj.is_derived = "derived" in prefix
+            usage_obj.is_constant = "constant" in prefix
         self._apply_usage_props(usage_obj, multiplicity, specialization, value)
         members = body if isinstance(body, list) else (body[0] if isinstance(body, tuple) else [])
         for m in (members or []):
-            usage_obj.add_member(m)
+            if isinstance(m, tuple):
+                for sub in m:
+                    usage_obj.add_member(sub)
+            elif m is not None:
+                usage_obj.add_member(m)
         return usage_obj
 
     def usage_body(self, *items):
@@ -173,7 +182,11 @@ class SysMLTransformer(Transformer):
         return members
 
     def usage_prefix(self, *tokens):
-        return None
+        flags = set()
+        for t in tokens:
+            if isinstance(t, str):
+                flags.add(t.lower())
+        return flags if flags else None
 
     # ── usage_kind 方法 ──
     def part_usage(self):
@@ -245,22 +258,17 @@ class SysMLTransformer(Transformer):
 
     def specialization(self, *parts):
         result = {'type': [], 'subsets': [], 'redefines': []}
-        i = 0
-        while i < len(parts):
-            if parts[i] == ':':
-                if i + 1 < len(parts) and isinstance(parts[i+1], list):
-                    result['type'] = [str(t) for t in parts[i+1]]
-                i += 2
-            elif parts[i] == 'subsets':
-                if i + 1 < len(parts) and isinstance(parts[i+1], list):
-                    result['subsets'] = [str(t) for t in parts[i+1]]
-                i += 2
-            elif parts[i] == 'redefines':
-                if i + 1 < len(parts) and isinstance(parts[i+1], list):
-                    result['redefines'] = [str(t) for t in parts[i+1]]
-                i += 2
-            else:
-                i += 1
+        guard = None
+        for p in parts:
+            if isinstance(p, list):
+                target = guard or 'type'
+                result[target] = [str(t) for t in p]
+                guard = None
+            elif p == 'subsets':
+                guard = 'subsets'
+            elif p == 'redefines':
+                guard = 'redefines'
+            # ':' literals are dropped by Lark; skip them
         return result
 
     def specialization_opt(self, spec=None):
@@ -307,7 +315,9 @@ class SysMLTransformer(Transformer):
         return str(token).strip()
 
     def doc_stmt(self, *args):
-        return None  # doc statements are transparent
+        from .sysml_model import Doc
+        text = str(args[0]).strip('"') if args else ""
+        return Doc(text=text)
 
     def IDENTIFIER(self, token):
         return str(token).strip("'")

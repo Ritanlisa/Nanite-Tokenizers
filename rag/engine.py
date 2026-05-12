@@ -367,11 +367,11 @@ class RAGEngine:
                 )
         else:
             self.embed_model = OpenAICompatibleEmbedding(
-                model_name=config.settings.EMBED_MODEL,
-                api_key=config.settings.OPENAI_API_KEY,
-                api_base=api_base,
-            )
-        self.embed_dim = self._get_embedding_dim()
+            model_name=config.settings.EMBED_MODEL,
+            api_key=config.settings.OPENAI_API_KEY,
+            api_base=api_base,
+        )
+        self._embed_dim: Optional[int] = None  # lazy — loaded on first use
         self.index = None
         self.query_engine = None
         self._rerank_processor: Optional[SentenceTransformerRerank] = None
@@ -577,6 +577,12 @@ class RAGEngine:
         self.invalidate_runtime_state(clear_chroma_cache=(config.settings.VECTOR_STORE_TYPE == "chroma"))
         self.doc_registry = DocumentRegistry(current_persist_dir)
         logger.info("Switched RAG context to %s", current_persist_dir)
+
+    @property
+    def embed_dim(self) -> int:
+        if self._embed_dim is None:
+            self._embed_dim = self._get_embedding_dim()
+        return self._embed_dim
 
     def _get_embedding_dim(self) -> int:
         if config.settings.EMBED_DIM:
