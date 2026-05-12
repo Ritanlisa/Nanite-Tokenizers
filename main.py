@@ -414,7 +414,3 @@ async def main() -> None:
                 print(f"Error: {exc}")
 
     await shutdown()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

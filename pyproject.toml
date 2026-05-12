@@ -48,10 +48,6 @@ dependencies = [
 ]
 
 [project.scripts]
-nanite-tokenizers = "nanite_tokenizers.cli:main"
-nanite-demo = "nanite_tokenizers.inference.seq2seq_demo:run_demo"
-nanite-train-simplier = "nanite_tokenizers.training.simplier:train_simplier"
-nanite-download-tokenizer = "nanite_tokenizers.tools.download_tokenizer:download_tokenizer"
 nanite-web = "nanite_tokenizers.legacy_web_server:main"
 
 [build-system]
