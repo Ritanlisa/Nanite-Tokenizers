@@ -11,7 +11,8 @@ SYML_GRAMMAR = r"""
 
     package: "package" IDENTIFIER package_body
     package_body: "{" member* "}" | ";"
-    member: definition | usage | import_stmt | alias_stmt | connect_usage
+    member: definition | usage | import_stmt | alias_stmt | connect_usage | package | doc_stmt
+    doc_stmt: "doc" (STRING | IDENTIFIER) ";"
 
     definition: def_prefix def_kind IDENTIFIER supertypes_opt? definition_body
     def_prefix: (ABSTRACT? VARIATION? | ABSTRACT | VARIATION)?
@@ -60,8 +61,8 @@ SYML_GRAMMAR = r"""
     alias_stmt: visibility_opt? "alias" IDENTIFIER "for" IDENTIFIER ";"
     visibility_opt: ["public" | "private" | "protected"]
 
-    // 连接简写
-    connect_usage: "connect" IDENTIFIER "to" IDENTIFIER ";"
+    // 连接简写（可带 "connection" 前缀）
+    connect_usage: ["connection"] "connect" IDENTIFIER "to" IDENTIFIER ";"
 
     expr: /[^;\n]+/
 
@@ -71,12 +72,13 @@ SYML_GRAMMAR = r"""
     CONSTANT: "constant"
     REF: "ref"
 
-    IDENTIFIER: /[a-zA-Z_\u4e00-\u9fff\u3400-\u4dbf][a-zA-Z0-9_\u4e00-\u9fff\u3400-\u4dbf]*/ | "'" /[^']+/ "'"
+    IDENTIFIER: /[a-zA-Z_\u4e00-\u9fff\u3400-\u4dbf][-a-zA-Z0-9_.\u4e00-\u9fff\u3400-\u4dbf]*/ | "'" /[^']+/ "'"
+    STRING: /"[^"]*"/
     NUMBER: /\d+/
 
     %import common.WS
     %ignore WS
-    %ignore /\/\*.*?\*\//
+    %ignore /\/\*[\s\S]*?\*\//
     %ignore /\/\/.*/
 """
 
@@ -87,19 +89,19 @@ class SysMLTransformer(Transformer):
 
     def package(self, name_token, body):
         pkg = Package(self._id_str(name_token))
-        members, _ = body
+        members = body[0] if isinstance(body, tuple) else body
         for m in (members or []):
             pkg.add_member(m)
         return pkg
 
     def package_body(self, *items):
-        braces = []
+        members = []
         for item in items:
             if isinstance(item, list):
-                braces.append(item)
-        if braces:
-            return (braces[0], None)
-        return ([], None)
+                members.extend(item)
+            elif item is not None and not isinstance(item, str):
+                members.append(item)
+        return members
 
     def member(self, item):
         return item
@@ -109,19 +111,19 @@ class SysMLTransformer(Transformer):
         defn.name = str(name_token).strip("'")
         if supertypes:
             defn.supertypes = [str(t) for t in supertypes]
-        members, _ = body
-        for m in (members or []):
+        members = body if isinstance(body, list) else (body[0] if isinstance(body, tuple) and len(body) > 0 else [])
+        for m in (members if isinstance(members, list) else []):
             defn.add_member(m)
         return defn
 
     def definition_body(self, *items):
-        braces = []
+        members = []
         for item in items:
             if isinstance(item, list):
-                braces.append(item)
-        if braces:
-            return (braces[0], None)
-        return ([], None)
+                members.extend(item)
+            elif item is not None and not isinstance(item, str):
+                members.append(item)
+        return members
 
     def def_prefix(self, *tokens):
         return None
@@ -156,19 +158,19 @@ class SysMLTransformer(Transformer):
         usage_obj = kind
         usage_obj.name = str(name_token).strip("'")
         self._apply_usage_props(usage_obj, multiplicity, specialization, value)
-        members, _ = body
+        members = body if isinstance(body, list) else (body[0] if isinstance(body, tuple) else [])
         for m in (members or []):
             usage_obj.add_member(m)
         return usage_obj
 
     def usage_body(self, *items):
-        braces = []
+        members = []
         for item in items:
             if isinstance(item, list):
-                braces.append(item)
-        if braces:
-            return (braces[0], None)
-        return ([], None)
+                members.extend(item)
+            elif item is not None and not isinstance(item, str):
+                members.append(item)
+        return members
 
     def usage_prefix(self, *tokens):
         return None
@@ -210,9 +212,20 @@ class SysMLTransformer(Transformer):
             usage.value_expr = str(value)
 
     # ── 连接简写 ──
-    def connect_usage(self, src, tgt):
+    def connect_usage(self, *args):
+        """处理 connection connect 'A' to 'B' 或 connect 'A' to 'B'"""
+        src = None
+        tgt = None
+        for a in args:
+            s = str(a).strip("'") if a is not None else ""
+            if s in ("connection", "connect", "to"):
+                continue
+            if src is None:
+                src = s
+            elif tgt is None:
+                tgt = s
         usage = ConnectionUsage()
-        usage.ends = [ConnectionEnd(str(src).strip("'")), ConnectionEnd(str(tgt).strip("'"))]
+        usage.ends = [ConnectionEnd(str(src or "")), ConnectionEnd(str(tgt or ""))]
         return usage
 
     # ── 辅助规则 ──
@@ -292,6 +305,9 @@ class SysMLTransformer(Transformer):
 
     def expr(self, token):
         return str(token).strip()
+
+    def doc_stmt(self, *args):
+        return None  # doc statements are transparent
 
     def IDENTIFIER(self, token):
         return str(token).strip("'")

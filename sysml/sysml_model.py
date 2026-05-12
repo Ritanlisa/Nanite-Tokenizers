@@ -35,14 +35,36 @@ class SysMLElement:
         parent_qn = self.owner.qualified_name
         return f"{parent_qn}::{self.name}" if parent_qn else (self.name or '')
 
+    @staticmethod
+    def _is_std_identifier(name: str) -> bool:
+        """SysML v2 / KerML 标准标识符: [a-zA-Z_][a-zA-Z0-9_]*"""
+        import re
+        return bool(re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_]*', name))
+
+    @staticmethod
+    def _needs_quoting(name: str) -> bool:
+        """任何非标准 Latin 标识符都需单引号引用"""
+        return not SysMLElement._is_std_identifier(name)
+
+    @staticmethod
+    def _quote(name: str) -> str:
+        """必要时给名称加引号"""
+        if SysMLElement._needs_quoting(name):
+            return f"'{name}'"
+        return name
+
     def _name_part(self) -> str:
-        """返回名称部分文本（含短名）"""
+        """返回名称部分文本（含短名）。若短名与名称相同/包含则仅返回名称。"""
         if self.short_name and self.name:
-            return f"<{self.short_name}> {self.name}"
+            s = str(self.short_name)
+            n = str(self.name)
+            if s.strip() == n.strip() or s in n:
+                return self._quote(n)
+            return f"<{self._quote(s)}> {self._quote(n)}"
         elif self.short_name:
-            return f"<{self.short_name}>"
+            return f"<{self._quote(self.short_name)}>"
         elif self.name:
-            return self.name
+            return self._quote(self.name)
         return ""
 
     def to_text(self, indent: int = 0) -> str:

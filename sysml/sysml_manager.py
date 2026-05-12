@@ -482,10 +482,11 @@ class SysMLManager:
         if issubclass(cls, Package):
             element = cls(name=name, short_name=short_name)
         elif issubclass(cls, Definition):
-            element = cls(name=name, short_name=short_name,
-                         supertypes=supertypes or [])
+            sn = short_name if short_name and short_name.strip() != name.strip() else None
+            element = cls(name=name, short_name=sn, supertypes=supertypes or [])
         elif issubclass(cls, Usage):
-            element = cls(name=name, short_name=short_name)
+            sn = short_name if short_name and short_name.strip() != name.strip() else None
+            element = cls(name=name, short_name=sn)
         else:
             element = cls(name=name, short_name=short_name)  # type: ignore[call-arg]
 
