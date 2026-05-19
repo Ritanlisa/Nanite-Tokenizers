@@ -27,6 +27,7 @@ from .sysml_model import (
     ConnectionDef,
     InterfaceDef,
     AllocationDef,
+    CommandDef,
     RequirementDef, RequirementUsage,
 )
 from .sysml_parser import parse_sysml_text
@@ -41,6 +42,7 @@ ENTITY_CLASS_MAP: Dict[str, type] = {
     "ConnectionDef": ConnectionDef, "ConnectionUsage": ConnectionUsage,
     "InterfaceDef": InterfaceDef, "InterfaceUsage": InterfaceUsage,
     "AllocationDef": AllocationDef, "AllocationUsage": AllocationUsage,
+    "CommandDef": CommandDef,
     "RequirementDef": RequirementDef, "RequirementUsage": RequirementUsage,
     "Package": Package,
 }

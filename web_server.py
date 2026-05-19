@@ -216,8 +216,26 @@ def _extract_sections_from_rag_doc(rag_doc: Any) -> list:
 
     # Merge consecutive fragments on same page, then chunk long pages
     CHUNK_SIZE = 2000
+    MIN_SECTION_CHARS = 150          # skip sections with too little content
     TOC_PATTERN = re.compile(r'^\s*(#+\s+.*|第[一二三四五六七八九十\d]+章\s|[\d\.]+\s+\w+)')
-    
+    TOC_TITLES = {"目 录", "目录", "目  录",
+                  "目 录   ", "目 录  ", "Contents", "Table of Contents"}
+
+    def _is_toc_section(title: str, text: str) -> bool:
+        """Check if a section looks like a TOC/index page."""
+        t = (title or "").strip()
+        if t in TOC_TITLES:
+            return True
+        lines = text.strip().splitlines()
+        if not lines:
+            return True
+        if len(text) < MIN_SECTION_CHARS:
+            return True
+        toc_lines = sum(1 for l in lines if TOC_PATTERN.match(l))
+        if len(lines) > 0 and toc_lines / len(lines) > 0.55:
+            return True
+        return False
+
     current_page = all_text_parts[0][0]
     current_text = ""
     current_title = all_text_parts[0][2]
@@ -227,34 +245,27 @@ def _extract_sections_from_rag_doc(rag_doc: Any) -> list:
         if page_num == current_page and len(current_text) + len(text) < CHUNK_SIZE:
             current_text += "\n\n" + text
         else:
-            if current_text.strip():
-                # Skip TOC-like sections (mainly chapter lists, no prose)
-                lines = current_text.strip().splitlines()
-                toc_lines = sum(1 for l in lines if TOC_PATTERN.match(l))
-                if len(lines) > 0 and toc_lines / len(lines) < 0.5:
-                    sections.append(SectionInfo(
-                        section_id=f"sec-{len(sections)}",
-                        title=current_title or f"Section {len(sections)+1}",
-                        text=current_text.strip()[:4000],
-                        parent_title=current_parent,
-                        page=current_page,
-                    ))
+            if current_text.strip() and not _is_toc_section(current_title, current_text):
+                sections.append(SectionInfo(
+                    section_id=f"sec-{len(sections)}",
+                    title=current_title or f"Section {len(sections)+1}",
+                    text=current_text.strip()[:4000],
+                    parent_title=current_parent,
+                    page=current_page,
+                ))
             current_page = page_num
             current_text = text
             current_title = title
             current_parent = parent
 
-    if current_text.strip():
-        lines = current_text.strip().splitlines()
-        toc_lines = sum(1 for l in lines if TOC_PATTERN.match(l))
-        if len(lines) > 0 and toc_lines / len(lines) < 0.5:
-            sections.append(SectionInfo(
-                section_id=f"sec-{len(sections)}",
-                title=current_title or f"Section {len(sections)+1}",
-                text=current_text.strip()[:4000],
-                parent_title=current_parent,
-                page=current_page,
-            ))
+    if current_text.strip() and not _is_toc_section(current_title, current_text):
+        sections.append(SectionInfo(
+            section_id=f"sec-{len(sections)}",
+            title=current_title or f"Section {len(sections)+1}",
+            text=current_text.strip()[:4000],
+            parent_title=current_parent,
+            page=current_page,
+        ))
 
     return sections
 

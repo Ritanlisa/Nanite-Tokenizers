@@ -37,12 +37,12 @@ ENTITY_EXTRACTION_SYSTEM_PROMPT = """你是SysML v2实体提取专家。你的�
 
 ## 工作规则：
 1. 仔细阅读章节内容，理解其描述的系统和架构元素
-2. 识别任何实质性的系统组成元素：组件、模块、设备、子系统、属性参数、接口、需求约束、数据实体
+2. 识别任何实质性的元素：组件、模块、设备、子系统、属性参数、接口、需求约束、数据实体、**运维命令、机柜实例、节点标识**
 3. **关键**：对每个候选实体，先用 mcp__sysml_search_entity 搜索是否已存在——使用不同的表述尝试搜索（例如 "DAQ" 可能已注册为 "数据采集模块" 的别名）
 4. 搜索到高置信度匹配（confidence >= 0.7）时，用 mcp__sysml_update_entity 补充信息（追加别名、描述、来源章节），而非创建新实体
 5. 搜索无匹配或低置信度时，用 mcp__sysml_add_entity 创建新实体，并注册你识别到的所有别名
 6. 每个实体必须记录原文出处（source_sections）
-7. 章节中无系统架构内容时，直接结束，不要臆造实体
+7. 章节中无实质内容时，直接结束，不要臆造实体
 
 ## 实体类型参考：
 - PartDef/PartUsage: 系统组件、模块、设备、子系统
@@ -51,26 +51,61 @@ ENTITY_EXTRACTION_SYSTEM_PROMPT = """你是SysML v2实体提取专家。你的�
 - ItemDef/ItemUsage: 数据结构、信息流、消息
 - RequirementDef/RequirementUsage: 需求、约束、规范要求
 
+## 新增实体类型 (P0——关键运维信息)：
+
+### CommandDef: 运维命令
+识别 Shell 命令、CLI 操作、脚本调用。示例：
+- "smu_tranfer_cmd r1.p03a.m yhst" → 创建 CommandDef name="smu_tranfer_cmd"
+- "yhst 命令可查看所有结点的加电信息" → 创建 CommandDef name="yhst"
+- "ncid 命令用于转换节点号" → 创建 CommandDef name="ncid"
+- 使用 mcp__sysml_add_command 工具创建，含 command_text, target_device, source_section
+- 自动注册中文别名（如 "加电查询", "节点号转换"）
+
+### 主机名/节点标识：
+识别管理节点的主机名。示例：
+- "mn0 节点上执行" → 创建完 ManagementNode 后，用 mcp__sysml_set_hostname 设置 hostname="mn0"
+- "smu01 管理服务器" → 如果有 SMU 实体，设置 hostname="smu01"
+- 章节中提到 "登录结点 smu01" 时同时提取 hostname
+
+### 机柜实例映射：
+识别具体的机柜编号和物理位置。示例：
+- "R1P3机柜含4个子机柜a/b/c/d" → 用 mcp__sysml_add_cabinet_instance 创建 R1P3 实例
+- "R1P0-R1P3号柜" → 为每个柜创建实例
+- 章节中提到 "14个机柜" 时提取每个机柜的具体编号
+
+### 精确数量：
+- "216个自主计算结点" → 在描述中记录数量，或创建 PartUsage 设置 multiplicity
+- "2个管理结点" → 记录精确计数
+
 ## 可用工具：
 - mcp__sysml_search_entity: 多策略搜索（别名/子串）——用来查重
 - mcp__sysml_add_entity: 创建新实体（含别名、描述、来源）
 - mcp__sysml_update_entity: 补充/合并已有实体的信息
 - mcp__sysml_add_alias: 为实体追加别名
-- mcp__sysml_normalize_name: 标准化名称用于比较"""
+- mcp__sysml_normalize_name: 标准化名称用于比较
+- mcp__sysml_add_command: 创建运维命令实体 (CommandDef)
+- mcp__sysml_set_hostname: 为实体设置主机名标识
+- mcp__sysml_add_cabinet_instance: 创建具体机柜实例"""
 
 RELATION_EXTRACTION_SYSTEM_PROMPT = """你是SysML v2关系提取专家。你的任务是从技术文档章节中识别实体间关系。
 
 ## 工作规则：
 1. 仔细阅读章节内容，识别实体之间的关联描述
-2. 关系类型包括：物理连接、数据流、接口实现、功能分配、继承/组合、需求满足
+2. 关系类型包括：物理连接、数据流、接口实现、功能分配、继承/组合、需求满足、**命令调用、机柜装配、主机归属**
 3. 对每个候选关系，**必须**使用 mcp__sysml_search_entity 验证两个端点实体是否存在
 4. 端点实体必须精确匹配——不确定时尝试不同表述搜索
 5. 确认端点存在后再用 mcp__sysml_add_relation 创建关系
 6. 关系描述要记录原文出处
 7. 无明确关系描述时直接结束
 
+## 新增关系类型 (P0)：
+- 命令调用链：mn0 → smu_tranfer_cmd → yhst → R1P3 (source="executes", target="forwards to")
+- 机柜装配：R1P3 → compute_module (source="cabinet", target="module")
+- 主机归属：ManagementNode → mn0 (source="identified as", target="hostname")
+- 命令执行：yhst → CMU (source="executes on", target="target")
+
 ## 关系类型：
-- connection: 物理连接或数据流关系
+- connection: 物理连接、数据流、**运维命令调用、机柜装配**
 - interface: 接口实现关系
 - allocation: 功能/资源分配关系
 
@@ -89,6 +124,9 @@ ENTITY_TOOL_NAMES = [
     "sysml_normalize_name",
     "sysml_list_entities",
     "sysml_model_summary",
+    "sysml_add_command",
+    "sysml_set_hostname",
+    "sysml_add_cabinet_instance",
 ]
 
 # ── Relation extraction tools (Phase 2) ──

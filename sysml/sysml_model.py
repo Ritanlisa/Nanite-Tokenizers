@@ -363,6 +363,46 @@ class AllocationUsage(ConnectionUsage):  # 改为继承 ConnectionUsage
         # 分配同样不使用 connect 简写，调用父级 Usage 的 to_text
         return Usage.to_text(self, indent)
 
+class CommandDef(Definition):
+    """运维命令定义"""
+    def __init__(self, name: Optional[str] = None, short_name: Optional[str] = None,
+                 is_abstract: bool = False, is_variation: bool = False,
+                 supertypes: List[str] = [],
+                 command_text: str = "",
+                 target_device: Optional[str] = None,
+                 invocation: Optional[str] = None,
+                 source_section: Optional[str] = None):
+        super().__init__(name, short_name, is_abstract, is_variation, supertypes)
+        self.command_text = command_text
+        self.target_device = target_device
+        self.invocation = invocation
+        self.source_section = source_section
+
+    def def_kind(self) -> str:
+        return "command def"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        name_part = self._name_part()
+        header = f"{prefix}{self.def_prefix()}{self.def_kind()} {name_part}"
+        body_lines = []
+        if self.command_text:
+            body_lines.append(f"{prefix}    doc /* command_text = {self.command_text} */;")
+        if self.target_device:
+            body_lines.append(f"{prefix}    doc /* target_device = {self.target_device} */;")
+        if self.invocation:
+            body_lines.append(f"{prefix}    doc /* invocation = {self.invocation} */;")
+        if self.source_section:
+            body_lines.append(f"{prefix}    doc /* source_section = {self.source_section} */;")
+        body = self.members_to_text(indent + 1)
+        if body:
+            body_lines.append(body)
+        if body_lines:
+            return f"{header} {{\n" + "\n".join(body_lines) + f"\n{prefix}}}"
+        else:
+            return f"{header};"
+
+
 class RequirementDef(Definition):
     def def_kind(self) -> str:
         return "requirement def"

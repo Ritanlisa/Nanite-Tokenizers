@@ -24,6 +24,7 @@ SYML_GRAMMAR = r"""
             | "interface" "def" -> interface_def
             | "allocation" "def" -> allocation_def
             | "requirement" "def" -> requirement_def
+            | "command" "def" -> command_def
     definition_body: "{" member* "}" | ";"
 
     usage: usage_prefix usage_kind IDENTIFIER multiplicity_opt? specialization_opt? value_opt? usage_body
@@ -152,6 +153,9 @@ class SysMLTransformer(Transformer):
 
     def requirement_def(self):
         return RequirementDef()
+
+    def command_def(self):
+        return CommandDef()
 
     # ── usage ──
     def usage(self, prefix, kind, name_token, multiplicity, specialization, value, body):

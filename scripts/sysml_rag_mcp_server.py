@@ -54,7 +54,7 @@ from sysml.sysml_model import (
     PartDef, PartUsage, AttributeDef, AttributeUsage,
     PortDef, PortUsage, ItemDef, ItemUsage,
     RequirementDef, RequirementUsage,
-    ConnectionDef,
+    ConnectionDef, CommandDef,
 )
 from sysml.sysml_manager import SysMLManager, AliasRegistry
 from sysml.hv_resolver import HVResolver
@@ -90,6 +90,7 @@ def _entity_type_name(entity: Any) -> str:
         InterfaceUsage: "接口使用", InterfaceDef: "接口定义",
         AllocationUsage: "分配使用", AllocationDef: "分配定义",
         RequirementDef: "需求定义", RequirementUsage: "需求使用",
+        CommandDef: "命令定义",
         Package: "包",
     }
     for cls, name in type_map.items():
@@ -1452,6 +1453,219 @@ def sysml_list_hvs(entity_name: Optional[str] = None) -> Dict[str, Any]:
 
 
 # ══════════════════════════════════════════════════════════════
+# P0 手工注入工具 —— command / hostname / cabinet
+# ══════════════════════════════════════════════════════════════
+
+def sysml_add_command(
+    name: str,
+    command_text: str,
+    target_device: Optional[str] = None,
+    description: Optional[str] = None,
+    invocation: Optional[str] = None,
+    source_section: Optional[str] = None,
+    aliases: Optional[List[str]] = None,
+    parent_package: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    创建一条运维命令实体 (CommandDef)。
+
+    将 Shell 命令、CLI 操作等以 CommandDef 类型存入知识图谱，
+    自动创建与 target_device 的 "executes" 连接。
+
+    Args:
+        name: 命令名 (如 "yhst", "smu_tranfer_cmd")
+        command_text: 命令文本
+        target_device: 命令执行目标设备名 (如 "CMU", "SMU", "ManagementNode")
+        description: 命令功能描述
+        invocation: 完整调用示例
+        source_section: 文档出处 (如 "6.3")
+        aliases: 别名列表
+        parent_package: 父包限定名 (默认 "Commands")
+
+    Returns:
+        创建结果: qualified_name + 连接信息
+    """
+    mgr = _get_manager()
+    pkg = parent_package or "Commands"
+    props = {"command_text": command_text}
+    if target_device:
+        props["target_device"] = target_device
+    if invocation:
+        props["invocation"] = invocation
+    if source_section:
+        props["source_section"] = source_section
+
+    element = mgr.add_entity_with_metadata(
+        entity_type="CommandDef",
+        name=name,
+        parent_package=pkg,
+        description=description,
+        properties=props,
+        aliases=aliases,
+        source_sections=[source_section] if source_section else None,
+    )
+    if element is None:
+        return {"ok": False, "error": "Failed to create CommandDef entity"}
+
+    result = {
+        "ok": True,
+        "qualified_name": element.qualified_name,
+        "name": element.name,
+        "type": "CommandDef",
+    }
+
+    # Auto-connect to target_device
+    if target_device:
+        target = _find_any_element(mgr, target_device)
+        if target:
+            rel = mgr.add_relation(
+                relation_type="connection",
+                source_name=element.name,
+                target_name=target_device,
+                name=f"{element.name}_runs_on_{target_device}",
+                parent_package=pkg,
+                role_source="executed",
+                role_target="target",
+            )
+            if rel:
+                result["connected_to"] = target_device
+                result["connection"] = rel.qualified_name
+
+    return result
+
+
+def sysml_set_hostname(
+    entity_name: str,
+    hostname: str,
+) -> Dict[str, Any]:
+    """
+    为 SysML 实体设置 hostname 标识并注册别名。
+
+    对 ManagementNode、LoginNode 等设置 hostname=mn0，
+    使得 sysml_retrieve("mn0") 可以通过别名匹配到该实体。
+
+    Args:
+        entity_name: 实体名称 (如 "ManagementNode")
+        hostname: 主机名标识 (如 "mn0")
+
+    Returns:
+        操作结果
+    """
+    mgr = _get_manager()
+
+    entity = _find_any_element(mgr, entity_name)
+    if entity is None:
+        return {"ok": False, "error": f"Entity not found: {entity_name}"}
+
+    qn = entity.qualified_name
+
+    # Update metadata with hostname property
+    ok = mgr.update_entity_metadata(
+        qualified_name=qn,
+        update_properties={"_hostname": hostname},
+    )
+    if not ok:
+        return {"ok": False, "error": f"Failed to update metadata for: {entity_name}"}
+
+    # Register hostname as alias so sysml_retrieve("mn0") works
+    mgr.add_alias(qn, hostname)
+
+    return {
+        "ok": True,
+        "entity": entity_name,
+        "qualified_name": qn,
+        "hostname": hostname,
+        "aliases": mgr._alias_registry.get_aliases(qn),
+    }
+
+
+def sysml_add_cabinet_instance(
+    cabinet_id: str,
+    cabinet_type: str = "CustomCabinet",
+    sub_units: Optional[List[str]] = None,
+    description: Optional[str] = None,
+    location: Optional[str] = None,
+    parent_package: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    基于抽象机柜类型创建具体机柜实例。
+
+    例如将 CustomCabinet 实例化为 R1P3，并创建 a/b/c/d 子机柜。
+
+    Args:
+        cabinet_id: 机柜编号 (如 "R1P3")
+        cabinet_type: 机柜类型 (如 "CustomCabinet", "StandardCabinet")
+        sub_units: 子机柜列表 (如 ["R1P3a", "R1P3b", "R1P3c", "R1P3d"])
+        description: 机柜描述
+        location: 物理位置
+        parent_package: 父包 (默认 "Cabinets")
+
+    Returns:
+        创建的所有实体 qualified_names
+    """
+    mgr = _get_manager()
+    pkg = parent_package or "Cabinets"
+    props = {"cabinet_type": cabinet_type}
+    if location:
+        props["location"] = location
+
+    cabinet = mgr.add_entity_with_metadata(
+        entity_type="PartUsage",
+        name=cabinet_id,
+        parent_package=pkg,
+        description=description,
+        properties=props,
+        aliases=[cabinet_id],
+    )
+    if cabinet is None:
+        return {"ok": False, "error": f"Failed to create cabinet: {cabinet_id}"}
+
+    # Set type_refs via update
+    mgr.update_entity_metadata(
+        qualified_name=cabinet.qualified_name,
+        type_refs=[cabinet_type],
+    )
+
+    result = {
+        "ok": True,
+        "cabinet": cabinet.qualified_name,
+        "type_ref": cabinet_type,
+    }
+
+    # Create sub-units
+    if sub_units:
+        sub_qns = []
+        for sub in sub_units:
+            sub_entity = mgr.add_entity_with_metadata(
+                entity_type="PartUsage",
+                name=sub,
+                parent_package=pkg,
+                description=f"{cabinet_id} 子机柜 {sub}",
+                aliases=[sub],
+            )
+            if sub_entity:
+                mgr.update_entity_metadata(
+                    qualified_name=sub_entity.qualified_name,
+                    type_refs=["PhysicalComponent"],
+                )
+            if sub_entity:
+                sub_qns.append(sub_entity.qualified_name)
+                # Connect sub-unit to parent cabinet
+                mgr.add_relation(
+                    relation_type="connection",
+                    source_name=sub,
+                    target_name=cabinet_id,
+                    name=f"{sub}_in_{cabinet_id}",
+                    parent_package=pkg,
+                    role_source="child",
+                    role_target="parent",
+                )
+        result["sub_units"] = sub_qns
+
+    return result
+
+
+# ══════════════════════════════════════════════════════════════
 # 核心检索工具 —— sysml_retrieve
 # ══════════════════════════════════════════════════════════════
 
@@ -1747,6 +1961,41 @@ TOOL_DEFINITIONS = {
             "entity_name": {"type": "string", "description": "实体名称（可选）", "default": None},
         },
     },
+    # ── P0 注入工具 ──
+    "sysml_add_command": {
+        "function": sysml_add_command,
+        "description": "创建运维命令实体(CommandDef)。将Shell命令/CLI操作存入知识图谱，自动连接目标设备。",
+        "parameters": {
+            "name": {"type": "string", "description": "命令名 (如 yhst, smu_tranfer_cmd)"},
+            "command_text": {"type": "string", "description": "命令文本"},
+            "target_device": {"type": "string", "description": "执行目标设备名", "default": None},
+            "description": {"type": "string", "description": "命令功能描述", "default": None},
+            "invocation": {"type": "string", "description": "完整调用示例", "default": None},
+            "source_section": {"type": "string", "description": "文档出处 (如 6.3)", "default": None},
+            "aliases": {"type": "array", "items": {"type": "string"}, "description": "别名列表", "default": None},
+            "parent_package": {"type": "string", "description": "父包 (默认 Commands)", "default": None},
+        },
+    },
+    "sysml_set_hostname": {
+        "function": sysml_set_hostname,
+        "description": "为实体设置hostname标识并注册别名，使sysml_retrieve可通过主机名匹配实体。",
+        "parameters": {
+            "entity_name": {"type": "string", "description": "实体名称 (如 ManagementNode)"},
+            "hostname": {"type": "string", "description": "主机名 (如 mn0)"},
+        },
+    },
+    "sysml_add_cabinet_instance": {
+        "function": sysml_add_cabinet_instance,
+        "description": "基于抽象机柜类型创建具体机柜实例。例如将CustomCabinet实例化为R1P3并创建a/b/c/d子机柜。",
+        "parameters": {
+            "cabinet_id": {"type": "string", "description": "机柜编号 (如 R1P3)"},
+            "cabinet_type": {"type": "string", "description": "机柜类型 (如 CustomCabinet)", "default": "CustomCabinet"},
+            "sub_units": {"type": "array", "items": {"type": "string"}, "description": "子机柜列表", "default": None},
+            "description": {"type": "string", "description": "机柜描述", "default": None},
+            "location": {"type": "string", "description": "物理位置", "default": None},
+            "parent_package": {"type": "string", "description": "父包 (默认 Cabinets)", "default": None},
+        },
+    },
 }
 
 
@@ -1755,6 +2004,10 @@ TOOL_DEFINITIONS = {
 QUERY_AGENT_TOOL_NAMES = [
     "sysml_retrieve",
     "sysml_load_model",
+    "sysml_add_command",
+    "sysml_set_hostname",
+    "sysml_add_cabinet_instance",
+    "sysml_resolve_hv",
 ]
 
 # Build agents: all tools available (via ENTITY_TOOL_NAMES etc in kg_build_agent.py)
