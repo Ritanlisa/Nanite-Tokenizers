@@ -11,3 +11,19 @@ test
 test
 test
 test
+[2026-05-15 11:17:48] 测试反馈：sysml_retrieve工具工作正常，但k=2时关系图过大
+[2026-05-15 11:17:48] MCP调用测试：反馈工具正常工作
+
+[QA:mn0_power_query] 24408 chars KG context, model=qwen3:8b, entities_retrieved=12
+
+[2026-05-16 12:42:12] QA session: db=AIOPS_New, vector_chunks=0, regex_chunks=24, model=qwen3:8b
+  question=天河高性能计算机系统的mn0节点上只有命令行可用，需要怎么做才能获取机柜R1P3上所有节点的加电信息？
+  answer_len=737
+
+[2026-05-18 14:35:40] QA session (sysml-only): db=AIOPS_New, entities_retrieved=0, not_found=0, model=qwen3:8b
+  question=天河高性能计算机系统的mn0节点上只有命令行可用，需要怎么做才能获取机柜R1P3上所有节点的加电信息？
+  answer_len=251
+
+[2026-05-18 14:50:41] QA session (sysml-only): db=AIOPS, entities_retrieved=4, not_found=0, model=qwen3:8b
+  question=天河高性能计算机系统的mn0节点上只有命令行可用，需要怎么做才能获取机柜R1P3上所有节点的加电信息？
+  answer_len=539

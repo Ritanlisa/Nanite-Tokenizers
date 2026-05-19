@@ -2,6 +2,7 @@ import logging
 import os
 from typing import Callable, Iterable, Optional, Tuple
 
+import _patch_py314  # noqa: F401  (Python 3.14+ PEP 649 compatibility)
 import chromadb
 import faiss
 import numpy as np

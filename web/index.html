@@ -350,6 +350,108 @@
         border: 1px solid rgba(255, 255, 255, 0.12);
       }
 
+      .stop-btn {
+        background: #d32f2f;
+        color: #fff;
+        border-color: #ef5350;
+      }
+
+      .stop-btn:hover {
+        background: #b71c1c;
+        box-shadow: 0 12px 24px rgba(211, 47, 47, 0.3);
+      }
+
+      .stop-btn.hidden {
+        display: none;
+      }
+
+      .composer-controls {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-top: 4px;
+      }
+
+      .auto-approve-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        color: var(--muted);
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .switch {
+        position: relative;
+        display: inline-block;
+        width: 36px;
+        height: 20px;
+        flex-shrink: 0;
+      }
+
+      .switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+      }
+
+      .switch .slider {
+        position: absolute;
+        cursor: pointer;
+        inset: 0;
+        background: rgba(255, 255, 255, 0.15);
+        border-radius: 20px;
+        transition: background 0.2s;
+      }
+
+      .switch .slider::before {
+        content: "";
+        position: absolute;
+        width: 16px;
+        height: 16px;
+        left: 2px;
+        bottom: 2px;
+        background: #fff;
+        border-radius: 50%;
+        transition: transform 0.2s;
+      }
+
+      .switch input:checked + .slider {
+        background: var(--accent);
+      }
+
+      .switch input:checked + .slider::before {
+        transform: translateX(16px);
+      }
+
+      .tool-confirm-detail {
+        margin-top: 12px;
+        background: rgba(0, 0, 0, 0.3);
+        border-radius: 10px;
+        padding: 12px;
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 13px;
+        max-height: 300px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+
+      .tool-confirm-detail .label {
+        color: var(--accent);
+        font-family: "Space Grotesk", system-ui, sans-serif;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        margin-bottom: 4px;
+      }
+
+      .tool-confirm-detail .value {
+        color: var(--text);
+        margin-bottom: 10px;
+      }
+
       .db-checklist {
         display: flex;
         flex-direction: column;
@@ -1277,9 +1379,19 @@
                   <button id="mcpToolQuickSelect" class="icon-button" title="Use MCP Tools" aria-label="Use MCP Tools">
                     <svg class="mono-book-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="8" width="18" height="10" rx="2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><rect x="8" y="4" width="8" height="4" rx="1" fill="currentColor"/></svg>
                   </button>
+                  <button id="stopBtn" class="stop-btn hidden" title="Stop" aria-label="Stop">&#9632;</button>
                   <button id="send" title="Send" aria-label="Send">➤</button>
                   <button id="reset" title="Reset" aria-label="Reset">⟲</button>
                 </div>
+              </div>
+              <div class="composer-controls">
+                <label class="auto-approve-label" title="Auto-approve tool execution requests">
+                  <span id="autoApproveLabel">Auto-approve</span>
+                  <span class="switch">
+                    <input id="autoApproveCheck" type="checkbox" />
+                    <span class="slider"></span>
+                  </span>
+                </label>
               </div>
             </div>
 
@@ -1578,6 +1690,10 @@
       let ragDbStatsReqId = 0;
       let requestResolver = null;
       let suppressChatAutoScroll = false;
+      let abortController = null;
+      let autoApprove = false;
+      let toolConfirmPending = false;
+      let toolConfirmCheckTimer = null;
       let selectedRagDocName = "";
       let ragDocNames = [];
       let ragUploadingDocs = [];
@@ -1779,6 +1895,13 @@
           pendingOutput: "(waiting for tool output...)",
           emptyOutput: "(empty output)",
           toolCallingInProgress: "(tool calling)",
+          autoApproveLabel: "Auto-approve",
+          toolConfirmTitle: "Approve Tool",
+          toolConfirmMessage: "The model requests to execute the following tool. Approve?",
+          toolName: "Tool",
+          toolArgs: "Arguments",
+          generationStopped: "Generation stopped by user",
+          stop: "Stop",
         },
         zh: {
           title: "Nanite 智能体",
@@ -1930,6 +2053,13 @@
           pendingOutput: "（等待工具返回中...）",
           emptyOutput: "（空输出）",
           toolCallingInProgress: "（工具调用中）",
+          autoApproveLabel: "自动批准",
+          toolConfirmTitle: "审批工具",
+          toolConfirmMessage: "模型请求执行以下工具，是否批准？",
+          toolName: "工具名称",
+          toolArgs: "参数",
+          generationStopped: "用户已停止生成",
+          stop: "停止",
         },
       };
 
@@ -2186,6 +2316,10 @@
         sessionLabel.textContent = t("sessionLabel");
         if (requestCancelBtn) requestCancelBtn.textContent = t("modalCancel");
         if (requestConfirmBtn) requestConfirmBtn.textContent = t("modalConfirm");
+        const autoApproveLabel = document.getElementById("autoApproveLabel");
+        if (autoApproveLabel) autoApproveLabel.textContent = t("autoApproveLabel");
+        const stopBtnTitle = document.getElementById("stopBtn");
+        if (stopBtnTitle) stopBtnTitle.title = t("stop");
         if (settingsSnapshot) {
           renderSettings(settingsSnapshot);
         }
@@ -3574,7 +3708,6 @@
         const current = getActiveSession();
         const ragDbNames = getCurrentRequestRagDbNames();
 
-        // 构建当前分支的所有消息
         const path = getActivePath(current);
         const messages = [];
         for (const nodeId of path) {
@@ -3596,6 +3729,7 @@
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: options.signal || null,
           body: JSON.stringify({
             message: prompt,
             session_id: sessionId,
@@ -3613,6 +3747,7 @@
             force_agent: Boolean(options.forceAgent),
             messages: messages,
             conversation_path: path,
+            auto_approve: autoApprove,
           }),
         });
 
@@ -3622,7 +3757,7 @@
         }
 
         if (stream) {
-          return await readStream(response, onUpdate);
+          return await readStream(response, onUpdate, options.signal || null);
         }
 
         const data = await response.json();
@@ -3673,6 +3808,7 @@
         renderChatFromSession();
 
         setBusy(true);
+        abortController = new AbortController();
         const agentNode = createNode("agent", "", {
           toolCalls: [],
           generationStartedAt: Date.now(),
@@ -3692,7 +3828,8 @@
             (text) => {
               agentNode.text = text;
               refreshNodeBubble(currentSession, agentNode.id);
-            }
+            },
+            { signal: abortController.signal }
           );
 
           const parsedTools = parseToolMarkup(answerText || "");
@@ -3719,6 +3856,9 @@
             setActiveStream(null, null);
             refreshNodeBubble(currentSession, agentNode.id);
           }
+          abortController = null;
+          toolConfirmPending = false;
+          stopToolConfirmPolling();
           setBusy(false);
         }
       };
@@ -3767,6 +3907,7 @@
         renderChatFromSession();
 
         setBusy(true);
+        abortController = new AbortController();
         await resetServerSessionState(session.id);
         try {
           const stream = streamSelect.value === "true";
@@ -3778,7 +3919,7 @@
               responseNode.text = text;
               refreshNodeBubble(session, responseNode.id);
             },
-            { forceAgent: true }
+            { forceAgent: true, signal: abortController.signal }
           );
           const parsedTools = parseToolMarkup(answerText || "");
           const toolCalls = mergeToolCalls([], parsedTools.calls || []);
@@ -3804,6 +3945,9 @@
             setActiveStream(null, null);
             refreshNodeBubble(session, responseNode.id);
           }
+          abortController = null;
+          toolConfirmPending = false;
+          stopToolConfirmPolling();
           setBusy(false);
         }
       };
@@ -3832,6 +3976,7 @@
 
         await resetServerSessionState(session.id);
         setBusy(true);
+        abortController = new AbortController();
         try {
           const stream = streamSelect.value === "true";
           const answerText = await requestAgentAnswer(
@@ -3842,7 +3987,7 @@
               responseNode.text = text;
               refreshNodeBubble(session, responseNode.id);
             },
-            { forceAgent: true }
+            { forceAgent: true, signal: abortController.signal }
           );
           responseNode.text = answerText;
           const parsedTools = parseToolMarkup(answerText || "");
@@ -3867,6 +4012,9 @@
             setActiveStream(null, null);
             refreshNodeBubble(session, responseNode.id);
           }
+          abortController = null;
+          toolConfirmPending = false;
+          stopToolConfirmPolling();
           setBusy(false);
         }
       };
@@ -4019,6 +4167,141 @@
         }
       };
 
+      const startToolConfirmPolling = () => {
+        if (toolConfirmCheckTimer) return;
+        let attempts = 0;
+        const maxAttempts = 60;
+
+        const poll = async () => {
+          attempts++;
+          if (attempts > maxAttempts) {
+            stopToolConfirmPolling();
+            toolConfirmPending = false;
+            return;
+          }
+          try {
+            const resp = await fetch(`/api/pending-tool-approval?session_id=${encodeURIComponent(sessionId)}`);
+            const data = await resp.json();
+            if (data.pending) {
+              stopToolConfirmPolling();
+              showToolConfirmDialog(data);
+            }
+          } catch (err) {
+            console.warn("Tool confirm poll error:", err);
+          }
+        };
+
+        toolConfirmCheckTimer = setInterval(poll, 800);
+        poll();
+      };
+
+      const stopToolConfirmPolling = () => {
+        if (toolConfirmCheckTimer !== null) {
+          clearInterval(toolConfirmCheckTimer);
+          toolConfirmCheckTimer = null;
+        }
+      };
+
+      const showToolConfirmDialog = (data) => {
+        const toolName = data.tool_name || "tool";
+        const toolArgs = data.tool_args || {};
+        const argsStr = JSON.stringify(toolArgs, null, 2);
+        const callId = data.call_id || "";
+
+        requestTitle.textContent = `${t("toolConfirmTitle")}: ${toolName}`;
+        requestMessage.textContent = t("toolConfirmMessage");
+
+        let detailEl = document.getElementById("toolConfirmDetail");
+        if (!detailEl) {
+          detailEl = document.createElement("div");
+          detailEl.id = "toolConfirmDetail";
+          detailEl.className = "tool-confirm-detail";
+          requestMessage.insertAdjacentElement("afterend", detailEl);
+        }
+
+        detailEl.innerHTML = `
+          <div class="label">${t("toolName")}</div>
+          <div class="value">${escapeHtml(toolName)}</div>
+          <div class="label">${t("toolArgs")}</div>
+          <div class="value">${escapeHtml(argsStr)}</div>
+        `;
+
+        requestInput.style.display = "none";
+        requestModal.classList.add("visible");
+        requestModal.setAttribute("aria-hidden", "false");
+
+        // Replace confirm handler temporarily
+        const newHandler = async () => {
+          requestModal.classList.remove("visible");
+          requestModal.setAttribute("aria-hidden", "true");
+          try {
+            await fetch("/api/confirm-tool", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ session_id: sessionId, call_id: callId, approved: true }),
+            });
+          } catch (err) {
+            console.error("Confirm tool error:", err);
+          }
+          toolConfirmPending = false;
+          if (detailEl) detailEl.remove();
+        };
+        requestConfirmBtn._clickHandler = newHandler;
+
+        const cancelHandler = async () => {
+          requestModal.classList.remove("visible");
+          requestModal.setAttribute("aria-hidden", "true");
+          try {
+            await fetch("/api/confirm-tool", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ session_id: sessionId, call_id: callId, approved: false }),
+            });
+          } catch (err) {
+            console.error("Reject tool error:", err);
+          }
+          toolConfirmPending = false;
+          if (detailEl) detailEl.remove();
+        };
+        requestCancelBtn._clickHandler = cancelHandler;
+      };
+
+      const handleStopClick = async () => {
+        if (abortController) {
+          abortController.abort();
+          abortController = null;
+        }
+        try {
+          await fetch("/api/stop-generation", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: sessionId }),
+          });
+        } catch (err) {
+          console.error("Stop generation error:", err);
+        }
+        setBusy(false);
+        toolConfirmPending = false;
+        stopToolConfirmPolling();
+        if (requestModal) {
+          requestModal.classList.remove("visible");
+          requestModal.setAttribute("aria-hidden", "true");
+        }
+        const detailEl = document.getElementById("toolConfirmDetail");
+        if (detailEl) detailEl.remove();
+        const current = getActiveSession();
+        if (current && activeStream.nodeId) {
+          const node = getNode(current, activeStream.nodeId);
+          if (node) {
+            node.text = (node.text || "") + `\n\n[${t("generationStopped")}]`;
+            refreshNodeBubble(current, activeStream.nodeId);
+          }
+        }
+        if (activeStream.sessionId && activeStream.nodeId) {
+          setActiveStream(null, null);
+        }
+      };
+
       const setBusy = (busy) => {
         sendButton.disabled = busy;
         resetButton.disabled = busy;
@@ -4027,6 +4310,11 @@
         saveRestartButton.disabled = busy;
         reloadSettingsButton.disabled = busy;
         chat.classList.toggle("busy", Boolean(busy));
+        // Show/hide stop button
+        const stopBtn = document.getElementById("stopBtn");
+        if (stopBtn) {
+          stopBtn.classList.toggle("hidden", !busy);
+        }
       };
 
       const openSettings = () => {
@@ -4614,20 +4902,33 @@
         }
       };
 
-      const readStream = async (response, onUpdate) => {
+      const readStream = async (response, onUpdate, signal) => {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-        const scrollThreshold = 100; // 距离底部多少像素视为“在底部”
+        const scrollThreshold = 100;
+
+        const checkToolConfirm = (text) => {
+          const marker = "@TOOL_CONFIRM_REQUIRED@";
+          const idx = text.lastIndexOf(marker);
+          if (idx === -1) return;
+          if (toolConfirmPending) return;
+          toolConfirmPending = true;
+          startToolConfirmPolling();
+        };
 
         while (true) {
+          if (signal && signal.aborted) {
+            reader.cancel();
+            break;
+          }
           const { value, done } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
+          checkToolConfirm(buffer);
           if (onUpdate) {
             onUpdate(buffer);
           }
-          // 自动滚动逻辑：仅当用户已在底部时才滚动
           const { scrollTop, clientHeight, scrollHeight } = chat;
           const atBottom = scrollHeight - (scrollTop + clientHeight) < scrollThreshold;
           if (atBottom) {
@@ -4768,6 +5069,21 @@
       sendButton.addEventListener("click", sendMessage);
       resetButton.addEventListener("click", resetSession);
       newSessionButton.addEventListener("click", newSession);
+      const stopBtn = document.getElementById("stopBtn");
+      if (stopBtn) {
+        stopBtn.addEventListener("click", handleStopClick);
+      }
+
+      const autoApproveCheck = document.getElementById("autoApproveCheck");
+      if (autoApproveCheck) {
+        const saved = localStorage.getItem("nanite_auto_approve");
+        autoApprove = saved === "true";
+        autoApproveCheck.checked = autoApprove;
+        autoApproveCheck.addEventListener("change", () => {
+          autoApprove = autoApproveCheck.checked;
+          localStorage.setItem("nanite_auto_approve", autoApprove ? "true" : "false");
+        });
+      }
 
       attachButton.addEventListener("click", () => imageInput.click());
       if (ragDbSelect) {
@@ -5591,13 +5907,35 @@
         mcpToolUseApplyBtn.addEventListener("click", applyMcpToolUseSelection);
       }
       if (requestCloseX) {
-        requestCloseX.addEventListener("click", () => closeRequestModal(null));
+        requestCloseX.addEventListener("click", () => {
+          if (requestCancelBtn._clickHandler) {
+            requestCancelBtn._clickHandler();
+            requestCancelBtn._clickHandler = null;
+            return;
+          }
+          closeRequestModal(null);
+        });
       }
       if (requestCancelBtn) {
         requestCancelBtn.addEventListener("click", () => closeRequestModal(null));
       }
+      if (requestCancelBtn) {
+        requestCancelBtn.addEventListener("click", () => {
+          if (requestCancelBtn._clickHandler) {
+            requestCancelBtn._clickHandler();
+            requestCancelBtn._clickHandler = null;
+            return;
+          }
+          closeRequestModal(null);
+        });
+      }
       if (requestConfirmBtn) {
         requestConfirmBtn.addEventListener("click", () => {
+          if (requestConfirmBtn._clickHandler) {
+            requestConfirmBtn._clickHandler();
+            requestConfirmBtn._clickHandler = null;
+            return;
+          }
           if (requestInput.style.display === "none") {
             closeRequestModal(true);
           } else {
@@ -5754,8 +6092,15 @@
           };
           if (capabilities.tool_calling_supported === false) {
             toolBanner.classList.add("visible");
+            const reason = data.tool_calling_error;
+            if (reason) {
+              toolBanner.textContent = t("toolBanner") + ": " + reason;
+            } else {
+              toolBanner.textContent = t("toolBanner");
+            }
           } else {
             toolBanner.classList.remove("visible");
+            toolBanner.textContent = t("toolBanner");
           }
         } catch (err) {
           console.error(err);

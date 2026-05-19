@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any, Dict, List, Optional, Type
 
 from langchain.tools import BaseTool
 from pydantic import BaseModel, Field, create_model
 
 from .mcp_session import MCPSession
+import tool_approval
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +86,36 @@ class MCPToolWrapper(BaseTool):
             tool_description=description,
         )
 
+    async def _check_approval(self, kwargs: Dict[str, Any]) -> Optional[str]:
+        """Check if tool execution is approved. Returns None if approved, or rejection message."""
+        from tool_usage import get_current_session_id
+        session_id = get_current_session_id()
+        if not session_id:
+            return None
+        call_id = str(uuid.uuid4())
+        cleaned = self._clean_kwargs(kwargs)
+        approved = await tool_approval.request_tool_approval(
+            session_id, call_id, self.tool_name, cleaned,
+        )
+        if not approved:
+            return f"[Tool execution rejected by user: {self.tool_name}]"
+        return None
+
     def _run(self, **kwargs: Any) -> str:
         """同步执行"""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
+            rejected = asyncio.run(self._check_approval(kwargs))
+            if rejected:
+                return rejected
             return asyncio.run(self.session.call_tool(self.tool_name, self._clean_kwargs(kwargs)))
+
+        rejected = asyncio.run_coroutine_threadsafe(
+            self._check_approval(kwargs), loop,
+        ).result(timeout=30)
+        if rejected:
+            return rejected
 
         if self.session._timeout:
             coro = asyncio.wait_for(
@@ -105,6 +131,9 @@ class MCPToolWrapper(BaseTool):
 
     async def _arun(self, **kwargs: Any) -> str:
         """异步执行"""
+        rejected = await self._check_approval(kwargs)
+        if rejected:
+            return rejected
         return await self.session.call_tool(self.tool_name, self._clean_kwargs(kwargs))
 
     @staticmethod

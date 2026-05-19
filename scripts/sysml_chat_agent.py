@@ -1,11 +1,10 @@
 """
-SysML Chat Agent (Search-then-answer)
-—— Pre-fetches sections, enriches with live values, then asks LLM to answer.
+SysML Chat Agent
+—— Uses sysml_retrieve to pull entity + k-layer graph, then asks LLM to answer.
 """
-
 from __future__ import annotations
 
-import asyncio, logging, json
+import asyncio, logging, json, re
 from pathlib import Path
 from typing import Optional, List
 
@@ -25,12 +24,12 @@ from pydantic import SecretStr
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are a hardware maintenance assistant for the Huchao supercomputer.
-Answer questions based on the document sections provided.
+SYSTEM_PROMPT = """You are a QA agent for the Huchao supercomputer SysML knowledge graph.
+Answer questions based on entity information retrieved from the knowledge graph.
 If live values (temperature, fan speed, etc.) are available, include them.
 If the information is insufficient, say so clearly.
 
-Be concise and accurate."""
+Be concise and accurate. Use Chinese unless the user asks in English."""
 
 
 class SysMLChatAgent:
@@ -88,77 +87,143 @@ class SysMLChatAgent:
         except Exception as e:
             return json.dumps({"error": str(e)})
 
+    def _extract_entity_names(self, message: str) -> list[str]:
+        """Extract candidate entity names from user message."""
+        candidates: list[str] = []
+        msg = message.strip()
+
+        # Quoted names
+        quoted = re.findall(r'["\'""\u300c\u300d]([^"\'""\u300c\u300d]+)["\'""\u300c\u300d]', msg)
+        candidates.extend(quoted)
+
+        # Chinese compound names matching common patterns
+        patterns = [
+            r'([\u4e00-\u9fff]{2,8}(?:模块|系统|节点|引擎|服务|仪表盘|数据库|传感器|计算机|设备|组件|接口|控制器|处理器|存储器|网络|总线|通道))',
+        ]
+        for pat in patterns:
+            found = re.findall(pat, msg)
+            candidates.extend(found)
+
+        # General Chinese words (2-6 chars) as fallback
+        if not candidates:
+            noise = {'什么', '哪个', '怎么', '为什么', '如何', '请问', '帮我', '我想', '可以', '是否',
+                     '有没有', '在哪里', '是什么', '怎么样', '好不好', '多大', '多少', '哪些'}
+            words = re.findall(r'[\u4e00-\u9fff]{2,6}', msg)
+            candidates.extend([w for w in words if w not in noise][:5])
+
+        seen = set()
+        result = []
+        for c in candidates:
+            if c not in seen:
+                seen.add(c)
+                result.append(c)
+        return result[:5]
+
+    def _build_retrieval_context(self, retrieve_result: dict) -> str:
+        """Build readable context from sysml_retrieve result."""
+        if not retrieve_result.get("ok"):
+            return ""
+
+        entity = retrieve_result.get("entity", {})
+        graph = retrieve_result.get("relationship_graph", {})
+
+        parts = []
+        parts.append(f"Entity: {entity.get('name', '?')} ({entity.get('type', entity.get('class', '?'))})")
+
+        meta = entity.get("metadata", {})
+        if meta.get("description"):
+            parts.append(f"Description: {meta['description']}")
+        if meta.get("properties"):
+            parts.append(f"Properties: {json.dumps(meta['properties'], ensure_ascii=False)}")
+        if entity.get("aliases"):
+            parts.append(f"Aliases: {', '.join(entity['aliases'])}")
+
+        members = entity.get("members", [])
+        if members:
+            member_lines = [f"  - {m.get('type','?')} {m.get('name','')}" + (f" = {m['value']}" if m.get('value') else "")
+                          for m in members[:20]]
+            parts.append(f"Members:\n" + "\n".join(member_lines))
+
+        total_nodes = graph.get("total_nodes", 0)
+        total_edges = graph.get("total_edges", 0)
+        if total_nodes > 1 or total_edges > 0:
+            parts.append(f"\nRelationship Graph (depth={graph.get('depth',0)}): {total_nodes} nodes, {total_edges} edges")
+            nodes = graph.get("nodes", {})
+            parts.append(f"Nodes: {', '.join(f'{n}({v.get('type',v.get('class','?'))})' for n,v in nodes.items())}")
+            for e in graph.get("edges", []):
+                parts.append(f"  {e['from']} --[{e.get('relation',{}).get('name','?')}]--> {e['to']}")
+
+        return "\n".join(parts)
+
     async def chat(self, message: str, history: Optional[List[dict]] = None) -> str:
         if not self._initialized:
             await self.initialize()
 
-        # Step 1: Search for relevant sections
-        search_result = await self._call_mcp("sysml_search_sections", {"query": message, "max_results": 5})
-        try:
-            search_data = json.loads(search_result)
-            sections = search_data.get("sections", [])
-        except Exception:
-            sections = []
+        # Step 1: Extract candidate entity names
+        candidates = self._extract_entity_names(message)
+        logger.info(f"Candidates: {candidates}")
 
-        # Step 2: Get enriched content for top 2 sections
+        # Step 2: Call sysml_retrieve for each candidate
         context_parts = []
-        for sec in sections[:2]:
-            sec_id = sec.get("id", "")
-            if not sec_id:
-                continue
-            sec_result = await self._call_mcp("sysml_get_section", {"section_id": sec_id, "enrich": True})
-            try:
-                sec_data = json.loads(sec_result)
-                enriched = sec_data.get("enriched_text", sec_data.get("raw_text", ""))
-                if enriched:
-                    context_parts.append(f"[{sec.get('title', sec_id)}]\n{enriched}")
-            except Exception:
-                pass
+        retrieved = set()
+        for name in candidates:
+            for k_val in [1, 2, 0]:
+                result_str = await self._call_mcp("sysml_retrieve", {"name": name, "k": k_val})
+                try:
+                    result = json.loads(result_str)
+                    if result.get("ok"):
+                        ename = result.get("entity", {}).get("name", "")
+                        if ename in retrieved:
+                            continue
+                        retrieved.add(ename)
+                        ctx = self._build_retrieval_context(result)
+                        if ctx:
+                            context_parts.append(ctx)
+                        break
+                except Exception:
+                    pass
 
-        # Step 3: Resolve HVs mentioned in the user query
+        # Step 3: Resolve HVs if user asks about live values
         hv_map = {
             "温度": "temperature", "风扇": "fan_speed", "转速": "fan_speed",
             "湿度": "humidity", "电压": "voltage_level", "气压": "pressure",
             "功率": "power_load", "电池": "battery_capacity",
         }
-        hv_values = []
+        hv_parts = []
         for keyword, hv_id in hv_map.items():
             if keyword in message:
                 hv_result = await self._call_mcp("sysml_resolve_hv", {"hv_id": hv_id})
                 try:
                     hv_data = json.loads(hv_result)
                     if hv_data.get("ok"):
-                        hv_values.append(f"{hv_id}: {hv_data.get('value', '?')}")
+                        hv_parts.append(f"{hv_id}: {hv_data.get('value', '?')}")
                 except Exception:
                     pass
 
-        # Step 4: Build context and ask LLM
-        context = "\n\n".join(context_parts) if context_parts else "No relevant sections found."
-        hv_info = "\n".join(hv_values) if hv_values else ""
-        hv_block = f"\n\nLive values:\n{hv_info}" if hv_info else ""
+        # Step 4: Build messages and ask LLM
+        context = "\n\n---\n\n".join(context_parts) if context_parts else "No relevant entities found."
+        hv_block = f"\n\nLive values:\n" + "\n".join(hv_parts) if hv_parts else ""
 
-        # Build messages
         messages = [SystemMessage(content=SYSTEM_PROMPT)]
         if history:
-            for h in history[-8:]:
+            for h in history[-6:]:
                 r, c = h.get("role", ""), h.get("content", "")
                 if r == "user":
                     messages.append(HumanMessage(content=c))
                 elif r == "assistant":
                     messages.append(HumanMessage(content=c))
 
-        prompt = f"""Document context:
+        prompt = f"""Knowledge Graph context:
 {context}{hv_block}
 
-Question: {message}"""
+User Question: {message}"""
         messages.append(HumanMessage(content=prompt))
 
-        # Step 5: LLM answers
         try:
             response = await asyncio.wait_for(self._llm.ainvoke(messages), timeout=180)
             return str(response.content)
         except asyncio.TimeoutError:
-            return "请求超时。"
+            return "请求处理超时。"
         except Exception as e:
             logger.exception("LLM error")
             return f"处理失败: {e}"

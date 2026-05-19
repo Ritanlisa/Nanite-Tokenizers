@@ -34,7 +34,7 @@ from llama_index.llms.openai import OpenAI
 from llama_index.vector_stores.faiss import FaissVectorStore
 from redis import Redis
 from redis.exceptions import RedisError
-from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError, OpenAI as OpenAIClient
+from openai import APIConnectionError, APITimeoutError, BadRequestError, InternalServerError, RateLimitError, OpenAI as OpenAIClient
 from pydantic import Field, PrivateAttr
 from llama_index.core.base.embeddings.base import BaseEmbedding, Embedding
 
@@ -199,13 +199,27 @@ class OpenAICompatibleEmbedding(BaseEmbedding):
         self.api_base = api_base
         self._client = OpenAIClient(api_key=api_key, base_url=api_base)
 
+    _MAX_EMBED_CHARS: int = 4000
+
     def _get_text_embedding(self, text: str) -> Embedding:
+        if len(text) > self._MAX_EMBED_CHARS:
+            text = text[: self._MAX_EMBED_CHARS]
+
         retries = 3
         last_error: Optional[Exception] = None
         for attempt in range(1, retries + 1):
             try:
                 response = self._client.embeddings.create(input=[text], model=self.model_name)
                 return response.data[0].embedding
+            except BadRequestError as exc:
+                message = str(exc).lower()
+                if "context length" in message or "input length" in message:
+                    text = text[: len(text) // 2]
+                    if not text:
+                        raise
+                    logger.debug("Truncating text to %d chars for embedding", len(text))
+                    continue
+                raise
             except InternalServerError as exc:
                 last_error = exc
                 message = str(exc).lower()
@@ -898,7 +912,17 @@ class RAGEngine:
                 keyword_text_parts.append(markdown_text)
             if keyword_text_parts:
                 texts_by_doc_name.setdefault(doc_name, []).append("\n".join(keyword_text_parts))
-        keyword_map = extract_document_keywords(texts_by_doc_name, top_k=-1) if texts_by_doc_name else {}
+        keyword_map: Dict[str, List[str]] = {}
+        if texts_by_doc_name:
+            try:
+                keyword_map = extract_document_keywords(texts_by_doc_name, top_k=-1)
+            except (RuntimeError, Exception) as _kw_exc:
+                logger.warning("logprobs keyword extraction failed (%s), falling back to TF-IDF", _kw_exc)
+                try:
+                    from rag.tfidf_keyword_extractor import tfidf_extract
+                    keyword_map = tfidf_extract(texts_by_doc_name, top_k=12)
+                except Exception:
+                    keyword_map = {}
         for entry in entries:
             doc_name = str(entry.get("doc_name") or "").strip()
             entry["keywords"] = self._normalize_keyword_list(keyword_map.get(doc_name) or [])
@@ -2054,12 +2078,12 @@ class RAGEngine:
         }
 
 
-    def get_document_catalog(self, doc_name: str) -> str:
+    def get_document_catalog(self, doc_name: str) -> list[Dict[str, Any]]:
         """返回指定文档的目录：章节路径及起始页码。"""
         self._ensure_db_context()
         entries = self._load_doc_tree_entries()
         if not entries:
-            return ""
+            return []
         available_doc_names = {
             str(entry.get("doc_name") or "").strip()
             for entry in entries
@@ -2071,7 +2095,7 @@ class RAGEngine:
             data_dir=str(config.settings.DATA_DIR or ""),
         )
         if not matched_doc_names:
-            return ""
+            return []
 
         catalog: List[Dict[str, Any]] = []
         for entry in entries:
@@ -2095,7 +2119,7 @@ class RAGEngine:
                 row["level"] = max(1, int(row.get("level") or 1))
                 row["parent_title"] = str(row.get("parent_title") or "").strip() or None
                 catalog.append(row)
-        
+
         sorted_pages: List[Dict[str, Any]] = sorted(
             catalog,
             key=lambda item: (
@@ -2106,16 +2130,5 @@ class RAGEngine:
                 str(item["title"]),
             ),
         )
-        
-        TABLE_CHAR_SUBMODULE = "├"
-        TABLE_CHAR_SUBMODULE_LAST = "└"
-        TABLE_CHAR_PARRELL = "│"
 
-        format_return: str = doc_name
-        for index, page in enumerate(sorted_pages):
-            has_successor = index < len(sorted_pages) - 1 \
-                and sorted_pages[index + 1]["level"] >= page["level"] \
-                and str(sorted_pages[index + 1]["doc_name"]) == str(page["doc_name"])
-            format_return += f"\n{TABLE_CHAR_PARRELL*(page['level'] - 1)}{TABLE_CHAR_SUBMODULE_LAST if not has_successor else TABLE_CHAR_SUBMODULE} {page['title']} (page {page['page']} - {page['end_page']})"
-        
-        return format_return
+        return sorted_pages

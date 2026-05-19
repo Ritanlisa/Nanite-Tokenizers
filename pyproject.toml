@@ -9,7 +9,7 @@ dependencies = [
   "huggingface-hub>=0.36.2",
   "torch>=2.9.1",
   "torchvision>=0.24.1",
-  "vllm>=0.15.1",
+  "vllm>=0.15.1; sys_platform == 'linux'",
   "fastapi>=0.111.0",
   "uvicorn>=0.30.0",
   "pydantic>=2.5.0",
@@ -34,7 +34,6 @@ dependencies = [
   "PyYAML>=6.0",
   "tqdm>=4.66.0",
   "gradio>=6.5.1",
-  "fitz>=0.0.1.dev2",
   "mcp-server-fetch>=2025.4.7",
   "sympy>=1.12.0",
   "pymupdf4llm>=0.3.4",
@@ -67,8 +66,9 @@ torch = [
 torchvision = [
   { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
-vllm = { url = "https://github.com/vllm-project/vllm/releases/download/v0.15.1/vllm-0.15.1+cu130-cp38-abi3-manylinux_2_35_x86_64.whl" }
-accelerate = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/9f/1c/a17fb513aeb684fb83bef5f395910f53103ab30308bbdd77fd66d6698c46/accelerate-1.9.0-py3-none-any.whl" }
+vllm = [
+  { url = "https://github.com/vllm-project/vllm/releases/download/v0.15.1/vllm-0.15.1+cu130-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux'" },
+]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
@@ -77,3 +77,4 @@ explicit = true
 
 [tool.uv]
 allow-insecure-host = ["github.com"]
+required-environments = ["sys_platform == 'win32' and platform_machine == 'AMD64'"]

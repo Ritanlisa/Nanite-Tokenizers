@@ -36,7 +36,7 @@ class TqdmLoggingHandler(logging.StreamHandler):
             self.handleError(record)
 
 
-async def _check_tool_calling_support(client, model: str, logger: logging.Logger) -> bool:
+async def _check_tool_calling_support(client, model: str, logger: logging.Logger) -> tuple[bool, Optional[str]]:
     tool_schema = [
         {
             "type": "function",
@@ -59,15 +59,6 @@ async def _check_tool_calling_support(client, model: str, logger: logging.Logger
         except Exception:
             return False
 
-    def _is_connection_error(exc: Exception) -> bool:
-        text = str(exc).lower()
-        return (
-            "connection error" in text
-            or "server disconnected" in text
-            or "connection reset" in text
-            or "remoteprotocolerror" in text
-        )
-
     try:
         response = await client.chat.completions.create(
             model=model,
@@ -78,21 +69,18 @@ async def _check_tool_calling_support(client, model: str, logger: logging.Logger
         )
         if _has_tool_calls(response):
             logger.info("Model supports tool calling: %s", model)
-            return True
+            return True, None
 
         logger.info(
             "Tool-call probe accepted tools payload without tool_calls (%s), treating as supported",
             model,
         )
-        return True
+        return True, None
     except Exception as exc:
-        if not _is_connection_error(exc):
-            logger.warning("Model does not support tool calling (%s): %s", model, exc)
-            return False
-
+        error_msg = str(exc)
         logger.info(
-            "Tool-call probe hit connection issue for %s, retrying with compatibility payload",
-            model,
+            "Tool-call probe failed for %s (%s), retrying with compatibility payload",
+            model, error_msg,
         )
 
     try:
@@ -105,16 +93,17 @@ async def _check_tool_calling_support(client, model: str, logger: logging.Logger
         )
         if _has_tool_calls(fallback_response):
             logger.info("Model supports tool calling (compat mode): %s", model)
-            return True
+            return True, None
 
         logger.info(
             "Tool-call compat probe accepted tools payload without tool_calls (%s), treating as supported",
             model,
         )
-        return True
+        return True, None
     except Exception as exc:
-        logger.warning("Model does not support tool calling (%s): %s", model, exc)
-        return False
+        error_msg = str(exc)
+        logger.warning("Model does not support tool calling (%s): %s", model, error_msg)
+        return False, error_msg
 
 
 async def _check_multimodal_support(
@@ -260,7 +249,7 @@ async def health_check(include_mcp: bool = True) -> None:
         await openai_client.models.list()
         logger.info("OpenAI API reachable")
 
-        tool_supported = await _check_tool_calling_support(
+        tool_supported, tool_error = await _check_tool_calling_support(
             openai_client, config.settings.LLM_MODEL, logger
         )
         multimodal_supported = await _check_multimodal_support(
@@ -268,6 +257,7 @@ async def health_check(include_mcp: bool = True) -> None:
         )
         set_capabilities(
             tool_calling_supported=tool_supported,
+            tool_calling_error=tool_error,
             multimodal_supported=multimodal_supported,
         )
     except Exception as exc:

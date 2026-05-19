@@ -44,6 +44,8 @@ from tool_usage import (
 )
 from contextvars import ContextVar
 
+import tool_approval
+
 logger = logging.getLogger(__name__)
 
 
@@ -401,6 +403,14 @@ class Agent:
                 + _bi(
                     "6) 工具失败时应重试或说明限制。",
                     "6) If tools fail, retry or explain limitations.",
+                ) + "\n"
+                + _bi(
+                    "7) 每次处理完用户请求后，必须调用 feedback 工具反馈使用体验（工具是否好用、步骤是否繁琐、缺少什么能力）。不调用 feedback 为违规。",
+                    "7) After every user request, you MUST call the feedback tool to report your experience (tool usability, cumbersome steps, missing capabilities). Not calling feedback is a violation.",
+                ) + "\n"
+                + _bi(
+                    "8) 发现任何疑似问题时立即调用 bug 工具报告（检索结果异常、工具错误、数据缺失、模型幻觉等）。宁可多报不要漏报。",
+                    "8) Report any suspected issues immediately via the bug tool (abnormal search results, tool errors, missing data, model hallucinations, etc.). Over-report rather than under-report.",
                 ) + "\n"
                 + _bi(
                     "⚠️**关键警告**⚠️",
@@ -948,8 +958,9 @@ class Agent:
                 return "".join(parts)
 
             class StreamCallback(BaseCallbackHandler):
-                def __init__(self, queue: asyncio.Queue[str]):
+                def __init__(self, queue: asyncio.Queue[str], session_id: str):
                     self.queue = queue
+                    self.session_id = session_id
                     self.thinking = False
                     self._first_emit_at: float | None = None
                     self._tool_started_at: dict[str, float] = {}
@@ -1087,6 +1098,12 @@ class Agent:
                         except Exception:
                             pass
 
+                    # If this tool requires user confirmation, send a marker
+                    if tool_name in tool_approval.TOOLS_REQUIRING_APPROVAL and not tool_approval.is_auto_approve(self.session_id):
+                        import uuid as _uuid
+                        marker_call_id = str(run_id) if run_id else str(_uuid.uuid4())
+                        self._write_to_front_end(f"@TOOL_CONFIRM_REQUIRED@{marker_call_id}:{tool_name}@")
+
                 def on_tool_end(self, output: Any, **kwargs):
                     run_id = kwargs.get("run_id")
                     if run_id:
@@ -1120,7 +1137,7 @@ class Agent:
                         except Exception:
                             pass
                                 
-            stream_callback = StreamCallback(queue)
+            stream_callback = StreamCallback(queue, self.session_id)
             callback = TokenLimitCallback(config.settings.MAX_TOTAL_TOKENS)
             tool_callback = self._tool_callback()
             active_agent = self._create_agent(self._select_tools_for_request(allowed_mcp_tools))
@@ -1162,6 +1179,7 @@ class Agent:
                     done_event.set()
 
             task = asyncio.create_task(run_agent())
+            tool_approval.register_running_task(self.session_id, task)
 
             while True:
                 if done_event.is_set() and queue.empty():
@@ -1199,6 +1217,7 @@ class Agent:
                 fallback_answer = "".join(token_buffer)
                 self.memory.add_ai_message(fallback_answer)
         finally:
+            tool_approval.unregister_running_task(self.session_id)
             self._restore_rag_scope(original_db_name, original_db_names)
             reset_current_scope_key(scope_token)
             reset_current_session_id(session_token)

@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 # 计算项目根目录并加入 sys.path（必须在导入 sysml 之前）
@@ -47,7 +48,7 @@ if str(ROOT_DIR) not in sys.path:
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sysml.sysml_model import (
-    Package, SysMLElement, Definition, Usage, Doc,
+    Package, SysMLElement, Namespace, Definition, Usage, Doc,
     ConnectionUsage, InterfaceUsage, AllocationUsage,
     InterfaceDef, AllocationDef,
     PartDef, PartUsage, AttributeDef, AttributeUsage,
@@ -142,6 +143,202 @@ def _entity_summary(entity: SysMLElement, include_body: bool = False) -> Dict[st
                 info["members"] = member_summaries
 
     return info
+
+
+def _find_any_element(mgr: SysMLManager, name: str) -> Optional[SysMLElement]:
+    """Find any element (Definition, Usage, Package) by name, alias, or instance name."""
+    # 1. Alias registry lookup (normalized)
+    qn = mgr._alias_registry.lookup(name)
+    if qn:
+        elem = mgr.find_entity_by_qn(qn)
+        if elem is not None:
+            return elem
+
+    # 2. Exact name match in definitions
+    found = mgr.find_definition(name)
+    if found is not None:
+        return found
+
+    # 3. Exact name match in all elements (including usages)
+    def search_in(ns):
+        for m in ns.members:
+            if getattr(m, "name", "") == name:
+                return m
+            if isinstance(m, Namespace):
+                inner = search_in(m)
+                if inner:
+                    return inner
+        return None
+
+    for elem in mgr.root_elements:
+        if getattr(elem, "name", "") == name:
+            return elem
+        if isinstance(elem, Namespace):
+            inner = search_in(elem)
+            if inner:
+                return inner
+
+    # 4. Fuzzy search fallback via search_entities
+    results = mgr.search_entities(name, threshold=0.7)
+    if results:
+        best = results[0]
+        return mgr.find_entity_by_qn(best["qualified_name"])
+
+    return None
+
+
+def _entity_detail_full(entity: SysMLElement, mgr: SysMLManager) -> Dict[str, Any]:
+    """Generate full entity detail: all SysML properties, members, metadata, aliases."""
+    info = _entity_summary(entity, include_body=True)
+    qn = entity.qualified_name
+
+    # Metadata
+    meta = mgr.get_entity_metadata(qn)
+    if any(v for v in meta.values() if v):
+        info["metadata"] = {}
+        if meta.get("description"):
+            info["metadata"]["description"] = meta["description"]
+        if meta.get("source_sections"):
+            info["metadata"]["source_sections"] = meta["source_sections"]
+        if meta.get("source_text"):
+            info["metadata"]["source_text"] = meta["source_text"]
+        if meta.get("properties"):
+            info["metadata"]["properties"] = meta["properties"]
+
+    # Aliases
+    aliases = mgr._alias_registry.get_aliases(qn)
+    if aliases:
+        info["aliases"] = aliases
+
+    # Definition-specific
+    if isinstance(entity, Definition):
+        if entity.supertypes:
+            info["supertypes"] = entity.supertypes
+        if entity.is_abstract:
+            info["abstract"] = True
+        if entity.is_variation:
+            info["variation"] = True
+
+    # Usage-specific
+    if isinstance(entity, Usage):
+        if entity.direction:
+            info["direction"] = entity.direction.value
+        if entity.multiplicity:
+            info["multiplicity"] = entity.multiplicity.to_text()
+        if entity.type_refs:
+            info["type_refs"] = entity.type_refs
+        if entity.subsetted:
+            info["subsetted"] = entity.subsetted
+        if entity.redefined:
+            info["redefined"] = entity.redefined
+        if entity.value_expr is not None:
+            info["value"] = entity.value_expr
+        if entity.is_derived:
+            info["derived"] = True
+        if entity.is_constant:
+            info["constant"] = True
+        if entity.is_reference:
+            info["reference"] = True
+
+    # ConnectionUsage-specific
+    if isinstance(entity, ConnectionUsage) and entity.ends:
+        info["ends"] = [
+            {"ref": e.ref, "role": e.role} for e in entity.ends
+        ]
+
+    return info
+
+
+def _build_k_layer_graph(mgr: SysMLManager, entity_name: str, k: int) -> Dict[str, Any]:
+    """BFS traversal from entity_name up to k layers. Returns layered graph structure."""
+    all_relations = mgr.get_all_relations()
+
+    # Build adjacency: entity_name -> list of {relation, neighbor, my_role, neighbor_role}
+    adjacency = defaultdict(list)
+    for rel in all_relations:
+        ends = getattr(rel, "ends", None) or []
+        if not ends:
+            continue
+
+        rel_summary = {
+            "name": getattr(rel, "name", ""),
+            "qualified_name": rel.qualified_name,
+            "type_name": _entity_type_name(rel),
+            "class": type(rel).__name__,
+        }
+        rel_meta = mgr.get_entity_metadata(rel.qualified_name)
+        if rel_meta and rel_meta.get("description"):
+            rel_summary["description"] = rel_meta["description"]
+
+        for i, end_i in enumerate(ends):
+            for j, end_j in enumerate(ends):
+                if i == j:
+                    continue
+                adjacency[end_i.ref].append({
+                    "relation": rel_summary,
+                    "neighbor": end_j.ref,
+                    "my_role": end_i.role,
+                    "neighbor_role": end_j.role,
+                })
+
+    visited: Set[str] = set()
+    all_nodes: Dict[str, Any] = {}
+    all_edges: List[Dict[str, Any]] = []
+    layers: List[Dict[str, Any]] = []
+
+    current_frontier = {entity_name}
+
+    for level in range(k + 1):
+        if not current_frontier:
+            break
+
+        layer_node_ids: List[str] = []
+        next_frontier: Set[str] = set()
+
+        for ename in sorted(current_frontier):
+            if ename in visited:
+                continue
+            visited.add(ename)
+            layer_node_ids.append(ename)
+
+            # Get entity details for this node
+            entity = _find_any_element(mgr, ename)
+            if entity:
+                all_nodes[ename] = _entity_detail_full(entity, mgr)
+            else:
+                all_nodes[ename] = {
+                    "name": ename, "class": "Unknown", "qualified_name": ename,
+                    "present": False, "note": "Referenced entity not found in model",
+                }
+
+            # Explore neighbors for next level
+            if level < k:
+                for edge in adjacency.get(ename, []):
+                    neighbor = edge["neighbor"]
+                    if neighbor not in visited:
+                        next_frontier.add(neighbor)
+                    # Record edge (deduplicate by from/to pair)
+                    edge_key = (ename, neighbor, edge["relation"]["name"])
+                    if edge_key not in {(e["from"], e["to"], e["relation"]["name"]) for e in all_edges}:
+                        all_edges.append({
+                            "from": ename,
+                            "to": neighbor,
+                            "relation": edge["relation"],
+                            "from_role": edge["my_role"],
+                            "to_role": edge["neighbor_role"],
+                        })
+
+        layers.append({"level": level, "node_ids": layer_node_ids})
+        current_frontier = next_frontier
+
+    return {
+        "depth": k,
+        "total_nodes": len(all_nodes),
+        "total_edges": len(all_edges),
+        "nodes": all_nodes,
+        "edges": all_edges,
+        "layers": layers,
+    }
 
 
 def _fuzzy_match_name(query: str, candidates: List[str]) -> List[Tuple[str, float]]:
@@ -1255,11 +1452,79 @@ def sysml_list_hvs(entity_name: Optional[str] = None) -> Dict[str, Any]:
 
 
 # ══════════════════════════════════════════════════════════════
+# 核心检索工具 —— sysml_retrieve
+# ══════════════════════════════════════════════════════════════
+
+def sysml_retrieve(name: str, k: int = 2) -> Dict[str, Any]:
+    """
+    根据类名、别名或实例名检索SysML实体，返回完整属性和k层关系图。
+
+    这是检索SysML模型的核心工具。一次调用即可获取：
+    - 实体的完整属性（定义、元数据、成员树、别名）
+    - k层关系图（BFS遍历的邻接实体和连接关系）
+
+    Args:
+        name: 类名、别名或实例名（支持中文/英文/拼音）
+        k: 关系图遍历深度。
+           0 = 仅实体本身
+           1 = 直接关联关系
+           2 = 两层关系（默认）
+           3+ = 多层关系
+
+    Returns:
+        实体的完整属性和k层关系图
+    """
+    mgr = _get_manager()
+
+    entity = _find_any_element(mgr, name)
+    if entity is None:
+        return {
+            "ok": False,
+            "error": f"Entity not found: '{name}'. Try a different name, alias, or check that a model is loaded.",
+            "search_attempted": name,
+        }
+
+    entity_detail = _entity_detail_full(entity, mgr)
+    graph = _build_k_layer_graph(mgr, entity.name, k)
+
+    return {
+        "ok": True,
+        "matched_by": entity.name,
+        "entity": entity_detail,
+        "relationship_graph": graph,
+    }
+
+
+# ══════════════════════════════════════════════════════════════
 # MCP 服务器入口
 # ══════════════════════════════════════════════════════════════
 
 # 工具元数据（供 MCP/LangChain 使用）
 TOOL_DEFINITIONS = {
+    # ── 核心检索 ──
+    "sysml_retrieve": {
+        "function": sysml_retrieve,
+        "description": "根据类名/别名/实例名检索SysML实体，返回完整属性（定义、元数据、成员树、别名）和k层关系图（BFS遍历的邻接实体和连接关系）。这是检索SysML模型的主工具。",
+        "parameters": {
+            "name": {"type": "string", "description": "类名、别名或实例名（支持中文、英文、拼音）"},
+            "k": {"type": "integer", "description": "关系图遍历深度: 0=仅实体本身, 1=直接关联, 2=两层关系, ...", "default": 2},
+        },
+    },
+    # ── 模型 I/O ──
+    "sysml_load_model": {
+        "function": sysml_load_model,
+        "description": "加载一个 .sysml 模型文件到当前会话",
+        "parameters": {
+            "file_path": {"type": "string", "description": ".sysml 文件路径"},
+        },
+    },
+    "sysml_save_model": {
+        "function": _sysml_save_model,
+        "description": "保存当前模型到 .sysml 文件（同时写入 .meta.json 元数据）",
+        "parameters": {
+            "file_path": {"type": "string", "description": "输出 .sysml 路径（默认使用当前文件）", "default": None},
+        },
+    },
     # ── 模型 I/O ──
     "sysml_load_model": {
         "function": sysml_load_model,
@@ -1483,6 +1748,41 @@ TOOL_DEFINITIONS = {
         },
     },
 }
+
+
+# ── Agent tool filtering lists ───────────────────────────────
+# QA / Retrieval agents: sysml_retrieve + load
+QUERY_AGENT_TOOL_NAMES = [
+    "sysml_retrieve",
+    "sysml_load_model",
+]
+
+# Build agents: all tools available (via ENTITY_TOOL_NAMES etc in kg_build_agent.py)
+# Keep existing lists from kg_build_agent.py for compatibility
+BUILD_ENTITY_TOOL_NAMES = [
+    "sysml_search_entity",
+    "sysml_add_entity",
+    "sysml_update_entity",
+    "sysml_add_alias",
+    "sysml_normalize_name",
+    "sysml_list_entities",
+    "sysml_model_summary",
+]
+BUILD_RELATION_TOOL_NAMES = [
+    "sysml_add_relation",
+    "sysml_search_entity",
+    "sysml_get_connections",
+    "sysml_list_relations",
+    "sysml_list_entities",
+    "sysml_model_summary",
+]
+BUILD_MERGE_TOOL_NAMES = [
+    "sysml_suggest_merge",
+    "sysml_merge_entities",
+    "sysml_list_entities",
+    "sysml_search_entity",
+]
+BUILD_ALL_TOOL_NAMES = list(TOOL_DEFINITIONS.keys())
 
 
 def _run_tool(tool_name: str, arguments: Dict[str, Any]) -> str:

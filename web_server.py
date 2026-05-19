@@ -10,6 +10,7 @@ import uuid
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Optional
 
+import _patch_py314  # noqa: F401  (Python 3.14+ PEP 649 compatibility)
 import yaml
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
@@ -28,6 +29,9 @@ from rag.engine import RAGEngine, SUPPORTED_RAG_EXTENSIONS
 from tool_usage import get_tool_usage, reset_tool_usage
 from mcp_client.client import get_mcp_client
 from locale_context import normalize_language, set_current_language, reset_current_language
+import tool_approval
+
+logger = logging.getLogger(__name__)
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 
@@ -46,6 +50,7 @@ class ChatRequest(BaseModel):
     messages: Optional[list[dict]] = None
     conversation_path: Optional[list[str]] = None
     language: Optional[str] = None
+    auto_approve: bool = False
 
 
 class ResetRequest(BaseModel):
@@ -99,6 +104,16 @@ class DebugToolInvokeRequest(BaseModel):
     rag_db_names: Optional[list[str]] = None
 
 
+class ToolConfirmRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+    call_id: str = Field(..., min_length=1)
+    approved: bool = True
+
+
+class StopGenerationRequest(BaseModel):
+    session_id: str = Field(..., min_length=1)
+
+
 SESSION_STORE: dict[str, Agent] = {}
 SESSION_PARAMS: dict[str, dict[str, Optional[object]]] = {}
 
@@ -133,6 +148,115 @@ def update_settings(args: argparse.Namespace) -> None:
         AGENT_VERBOSE=args.verbose or config.settings.AGENT_VERBOSE,
         LOG_LEVEL=(str(args.log_level).upper() if getattr(args, "log_level", None) else ("DEBUG" if args.verbose else config.settings.LOG_LEVEL)),
     )
+
+
+def _extract_sections_from_rag_doc(rag_doc: Any) -> list:
+    """从 RAG_DB_Document 中提取 SectionInfo 列表（跳过封面/目录，智能分段）"""
+    from agent.kg_build_agent import SectionInfo
+    from rag.document_interface import PageType
+
+    sections = []
+    try:
+        mono_pages = rag_doc.get_mono_pages()
+    except Exception:
+        return sections
+
+    # Build page → catalog info mapping
+    page_catalog: dict = {}
+    try:
+        for cat_item in rag_doc.catalog_payload() or []:
+            if not isinstance(cat_item, dict):
+                continue
+            start = int(cat_item.get("page") or 0)
+            title = str(cat_item.get("title") or "").strip()
+            parent = str(cat_item.get("parent_title") or "").strip()
+            if start > 0 and title:
+                page_catalog.setdefault(start, []).append({"title": title, "parent": parent})
+    except Exception:
+        pass
+
+    # Collect all content text in order, tracking catalog transitions
+    all_text_parts: list = []  # [(page_num, text, title, parent)]
+    prev_page_num = None
+
+    for page in mono_pages:
+        text = (getattr(page, "markdown_text", "") or "").strip()
+        if not text or len(text) < 50:
+            continue
+        cat = getattr(page, "category", "")
+        if cat in (PageType.COVER, PageType.CATALOGUE):
+            continue
+
+        page_num = int(getattr(page, "page_number", 0) or 0)
+        title = ""
+        parent = ""
+
+        # Check if catalog has an entry for this page
+        for cat_page, cat_entries in sorted(page_catalog.items()):
+            if cat_page >= page_num:
+                candidates = cat_entries
+                if candidates:
+                    title = candidates[0]["title"]
+                    parent = candidates[0].get("parent", "")
+                break
+
+        if not title:
+            title = (getattr(page, "title", "") or "").strip()
+        if not title:
+            # Extract title from first markdown heading in text
+            m = re.match(r'#+\s*(.+)', text)
+            if m:
+                title = m.group(1).strip()
+
+        all_text_parts.append((page_num, text, title, parent))
+        prev_page_num = page_num
+
+    if not all_text_parts:
+        return sections
+
+    # Merge consecutive fragments on same page, then chunk long pages
+    CHUNK_SIZE = 2000
+    TOC_PATTERN = re.compile(r'^\s*(#+\s+.*|第[一二三四五六七八九十\d]+章\s|[\d\.]+\s+\w+)')
+    
+    current_page = all_text_parts[0][0]
+    current_text = ""
+    current_title = all_text_parts[0][2]
+    current_parent = all_text_parts[0][3]
+
+    for page_num, text, title, parent in all_text_parts:
+        if page_num == current_page and len(current_text) + len(text) < CHUNK_SIZE:
+            current_text += "\n\n" + text
+        else:
+            if current_text.strip():
+                # Skip TOC-like sections (mainly chapter lists, no prose)
+                lines = current_text.strip().splitlines()
+                toc_lines = sum(1 for l in lines if TOC_PATTERN.match(l))
+                if len(lines) > 0 and toc_lines / len(lines) < 0.5:
+                    sections.append(SectionInfo(
+                        section_id=f"sec-{len(sections)}",
+                        title=current_title or f"Section {len(sections)+1}",
+                        text=current_text.strip()[:4000],
+                        parent_title=current_parent,
+                        page=current_page,
+                    ))
+            current_page = page_num
+            current_text = text
+            current_title = title
+            current_parent = parent
+
+    if current_text.strip():
+        lines = current_text.strip().splitlines()
+        toc_lines = sum(1 for l in lines if TOC_PATTERN.match(l))
+        if len(lines) > 0 and toc_lines / len(lines) < 0.5:
+            sections.append(SectionInfo(
+                section_id=f"sec-{len(sections)}",
+                title=current_title or f"Section {len(sections)+1}",
+                text=current_text.strip()[:4000],
+                parent_title=current_parent,
+                page=current_page,
+            ))
+
+    return sections
 
 
 def create_app() -> FastAPI:
@@ -672,113 +796,6 @@ def create_app() -> FastAPI:
         callback("kg_build_completed", {"doc_name": db_name})
 
 
-def _extract_sections_from_rag_doc(rag_doc: Any) -> list:
-    """从 RAG_DB_Document 中提取 SectionInfo 列表（跳过封面/目录，智能分段）"""
-    from agent.kg_build_agent import SectionInfo
-    from rag.document_interface import PageType
-
-    sections = []
-    try:
-        mono_pages = rag_doc.get_mono_pages()
-    except Exception:
-        return sections
-
-    # Build page → catalog info mapping
-    page_catalog: dict = {}
-    try:
-        for cat_item in rag_doc.catalog_payload() or []:
-            if not isinstance(cat_item, dict):
-                continue
-            start = int(cat_item.get("page") or 0)
-            title = str(cat_item.get("title") or "").strip()
-            parent = str(cat_item.get("parent_title") or "").strip()
-            if start > 0 and title:
-                page_catalog.setdefault(start, []).append({"title": title, "parent": parent})
-    except Exception:
-        pass
-
-    # Collect all content text in order, tracking catalog transitions
-    all_text_parts: list = []  # [(page_num, text, title, parent)]
-    prev_page_num = None
-
-    for page in mono_pages:
-        text = (getattr(page, "markdown_text", "") or "").strip()
-        if not text or len(text) < 50:
-            continue
-        cat = getattr(page, "category", "")
-        if cat in (PageType.COVER, PageType.CATALOGUE):
-            continue
-
-        page_num = int(getattr(page, "page_number", 0) or 0)
-        title = ""
-        parent = ""
-
-        # Check if catalog has an entry for this page
-        for cat_page, cat_entries in sorted(page_catalog.items()):
-            if cat_page >= page_num:
-                candidates = cat_entries
-                if candidates:
-                    title = candidates[0]["title"]
-                    parent = candidates[0].get("parent", "")
-                break
-
-        if not title:
-            title = (getattr(page, "title", "") or "").strip()
-        if not title:
-            # Extract title from first markdown heading in text
-            m = re.match(r'#+\s*(.+)', text)
-            if m:
-                title = m.group(1).strip()
-
-        all_text_parts.append((page_num, text, title, parent))
-        prev_page_num = page_num
-
-    if not all_text_parts:
-        return sections
-
-    # Merge consecutive fragments on same page, then chunk long pages
-    CHUNK_SIZE = 2000
-    TOC_PATTERN = re.compile(r'^\s*(#+\s+.*|第[一二三四五六七八九十\d]+章\s|[\d\.]+\s+\w+)')
-    
-    current_page = all_text_parts[0][0]
-    current_text = ""
-    current_title = all_text_parts[0][2]
-    current_parent = all_text_parts[0][3]
-
-    for page_num, text, title, parent in all_text_parts:
-        if page_num == current_page and len(current_text) + len(text) < CHUNK_SIZE:
-            current_text += "\n\n" + text
-        else:
-            if current_text.strip():
-                # Skip TOC-like sections (mainly chapter lists, no prose)
-                lines = current_text.strip().splitlines()
-                toc_lines = sum(1 for l in lines if TOC_PATTERN.match(l))
-                if len(lines) > 0 and toc_lines / len(lines) < 0.5:
-                    sections.append(SectionInfo(
-                        section_id=f"sec-{len(sections)}",
-                        title=current_title or f"Section {len(sections)+1}",
-                        text=current_text.strip()[:4000],
-                        parent_title=current_parent,
-                        page=current_page,
-                    ))
-            current_page = page_num
-            current_text = text
-            current_title = title
-            current_parent = parent
-
-    if current_text.strip():
-        lines = current_text.strip().splitlines()
-        toc_lines = sum(1 for l in lines if TOC_PATTERN.match(l))
-        if len(lines) > 0 and toc_lines / len(lines) < 0.5:
-            sections.append(SectionInfo(
-                section_id=f"sec-{len(sections)}",
-                title=current_title or f"Section {len(sections)+1}",
-                text=current_text.strip()[:4000],
-                parent_title=current_parent,
-                page=current_page,
-            ))
-
-    return sections
 
     def _compact_tree_document_summary(item: Any) -> dict[str, object]:
         payload = dict(item or {})
@@ -796,15 +813,16 @@ def _extract_sections_from_rag_doc(rag_doc: Any) -> list:
     def _compact_catalog_rows(rows: Any) -> list[dict[str, object]]:
         compact: list[dict[str, object]] = []
         for item in list(rows or []):
-            row = dict(item or {})
+            if not isinstance(item, dict):
+                continue
             compact.append(
                 {
-                    "title": str(row.get("title") or "").strip(),
-                    "page": int(row.get("page") or 0),
-                    "end_page": int(row.get("end_page") or row.get("page") or 0),
-                    "level": int(row.get("level") or 1),
-                    "category": str(row.get("category") or "").strip(),
-                    "parent_title": str(row.get("parent_title") or "").strip() or None,
+                    "title": str(item.get("title") or "").strip(),
+                    "page": int(item.get("page") or 0),
+                    "end_page": int(item.get("end_page") or item.get("page") or 0),
+                    "level": int(item.get("level") or 1),
+                    "category": str(item.get("category") or "").strip(),
+                    "parent_title": str(item.get("parent_title") or "").strip() or None,
                 }
             )
         return compact
@@ -865,6 +883,8 @@ def _extract_sections_from_rag_doc(rag_doc: Any) -> list:
             if _is_valid_db(normalized) and normalized not in rag_db_names:
                 rag_db_names.append(normalized)
 
+        tool_approval.set_auto_approve(request.session_id, request.auto_approve)
+
         logger.debug(
             "[chat:req] session=%s stream=%s model=%s temp=%s force_agent=%s lang=%s rag=%s allowed_mcp=%s msg_len=%s images=%s messages=%s",
             request.session_id,
@@ -891,14 +911,22 @@ def _extract_sections_from_rag_doc(rag_doc: Any) -> list:
                         rag_db_names=rag_db_names,
                         force_agent=request.force_agent,
                         allowed_mcp_tools=_normalize_tool_name_list(request.allowed_mcp_tools),
-                        messages=request.messages,  # 新增参数
+                        messages=request.messages,
                         conversation_path=request.conversation_path,
                     ):
                         yield chunk
+                        if await http_request.is_disconnected():
+                            logger.debug("[chat:stream-disconnected] session=%s", request.session_id)
+                            await tool_approval.request_stop_generation(request.session_id)
+                            break
+                except asyncio.CancelledError:
+                    logger.debug("[chat:stream-cancelled] session=%s", request.session_id)
+                    await tool_approval.request_stop_generation(request.session_id)
                 except Exception as exc:
                     logging.getLogger(__name__).exception("Streaming chat failed")
                     yield f"Error: {exc}"
                 finally:
+                    tool_approval.unregister_running_task(request.session_id)
                     logger.debug("[chat:stream-done] session=%s rag=%s", request.session_id, rag_db_names)
                     reset_current_language(language_token)
 
@@ -935,6 +963,39 @@ def _extract_sections_from_rag_doc(rag_doc: Any) -> list:
         clear_session(request.session_id)
         return {"status": "ok"}
 
+    @app.post("/api/confirm-tool")
+    async def confirm_tool(request: ToolConfirmRequest):
+        found = tool_approval.resolve_tool_approval(request.call_id, request.approved)
+        if not found:
+            raise HTTPException(status_code=404, detail="Tool approval request not found or already expired")
+        logger.info(
+            "Tool confirmation: session=%s call_id=%s approved=%s",
+            request.session_id,
+            request.call_id,
+            request.approved,
+        )
+        return {"status": "ok", "approved": request.approved}
+
+    @app.get("/api/pending-tool-approval")
+    async def get_pending_tool_approval(session_id: str):
+        info = tool_approval.get_pending_approval_for_session(session_id)
+        if info is None:
+            return {"pending": False}
+        return {
+            "pending": True,
+            "call_id": info["call_id"],
+            "tool_name": info["tool_name"],
+            "tool_args": info["tool_args"],
+            "created_at": info["created_at"],
+        }
+
+    @app.post("/api/stop-generation")
+    async def stop_generation(request: StopGenerationRequest):
+        stopped = await tool_approval.request_stop_generation(request.session_id)
+        if stopped:
+            logger.info("Generation stopped: session=%s", request.session_id)
+        return {"status": "ok", "stopped": stopped}
+
     @app.get("/api/tool-usage")
     async def tool_usage(session_id: str):
         return get_tool_usage(session_id)
@@ -949,6 +1010,7 @@ def _extract_sections_from_rag_doc(rag_doc: Any) -> list:
         caps = get_capabilities()
         return {
             "tool_calling_supported": caps.tool_calling_supported,
+            "tool_calling_error": caps.tool_calling_error,
             "multimodal_supported": caps.multimodal_supported,
             "ocr_available": bool(ocr_enabled()),
             "last_checked": caps.last_checked,
@@ -1786,6 +1848,7 @@ def main() -> None:
         host=args.host,
         port=args.port,
         log_level=str(config.settings.LOG_LEVEL).lower(),
+        log_config=None,
     )
 
 

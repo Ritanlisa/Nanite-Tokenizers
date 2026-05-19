@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import base64
+import io
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import fitz
 from llama_index.core import Document
@@ -15,9 +16,44 @@ import config
 
 logger = logging.getLogger(__name__)
 
+_SUPPORTED_MIME: Dict[str, str] = {
+    "PNG": "image/png",
+    "JPEG": "image/jpeg",
+    "GIF": "image/gif",
+    "WEBP": "image/webp",
+}
+
+_MIN_IMAGE_BYTES = 512
+
 
 def ocr_enabled() -> bool:
     return bool(config.settings.OCR_API_URL and config.settings.OCR_MODEL)
+
+
+def _normalize_image_bytes(image_bytes: bytes) -> Tuple[bytes, str]:
+    from PIL import Image, UnidentifiedImageError
+
+    if len(image_bytes) < _MIN_IMAGE_BYTES:
+        return b"", ""
+
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        fmt = (img.format or "").upper()
+    except (UnidentifiedImageError, Exception):
+        return b"", ""
+
+    if fmt in _SUPPORTED_MIME:
+        return image_bytes, _SUPPORTED_MIME[fmt]
+
+    try:
+        buf = io.BytesIO()
+        if img.mode in ("RGBA", "LA", "PA"):
+            img.save(buf, format="PNG")
+        else:
+            img.convert("RGB").save(buf, format="PNG")
+        return buf.getvalue(), "image/png"
+    except Exception:
+        return b"", ""
 
 
 def _extract_message_text(message_content) -> str:
@@ -36,14 +72,19 @@ def _ocr_image(image_bytes: bytes) -> str:
     if not ocr_enabled():
         return ""
 
+    image_bytes, mime_type = _normalize_image_bytes(image_bytes)
+    if not image_bytes or not mime_type:
+        return ""
+
     client = OpenAIClient(
         api_key=config.settings.OCR_API_KEY,
         base_url=config.settings.OCR_API_URL,
         timeout=config.settings.OCR_TIMEOUT,
+        max_retries=1,
     )
 
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
-    data_url = f"data:image/png;base64,{image_b64}"
+    data_url = f"data:{mime_type};base64,{image_b64}"
     try:
         ocr_model = config.settings.OCR_MODEL
         if not ocr_model:
@@ -65,7 +106,7 @@ def _ocr_image(image_bytes: bytes) -> str:
         logger.warning("OCR request failed: %s", exc)
         return ""
     except Exception as exc:
-        logger.exception("Unexpected OCR error: %s", exc)
+        logger.warning("OCR error (skipping image): %s", exc)
         return ""
 
     if not response.choices:

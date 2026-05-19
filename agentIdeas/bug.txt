@@ -11,3 +11,10 @@ test
 test
 test
 test
+[2026-05-15 11:17:48] [HIGH] 检索遗漏：查询温度传感器时未找到机柜A_温度传感器_PT100实例
+[2026-05-15 11:17:48] [LOW] MCP调用测试：bug工具正常工作
+[QA:mn0_power_query] KG missing R1P3 cabinet mapping, no IPMI tools, unnamed relations
+[2026-05-16 12:42:12] [MEDIUM] 向量检索无结果 — embedding/pdf解析可能有误
+[2026-05-16 12:42:12] [HIGH] 文档中缺少 smu_tranfer_cmd 命令的检索结果 — 关键词可能未命中
+[2026-05-18 14:35:40] [CRITICAL] SysML KG 为空 — 无实体可检索
+[2026-05-18 14:35:40] [HIGH] sysml_retrieve 未命中任何实体
