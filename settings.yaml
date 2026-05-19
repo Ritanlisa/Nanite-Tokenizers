@@ -3,7 +3,7 @@ OPENAI_API_KEY: ollama_api_key
 OPENAI_API_URL: http://localhost:11434/v1
 LLM_MODEL: qwen3-vl:32b
 TEMPERATURE: 0.7
-EMBED_MODEL: nomic-embed-text
+EMBED_MODEL: bge-m3
 EMBED_DIM: null
 CHUNK_SIZE: 512
 CHUNK_OVERLAP: 50

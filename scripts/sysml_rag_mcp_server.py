@@ -36,6 +36,7 @@ SysML RAG MCP 服务器
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -179,8 +180,51 @@ def _find_any_element(mgr: SysMLManager, name: str) -> Optional[SysMLElement]:
             if inner:
                 return inner
 
-    # 4. Fuzzy search fallback via search_entities
-    results = mgr.search_entities(name, threshold=0.7)
+    # 4. P2: substring / prefix match in all entity names
+    name_lower = name.lower().strip()
+    candidates: List[Tuple[SysMLElement, float]] = []
+
+    def collect_candidates(ns, depth=0):
+        for m in ns.members:
+            m_name = getattr(m, "name", "") or ""
+            m_name_lower = m_name.lower()
+            score = 0.0
+            if name_lower and m_name_lower:
+                if m_name_lower == name_lower:
+                    score = 0.99
+                elif m_name_lower.startswith(name_lower):
+                    score = 0.8 + 0.1 * (len(name_lower) / max(len(m_name_lower), 1))
+                elif name_lower in m_name_lower:
+                    score = 0.6 + 0.1 * (len(name_lower) / max(len(m_name_lower), 1))
+                # P2: short query → check if any word token matches
+                elif len(name_lower) <= 4:
+                    words = re.split(r'[_\s]+', m_name_lower)
+                    if any(name_lower in w for w in words):
+                        score = 0.5
+            if score > 0.4:
+                candidates.append((m, score))
+            if isinstance(m, Namespace):
+                collect_candidates(m, depth + 1)
+
+    for elem in mgr.root_elements:
+        e_name = getattr(elem, "name", "") or ""
+        e_lower = e_name.lower()
+        if name_lower and e_lower:
+            if e_lower == name_lower:
+                candidates.append((elem, 0.99))
+            elif e_lower.startswith(name_lower):
+                candidates.append((elem, 0.8))
+            elif name_lower in e_lower:
+                candidates.append((elem, 0.6))
+        if isinstance(elem, Namespace):
+            collect_candidates(elem)
+
+    if candidates:
+        candidates.sort(key=lambda x: -x[1])
+        return candidates[0][0]
+
+    # 5. Fuzzy search fallback via search_entities
+    results = mgr.search_entities(name, threshold=0.5)
     if results:
         best = results[0]
         return mgr.find_entity_by_qn(best["qualified_name"])
@@ -1666,6 +1710,194 @@ def sysml_add_cabinet_instance(
 
 
 # ══════════════════════════════════════════════════════════════
+# P1 补充工具 —— chapter_ref / quantity / ip / display_name
+# ══════════════════════════════════════════════════════════════
+
+def sysml_add_chapter_ref(
+    entity_name: str,
+    chapter: str,
+    section_title: str = "",
+    page_range: str = "",
+) -> Dict[str, Any]:
+    """
+    为实体添加文档章节引用，建立实体→文档出处的可追溯链接。
+
+    Args:
+        entity_name: 实体名称
+        chapter: 章节号 (如 "6.3", "1.4")
+        section_title: 章节标题 (如 "系统布局")
+        page_range: 页码范围 (如 "7-9")
+
+    Returns:
+        操作结果
+    """
+    mgr = _get_manager()
+    entity = _find_any_element(mgr, entity_name)
+    if entity is None:
+        return {"ok": False, "error": f"Entity not found: {entity_name}"}
+
+    qn = entity.qualified_name
+    ref_text = f"第{chapter}节"
+    if section_title:
+        ref_text += f" {section_title}"
+    if page_range:
+        ref_text += f" (页码{page_range})"
+
+    # Append to source_sections
+    mgr.update_entity_metadata(
+        qualified_name=qn,
+        append_source_sections=[ref_text],
+    )
+
+    # Store chapter in properties for structured access
+    meta = mgr.get_entity_metadata(qn)
+    chapters = meta.get("properties", {}).get("_chapters", [])
+    chapters.append(chapter)
+    mgr.update_entity_metadata(
+        qualified_name=qn,
+        update_properties={"_chapters": chapters, "_source_chapter": chapter},
+    )
+
+    return {
+        "ok": True,
+        "entity": entity_name,
+        "chapter_ref": ref_text,
+    }
+
+
+def sysml_add_quantity(
+    entity_name: str,
+    count: int,
+    unit: str = "",
+) -> Dict[str, Any]:
+    """
+    为实体设置精确的数量信息。
+
+    Args:
+        entity_name: 实体名称
+        count: 数量
+        unit: 单位 (如 "个", "台", "套")
+
+    Returns:
+        操作结果
+    """
+    mgr = _get_manager()
+    entity = _find_any_element(mgr, entity_name)
+    if entity is None:
+        return {"ok": False, "error": f"Entity not found: {entity_name}"}
+
+    qn = entity.qualified_name
+    mgr.update_entity_metadata(
+        qualified_name=qn,
+        update_properties={"_count": count, "_count_unit": unit or "个"},
+    )
+
+    # Also set multiplicity on Usage entities
+    if isinstance(entity, Usage):
+        from sysml.sysml_model import Multiplicity
+        entity.multiplicity = Multiplicity(lower=str(count), upper=str(count))
+
+    return {
+        "ok": True,
+        "entity": entity_name,
+        "count": count,
+        "unit": unit or "个",
+    }
+
+
+def sysml_add_ip_config(
+    entity_name: str,
+    ip_address: str = "",
+    subnet: str = "",
+    gateway: str = "",
+    dns: str = "",
+    description: str = "",
+) -> Dict[str, Any]:
+    """
+    为实体添加 IP 网络配置信息。
+
+    Args:
+        entity_name: 实体名称 (如 ManagementNode, CMU)
+        ip_address: IP 地址
+        subnet: 子网掩码
+        gateway: 网关
+        dns: DNS 服务器
+        description: 网络描述
+
+    Returns:
+        操作结果
+    """
+    mgr = _get_manager()
+    entity = _find_any_element(mgr, entity_name)
+    if entity is None:
+        return {"ok": False, "error": f"Entity not found: {entity_name}"}
+
+    qn = entity.qualified_name
+    ip_config = {}
+    if ip_address:
+        ip_config["ip"] = ip_address
+    if subnet:
+        ip_config["subnet"] = subnet
+    if gateway:
+        ip_config["gateway"] = gateway
+    if dns:
+        ip_config["dns"] = dns
+    if description:
+        ip_config["description"] = description
+
+    mgr.update_entity_metadata(
+        qualified_name=qn,
+        update_properties={"_ip_config": ip_config},
+    )
+
+    # Register IP as alias for easy lookup
+    if ip_address:
+        mgr.add_alias(qn, ip_address)
+
+    return {
+        "ok": True,
+        "entity": entity_name,
+        "ip_config": ip_config,
+    }
+
+
+def sysml_set_display_name(
+    entity_name: str,
+    display_name: str,
+) -> Dict[str, Any]:
+    """
+    为实体设置中文显示名并注册别名，防止 CamelCase 丢失语义。
+
+    Args:
+        entity_name: 实体名称 (如 "compute_module")
+        display_name: 中文显示名 (如 "计算模块")
+
+    Returns:
+        操作结果
+    """
+    mgr = _get_manager()
+    entity = _find_any_element(mgr, entity_name)
+    if entity is None:
+        return {"ok": False, "error": f"Entity not found: {entity_name}"}
+
+    qn = entity.qualified_name
+    mgr.update_entity_metadata(
+        qualified_name=qn,
+        update_properties={"_display_name": display_name},
+    )
+
+    # Register display_name as alias
+    mgr.add_alias(qn, display_name)
+
+    return {
+        "ok": True,
+        "entity": entity_name,
+        "display_name": display_name,
+        "aliases": mgr._alias_registry.get_aliases(qn),
+    }
+
+
+# ══════════════════════════════════════════════════════════════
 # 核心检索工具 —— sysml_retrieve
 # ══════════════════════════════════════════════════════════════
 
@@ -1996,6 +2228,46 @@ TOOL_DEFINITIONS = {
             "parent_package": {"type": "string", "description": "父包 (默认 Cabinets)", "default": None},
         },
     },
+    # ── P1 补充工具 ──
+    "sysml_add_chapter_ref": {
+        "function": sysml_add_chapter_ref,
+        "description": "为实体添加文档章节引用，建立实体→文档出处的可追溯链接。",
+        "parameters": {
+            "entity_name": {"type": "string", "description": "实体名称"},
+            "chapter": {"type": "string", "description": "章节号 (如 6.3, 1.4)"},
+            "section_title": {"type": "string", "description": "章节标题", "default": ""},
+            "page_range": {"type": "string", "description": "页码范围", "default": ""},
+        },
+    },
+    "sysml_add_quantity": {
+        "function": sysml_add_quantity,
+        "description": "为实体设置精确的数量信息。如216个计算结点、2个管理结点。",
+        "parameters": {
+            "entity_name": {"type": "string", "description": "实体名称"},
+            "count": {"type": "integer", "description": "数量"},
+            "unit": {"type": "string", "description": "单位 (如 个)", "default": "个"},
+        },
+    },
+    "sysml_add_ip_config": {
+        "function": sysml_add_ip_config,
+        "description": "为实体添加IP网络配置信息。主机IP、子网、网关等。",
+        "parameters": {
+            "entity_name": {"type": "string", "description": "实体名称 (如 ManagementNode, CMU)"},
+            "ip_address": {"type": "string", "description": "IP地址", "default": ""},
+            "subnet": {"type": "string", "description": "子网掩码", "default": ""},
+            "gateway": {"type": "string", "description": "网关", "default": ""},
+            "dns": {"type": "string", "description": "DNS服务器", "default": ""},
+            "description": {"type": "string", "description": "网络描述", "default": ""},
+        },
+    },
+    "sysml_set_display_name": {
+        "function": sysml_set_display_name,
+        "description": "为实体设置中文显示名并注册别名，防止CamelCase丢失语义。如compute_module → 计算模块。",
+        "parameters": {
+            "entity_name": {"type": "string", "description": "实体名称 (如 compute_module)"},
+            "display_name": {"type": "string", "description": "中文显示名 (如 计算模块)"},
+        },
+    },
 }
 
 
@@ -2007,6 +2279,10 @@ QUERY_AGENT_TOOL_NAMES = [
     "sysml_add_command",
     "sysml_set_hostname",
     "sysml_add_cabinet_instance",
+    "sysml_add_chapter_ref",
+    "sysml_add_quantity",
+    "sysml_add_ip_config",
+    "sysml_set_display_name",
     "sysml_resolve_hv",
 ]
 
