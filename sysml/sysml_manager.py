@@ -795,6 +795,25 @@ class SysMLManager:
         if source is None or target is None:
             return None
 
+        source_name = source.name
+
+        # 收集 source 所有可能的引用形式（用于后续关系重定向）
+        source_all_refs: set = {source_qn}
+        if source_name:
+            source_all_refs.add(source_name)
+            source_all_refs.add(AliasRegistry._normalize(source_name))
+        for alias in self._alias_registry.get_aliases(source_qn):
+            source_all_refs.add(alias)
+            source_all_refs.add(AliasRegistry._normalize(alias))
+        for alias_key, mapped_qn in list(self._alias_registry._alias_map.items()):
+            if mapped_qn == source_qn:
+                source_all_refs.add(alias_key)
+
+        # 1. 将 source 自身名称注册为 target 的别名
+        if source_name:
+            self._alias_registry.register(target_qn, [source_name])
+
+        # 2. 合并 metadata
         source_meta = self._entity_metadata.pop(source_qn, {})
         target_meta = self._entity_metadata.setdefault(target_qn, {
             "description": "", "source_sections": [], "source_text": "", "properties": {},
@@ -816,8 +835,24 @@ class SysMLManager:
         if source_meta.get("properties"):
             target_meta.setdefault("properties", {}).update(source_meta["properties"])
 
+        # 3. 转移别名注册表
         self._alias_registry.transfer(source_qn, target_qn)
 
+        # 4. 重定向 source 的所有关系到 target
+        target_name = target.name
+        for rel in self.get_all_relations():
+            if not hasattr(rel, "ends"):
+                continue
+            for end in rel.ends:
+                if end.ref in source_all_refs:
+                    end.ref = target_name
+            if rel.name and source_name:
+                for old_ref in source_all_refs:
+                    if old_ref in rel.name:
+                        rel.name = rel.name.replace(old_ref, target_name)
+                        break
+
+        # 5. 删除 source 元素
         self.remove_element(source)
         return target_qn
 
