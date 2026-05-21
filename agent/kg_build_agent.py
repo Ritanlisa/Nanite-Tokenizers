@@ -563,7 +563,10 @@ class KGBuildAgent:
         try:
             # Agent 自主循环提取，使用较大的超时
             await asyncio.wait_for(
-                agent.ainvoke({"messages": [HumanMessage(content=prompt)]}),
+                agent.ainvoke(
+                    {"messages": [HumanMessage(content=prompt)]},
+                    config={"recursion_limit": self.max_iterations},
+                ),
                 timeout=self.timeout * 30,  # 全局超时：30个 timeouts
             )
         except asyncio.TimeoutError:
@@ -641,7 +644,10 @@ class KGBuildAgent:
 
         try:
             await asyncio.wait_for(
-                agent.ainvoke({"messages": [HumanMessage(content=prompt)]}),
+                agent.ainvoke(
+                    {"messages": [HumanMessage(content=prompt)]},
+                    config={"recursion_limit": self.max_iterations},
+                ),
                 timeout=self.timeout * max(10, len(sections)),
             )
         except asyncio.TimeoutError:
