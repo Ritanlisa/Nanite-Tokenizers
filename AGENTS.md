@@ -62,3 +62,25 @@ KGBuildAgent (LangChain Agent)
 - 不枚举具体实体类型清单（避免"对着试卷复习"）
 - 给方向性指导，让 LLM 自主发现
 - 从整体到局部导航
+
+## 已知 Bug 与踩坑记录
+
+### Relation ends 在序列化时丢失 (2026-05 发现并修复)
+- **症状**: `.sysml` 文件中 relation 只有名字（如 `connection 'A_B_Connection';`），没有 `connect to` 子句，导致加载后 ends=[]，KG 完全不连通
+- **根因**: `ConnectionUsage.to_text()` 对有名字的 connection 直接调用父类 `Usage.to_text()`，不输出 ends。因为 `if not self.name` 判断，有名字就跳过 connect 简写
+- **修复**: `sysml/sysml_model.py:328` — 当有名字且有 ends 时，用 body block 格式序列化（`connection name { connect A to B; }`）
+- **协同修复**: `sysml/sysml_parser.py:172` — transformer 的 `usage()` 方法检测 body 中的 `connect_usage`，将其 ends 复制到父级 ConnectionUsage
+- **影响**: 之前构建的所有 KG 文件（如 AIOPS_New/knowledge_graph.sysml）中 relation 的 ends 全部丢失。重新运行 KG 构建才能使用正确的序列化格式
+
+### _entity_type_name() isinstance 顺序 Bug (2026-05 发现并修复)
+- `scripts/sysml_rag_mcp_server.py:83`
+- AllocationUsage 和 InterfaceUsage 都继承自 ConnectionUsage，但 dict 中 ConnectionUsage 排在前面
+- 导致所有 AllocationUsage 被误判为"连接使用"而非"分配使用"
+- 修复：把子类型（InterfaceUsage, AllocationUsage）排在父类型（ConnectionUsage）前面
+
+### KG 可视化前端 (2026-05 新增)
+- 访问: `GET /kg/viz/{db_name}` (如 `/kg/viz/AIOPS_New`)
+- 数据源: `GET /api/rag/dbs/{db_name}/kg/graph`
+- 技术栈: cytoscape.js CDN + cose-bilkent 布局
+- 功能: 类型筛选、搜索、连通分量统计、孤立节点标记、节点详情面板
+- 启发式边恢复: 当 relation.ends 为空时，从命名约定解析 (A_B_Type → A→B 边)，覆盖率 96% (188/195)
