@@ -240,7 +240,6 @@ function buildCytoscape(nodes, edges) {
       sections: n.sections||[],
       description: n.description||"",
       qname: n.qname,
-      connected: true
     }
   }));
   const cyEdges = edges.filter(e=>filteredIds.has(e.source)&&filteredIds.has(e.target)).map(e => ({
@@ -262,15 +261,15 @@ function buildCytoscape(nodes, edges) {
     style: [
       {selector:"node",style:{
         "background-color":"data(color)","label":"data(label)",
-        "color":"var(--text)","font-size":"10px","font-family":"IBM Plex Mono",
+        "color":"#f6f7fb","font-size":"10px","font-family":"IBM Plex Mono",
         "text-valign":"center","text-halign":"center","text-wrap":"wrap",
-        "text-max-width":"100px","width":"mapData(connected,true,24,16)",
-        "height":"mapData(connected,true,24,16)","border-width":2,
-        "border-color":"#ffffff22","opacity":0.85,
+        "text-max-width":"100px","width":24,"height":24,
+        "border-width":2,"border-color":"rgba(255,255,255,0.13)",
+        "opacity":0.85,
         "text-outline-width":2,"text-outline-color":"#0f1115"
       }},
-      {selector:"node:selected",style:{"border-color":data=>data.color,"border-width":3,"opacity":1}},
-      {selector:"node:hover",style:{"border-color":data=>data.color,"border-width":2,"opacity":1}},
+      {selector:"node:selected",style:{"border-color":"data(color)","border-width":3,"opacity":1}},
+      {selector:"node.hover",style:{"border-color":"data(color)","border-width":2,"opacity":1}},
       {selector:"edge",style:{
         "width":1.2,"line-color":"#4a5568","target-arrow-color":"#4a5568",
         "target-arrow-shape":"triangle","curve-style":"bezier",
@@ -280,10 +279,9 @@ function buildCytoscape(nodes, edges) {
       {selector:"edge[style='dashed']",style:{"line-style":"dashed","line-color":"#fb923c","target-arrow-color":"#fb923c"}},
       {selector:"edge[style='dotted']",style:{"line-style":"dotted","line-color":"#818cf8","target-arrow-color":"#818cf8"}},
       {selector:"edge[style='solid']",style:{"line-color":"#f87171","target-arrow-color":"#f87171"}},
-      {selector:"edge:hover",style:{"opacity":0.8,"width":2}}
+      {selector:"edge.hover",style:{"opacity":0.8,"width":2}}
     ],
-    layout:{name:"cose-bilkent",idealEdgeLength:100,nodeRepulsion:3000,animate:true,randomize:true,numIter:800},
-    wheelSensitivity:0.3,
+    layout:{name:"cose",idealEdgeLength:120,nodeRepulsion:5000,animate:true,numIter:1000},
     minZoom:0.02, maxZoom:3
   });
 
@@ -339,8 +337,8 @@ document.getElementById("searchInput").oninput = function() {
     n.style("height", match ? 24 : 12);
   });
   cy.edges().forEach(e => {
-    const s = e.source().style("opacity") > 0.5;
-    const t = e.target().style("opacity") > 0.5;
+    const s = parseFloat(e.source().style("opacity")) > 0.5;
+    const t = parseFloat(e.target().style("opacity")) > 0.5;
     e.style("opacity", (s&&t) ? 0.4 : 0.04);
   });
 };
