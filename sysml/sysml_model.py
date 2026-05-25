@@ -327,10 +327,17 @@ class ConnectionUsage(Usage):
 
     def to_text(self, indent: int = 0) -> str:
         prefix = "    " * indent
-        if not self.name and not self.short_name and len(self.ends) == 2:
-            # 使用 connect 简写
+        if len(self.ends) == 2:
             e1, e2 = self.ends
-            return f"{prefix}connect {e1.ref} to {e2.ref};"
+            if not self.name and not self.short_name:
+                return f"{prefix}connect {e1.ref} to {e2.ref};"
+            # Named connection with ends: serialize ends in body block for round-trip safety
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {e1.ref} to {e2.ref};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
         else:
             return super().to_text(indent)
 

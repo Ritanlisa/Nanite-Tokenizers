@@ -81,17 +81,17 @@ def _get_manager() -> SysMLManager:
 
 
 def _entity_type_name(entity: Any) -> str:
-    """返回人类可读的实体类型名称"""
+    """返回人类可读的实体类型名称（子类型排在父类型前，避免 isinstance 误判）"""
     type_map = {
         PartDef: "部件定义", PartUsage: "部件使用",
         AttributeDef: "属性定义", AttributeUsage: "属性使用",
         PortDef: "端口定义", PortUsage: "端口使用",
         ItemDef: "项定义", ItemUsage: "项使用",
-        ConnectionDef: "连接定义", ConnectionUsage: "连接使用",
-        InterfaceUsage: "接口使用", InterfaceDef: "接口定义",
-        AllocationUsage: "分配使用", AllocationDef: "分配定义",
         RequirementDef: "需求定义", RequirementUsage: "需求使用",
         CommandDef: "命令定义",
+        InterfaceUsage: "接口使用", InterfaceDef: "接口定义",
+        AllocationUsage: "分配使用", AllocationDef: "分配定义",
+        ConnectionDef: "连接定义", ConnectionUsage: "连接使用",
         Package: "包",
     }
     for cls, name in type_map.items():
@@ -2354,7 +2354,7 @@ def _mcp_serve() -> None:
                 required = []
                 for k, v in defn["parameters"].items():
                     entry = {"type": v["type"], "description": v.get("description", "")}
-                    if v.get("default") is not None:
+                    if "default" in v:
                         entry["default"] = v["default"]
                     else:
                         required.append(k)

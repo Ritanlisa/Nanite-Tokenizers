@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>KG Viz — Nanite</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<style>
+:root {
+  --bg: #0f1115; --panel: #171a21; --panel2: #202533;
+  --text: #f6f7fb; --muted: #9aa3b2; --accent: #f5c26b; --accent2: #6bd1f5;
+  --ring: rgba(245,194,107,0.4);
+}
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;font-family:"Space Grotesk",system-ui,sans-serif;color:var(--text);background:var(--bg);overflow:hidden;height:100vh}
+.app{display:grid;grid-template-columns:260px 1fr 300px;height:100vh;gap:0}
+
+/* ── Left Sidebar ── */
+.sidebar{background:var(--panel);border-right:1px solid rgba(255,255,255,0.08);display:flex;flex-direction:column;padding:16px;gap:12px;overflow-y:auto}
+.sidebar h2{font-size:15px;margin:0;color:var(--accent);letter-spacing:0.04em}
+.db-select select{width:100%;padding:8px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.12);background:var(--panel2);color:var(--text);font-size:13px;font-family:inherit}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat{padding:10px;border-radius:8px;background:var(--panel2);text-align:center}
+.stat .val{font-size:18px;font-weight:600;font-family:"IBM Plex Mono",monospace}
+.stat .lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-top:2px}
+.stat.good .val{color:#34d399}.stat.warn .val{color:var(--accent)}.stat.bad .val{color:#f87171}
+
+.search input{width:100%;padding:8px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.12);background:var(--panel2);color:var(--text);font-size:13px;font-family:inherit}
+.search input::placeholder{color:var(--muted)}
+
+.type-filters{display:flex;flex-wrap:wrap;gap:6px}
+.type-chip{font-size:10px;padding:4px 10px;border-radius:20px;border:1px solid;cursor:pointer;opacity:0.45;transition:opacity 0.15s;user-select:none}
+.type-chip.on{opacity:1}
+.comp-list{font-size:11px;color:var(--muted);overflow-y:auto;flex:1}
+.comp-list .comp{display:flex;justify-content:space-between;padding:4px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent}
+.comp-list .comp:hover{background:var(--panel2);border-color:rgba(255,255,255,0.08)}
+.comp-list .comp.selected{border-color:var(--accent2)}
+.comp-list .comp .size{font-family:"IBM Plex Mono",monospace;color:var(--text)}
+
+/* ── Center Canvas ── */
+.canvas-wrap{position:relative}
+#cy{width:100%;height:100%}
+.legend{position:absolute;bottom:16px;left:16px;display:flex;flex-wrap:wrap;gap:8px;background:rgba(23,26,33,0.92);padding:10px 14px;border-radius:8px;border:1px solid rgba(255,255,255,0.08)}
+.legend .dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:4px;vertical-align:middle}
+.legend-item{font-size:10px;color:var(--muted)}
+
+/* ── Right Detail Panel ── */
+.detail{background:var(--panel);border-left:1px solid rgba(255,255,255,0.08);padding:16px;overflow-y:auto;display:flex;flex-direction:column;gap:14px}
+.detail h3{font-size:16px;margin:0;word-break:break-all}
+.detail .meta{font-size:11px;color:var(--muted)}
+.detail .meta span{margin-right:12px}
+.detail .tags{display:flex;flex-wrap:wrap;gap:4px}
+.detail .tag{font-size:10px;padding:2px 8px;border-radius:12px;background:var(--panel2);color:var(--muted)}
+.detail .section h4{font-size:11px;color:var(--accent);text-transform:uppercase;letter-spacing:0.06em;margin:0 0 4px}
+.detail .section .list{font-size:12px;color:var(--muted)}
+.detail .empty{font-size:13px;color:var(--muted);text-align:center;margin-top:60px}
+.detail a{color:var(--accent2);text-decoration:none;font-size:11px}
+.detail a:hover{text-decoration:underline}
+
+/* ── Edge type legends in center ── */
+.canvas-legend{position:absolute;top:16px;right:16px;display:flex;flex-direction:column;gap:4px;background:rgba(23,26,33,0.92);padding:8px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);font-size:10px;color:var(--muted)}
+.canvas-legend .el{display:flex;align-items:center;gap:6px}
+.canvas-legend .eline{width:24px;height:2px}
+.canvas-legend .eline.solid{border-top:2px solid}.canvas-legend .eline.dashed{border-top:2px dashed}.canvas-legend .eline.dotted{border-top:2px dotted}
+
+/* loading */
+.loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:var(--bg);z-index:10}
+.loading .spinner{width:40px;height:40px;border:3px solid var(--panel2);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <h2>KG Viz</h2>
+    <div class="db-select">
+      <select id="dbSelect"><option value="">Loading...</option></select>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="val" id="stEnt">-</div><div class="lbl">Entities</div></div>
+      <div class="stat"><div class="val" id="stRel">-</div><div class="lbl">Edges</div></div>
+      <div class="stat warn"><div class="val" id="stComp">-</div><div class="lbl">Components</div></div>
+      <div class="stat bad"><div class="val" id="stIso">-</div><div class="lbl">Isolated</div></div>
+    </div>
+    <div class="search"><input id="searchInput" placeholder="Search entity name..."/></div>
+    <div class="type-filters" id="typeFilters"></div>
+    <div class="comp-list" id="compList"></div>
+  </div>
+
+  <!-- Canvas -->
+  <div class="canvas-wrap">
+    <div class="loading" id="loading"><div class="spinner"></div></div>
+    <div id="cy"></div>
+    <div class="legend" id="legend"></div>
+    <div class="canvas-legend">
+      <div class="el"><span class="eline solid" style="border-color:#f87171"></span> Connection</div>
+      <div class="el"><span class="eline dashed" style="border-color:#fb923c"></span> Interface</div>
+      <div class="el"><span class="eline dotted" style="border-color:#818cf8"></span> Allocation</div>
+    </div>
+  </div>
+
+  <!-- Detail -->
+  <div class="detail" id="detailPane">
+    <div class="empty">Click a node to see details</div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+<script>
+// ── Config ──
+const AUTO_DB = "AUTO_DB_NAME";
+let currentData = null;
+let cy = null;
+let activeTypes = new Set();
+
+const TYPE_COLORS = {
+  PartDef:"#6bd1f5",AttributeDef:"#a78bfa",PortDef:"#f5c26b",
+  ItemDef:"#34d399",ConnectionDef:"#f87171",InterfaceDef:"#fb923c",
+  AllocationDef:"#818cf8",CommandDef:"#f472b6",RequirementDef:"#94a3b8",
+  PartUsage:"#6bd1f5",PortUsage:"#f5c26b",AttributeUsage:"#a78bfa",
+  ConnectionUsage:"#f87171",InterfaceUsage:"#fb923c",AllocationUsage:"#818cf8"
+};
+
+const EDGE_STYLES = {
+  ConnectionUsage:"solid",ConnectionDef:"solid",
+  InterfaceUsage:"dashed",InterfaceDef:"dashed",
+  AllocationUsage:"dotted",AllocationDef:"dotted"
+};
+
+// ── DB selector ──
+async function loadDatabases() {
+  try {
+    const r = await fetch("/api/rag/dbs");
+    const dbs = await r.json();
+    const sel = document.getElementById("dbSelect");
+    sel.innerHTML = "";
+    let found = false;
+    (dbs.db_names||dbs||[]).forEach(db => {
+      const opt = document.createElement("option");
+      opt.value = db; opt.textContent = db;
+      sel.appendChild(opt);
+      if (db === AUTO_DB) { sel.value = db; found = true; }
+    });
+    if (!found && sel.options.length > 0) sel.value = sel.options[0].value;
+    if (sel.value) loadGraph(sel.value);
+  } catch(e) { console.error(e); }
+}
+document.getElementById("dbSelect").onchange = e => loadGraph(e.target.value);
+
+// ── Load Graph ──
+async function loadGraph(dbName) {
+  if (!dbName) return;
+  document.getElementById("loading").style.display = "flex";
+  document.getElementById("detailPane").innerHTML = '<div class="empty">Click a node to see details</div>';
+  try {
+    const r = await fetch(`/api/rag/dbs/${encodeURIComponent(dbName)}/kg/graph`);
+    currentData = await r.json();
+    renderGraph();
+  } catch(e) {
+    console.error(e);
+    alert("Failed to load: " + e.message);
+  }
+  document.getElementById("loading").style.display = "none";
+}
+
+// ── Render Graph ──
+function renderGraph() {
+  const d = currentData;
+  if (!d) return;
+
+  // Stats
+  document.getElementById("stEnt").textContent = d.total_entities;
+  document.getElementById("stRel").textContent = d.total_edges;
+  document.getElementById("stComp").textContent = d.connected_components;
+  document.getElementById("stIso").textContent = d.isolated_count;
+
+  // Type filters
+  const typeSet = new Set(d.nodes.map(n=>n.type));
+  const filterEl = document.getElementById("typeFilters");
+  filterEl.innerHTML = "";
+  activeTypes = new Set(typeSet);
+  [...typeSet].sort().forEach(t => {
+    const chip = document.createElement("span");
+    chip.className = "type-chip on";
+    chip.style.borderColor = TYPE_COLORS[t]||"#666";
+    chip.style.color = TYPE_COLORS[t]||"#666";
+    chip.textContent = t;
+    chip.onclick = () => {
+      if (activeTypes.has(t)) { activeTypes.delete(t); chip.classList.remove("on"); }
+      else { activeTypes.add(t); chip.classList.add("on"); }
+      applyFilters();
+    };
+    filterEl.appendChild(chip);
+  });
+
+  // Legend
+  const legendEl = document.getElementById("legend");
+  legendEl.innerHTML = [...typeSet].sort().map(t => {
+    const c = TYPE_COLORS[t]||"#666";
+    return `<span class="legend-item"><span class="dot" style="background:${c}"></span>${t}</span>`;
+  }).join("");
+
+  // Component list
+  const compEl = document.getElementById("compList");
+  const sizes = d.component_sizes||[];
+  compEl.innerHTML = "";
+  if (sizes.length > 1) {
+    sizes.forEach((sz,i) => {
+      const div = document.createElement("div");
+      div.className = "comp";
+      div.innerHTML = `<span>Component ${i+1}</span><span class="size">${sz}</span>`;
+      div.onclick = () => {
+        document.querySelectorAll("#compList .comp").forEach(c=>c.classList.remove("selected"));
+        div.classList.add("selected");
+      };
+      compEl.appendChild(div);
+    });
+  }
+
+  // Build cytoscape elements
+  buildCytoscape(d.nodes, d.edges);
+}
+
+function buildCytoscape(nodes, edges) {
+  if (cy) cy.destroy();
+
+  // Filter nodes
+  const filteredIds = new Set(nodes.filter(n=>activeTypes.has(n.type)).map(n=>n.id));
+  const cyNodes = nodes.filter(n=>filteredIds.has(n.id)).map(n => ({
+    data: {
+      id: n.id,
+      label: n.id,
+      type: n.type,
+      cntype: n.cntype,
+      color: n.color,
+      aliases: n.aliases||[],
+      sections: n.sections||[],
+      description: n.description||"",
+      qname: n.qname,
+      connected: true
+    }
+  }));
+  const cyEdges = edges.filter(e=>filteredIds.has(e.source)&&filteredIds.has(e.target)).map(e => ({
+    data: {
+      id: `${e.source}→${e.target}::${e.label}`,
+      source: e.source,
+      target: e.target,
+      label: e.label,
+      type: e.type,
+      cntype: e.cntype,
+      style: EDGE_STYLES[e.type]||"solid"
+    }
+  }));
+
+  const container = document.getElementById("cy");
+  cy = cytoscape({
+    container,
+    elements: {nodes:cyNodes,edges:cyEdges},
+    style: [
+      {selector:"node",style:{
+        "background-color":"data(color)","label":"data(label)",
+        "color":"var(--text)","font-size":"10px","font-family":"IBM Plex Mono",
+        "text-valign":"center","text-halign":"center","text-wrap":"wrap",
+        "text-max-width":"100px","width":"mapData(connected,true,24,16)",
+        "height":"mapData(connected,true,24,16)","border-width":2,
+        "border-color":"#ffffff22","opacity":0.85,
+        "text-outline-width":2,"text-outline-color":"#0f1115"
+      }},
+      {selector:"node:selected",style:{"border-color":data=>data.color,"border-width":3,"opacity":1}},
+      {selector:"node:hover",style:{"border-color":data=>data.color,"border-width":2,"opacity":1}},
+      {selector:"edge",style:{
+        "width":1.2,"line-color":"#4a5568","target-arrow-color":"#4a5568",
+        "target-arrow-shape":"triangle","curve-style":"bezier",
+        "arrow-scale":0.8,"opacity":0.4,"label":"data(label)",
+        "font-size":"7px","color":"#4a5568","text-opacity":0.6
+      }},
+      {selector:"edge[style='dashed']",style:{"line-style":"dashed","line-color":"#fb923c","target-arrow-color":"#fb923c"}},
+      {selector:"edge[style='dotted']",style:{"line-style":"dotted","line-color":"#818cf8","target-arrow-color":"#818cf8"}},
+      {selector:"edge[style='solid']",style:{"line-color":"#f87171","target-arrow-color":"#f87171"}},
+      {selector:"edge:hover",style:{"opacity":0.8,"width":2}}
+    ],
+    layout:{name:"cose-bilkent",idealEdgeLength:100,nodeRepulsion:3000,animate:true,randomize:true,numIter:800},
+    wheelSensitivity:0.3,
+    minZoom:0.02, maxZoom:3
+  });
+
+  cy.on("layoutstop", () => {
+    document.querySelectorAll("#compList .comp").forEach(c=>c.classList.remove("selected"));
+  });
+
+  // Click node → detail
+  cy.on("tap", "node", evt => {
+    const n = evt.target.data();
+    showDetail(n);
+  });
+  cy.on("tap", evt => {
+    if (evt.target === cy) showDetail(null);
+  });
+}
+
+// ── Detail Panel ──
+function showDetail(nodeData) {
+  const pane = document.getElementById("detailPane");
+  if (!nodeData) {
+    pane.innerHTML = '<div class="empty">Click a node to see details</div>';
+    return;
+  }
+  const aliasTags = (nodeData.aliases||[]).map(a=>`<span class="tag">${esc(a)}</span>`).join("")||'<span class="tag">none</span>';
+  const secs = (nodeData.sections||[]).slice(0,10).map(s=>`<li>${esc(s)}</li>`).join("")||'<li>unknown</li>';
+  pane.innerHTML = `
+    <h3>${esc(nodeData.id)}</h3>
+    <div class="meta"><span style="color:${nodeData.color}">${nodeData.cntype}</span> <span>${nodeData.type}</span></div>
+    ${nodeData.description?`<div style="font-size:12px;color:var(--muted);line-height:1.5">${esc(nodeData.description)}</div>`:""}
+    <div class="section"><h4>Aliases (${(nodeData.aliases||[]).length})</h4><div class="tags">${aliasTags}</div></div>
+    <div class="section"><h4>Source Sections (${(nodeData.sections||[]).length})</h4><div class="list"><ul style="margin:0;padding-left:16px">${secs}</ul></div></div>
+    <div class="section"><h4>Qualified Name</h4><div class="tag">${esc(nodeData.qname)}</div></div>
+    <a href="/api/rag/dbs/${getDb()}/kg/entity/${encodeURIComponent(nodeData.id)}" target="_blank">View JSON →</a>
+  `;
+}
+
+function getDb(){return document.getElementById("dbSelect").value}
+function esc(s){const el=document.createElement("div");el.textContent=s;return el.innerHTML}
+
+// ── Filters ──
+function applyFilters() {
+  if (!currentData) return;
+  buildCytoscape(currentData.nodes, currentData.edges);
+}
+document.getElementById("searchInput").oninput = function() {
+  const q = this.value.toLowerCase().trim();
+  if (!cy) return;
+  cy.nodes().forEach(n => {
+    const match = !q || n.data("id").toLowerCase().includes(q) || n.data("label").toLowerCase().includes(q);
+    n.style("opacity", match ? 0.85 : 0.08);
+    n.style("width", match ? 24 : 12);
+    n.style("height", match ? 24 : 12);
+  });
+  cy.edges().forEach(e => {
+    const s = e.source().style("opacity") > 0.5;
+    const t = e.target().style("opacity") > 0.5;
+    e.style("opacity", (s&&t) ? 0.4 : 0.04);
+  });
+};
+
+// Initial load
+loadDatabases();
+</script>
+</body>
+</html>

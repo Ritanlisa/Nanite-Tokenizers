@@ -169,7 +169,10 @@ class SysMLTransformer(Transformer):
         self._apply_usage_props(usage_obj, multiplicity, specialization, value)
         members = body if isinstance(body, list) else (body[0] if isinstance(body, tuple) else [])
         for m in (members or []):
-            if isinstance(m, tuple):
+            if isinstance(m, ConnectionUsage) and len(m.ends) > 0:
+                # connect_usage inside a connection body → copy ends to parent
+                usage_obj.ends = m.ends
+            elif isinstance(m, tuple):
                 for sub in m:
                     usage_obj.add_member(sub)
             elif m is not None:

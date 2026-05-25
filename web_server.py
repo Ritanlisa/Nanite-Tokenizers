@@ -14,7 +14,7 @@ import _patch_py314  # noqa: F401  (Python 3.14+ PEP 649 compatibility)
 import yaml
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -1712,6 +1712,173 @@ def create_app() -> FastAPI:
             "matches": results,
         }
 
+    @app.get("/api/rag/dbs/{db_name}/kg/graph")
+    async def kg_graph(db_name: str):
+        """返回完整知识图谱数据（节点+边），供可视化前端使用。"""
+        name = _normalize_db_name(db_name)
+        if not _is_valid_db(name):
+            raise HTTPException(status_code=404, detail="Database not found")
+        mgr = _load_kg_manager(name)
+        from scripts.sysml_rag_mcp_server import _entity_type_name
+
+        _TYPE_COLORS = {
+            "PartDef": "#6bd1f5", "AttributeDef": "#a78bfa", "PortDef": "#f5c26b",
+            "ItemDef": "#34d399", "ConnectionDef": "#f87171", "InterfaceDef": "#fb923c",
+            "AllocationDef": "#818cf8", "CommandDef": "#f472b6", "RequirementDef": "#94a3b8",
+            "PartUsage": "#6bd1f5", "PortUsage": "#f5c26b", "AttributeUsage": "#a78bfa",
+            "ConnectionUsage": "#f87171", "InterfaceUsage": "#fb923c", "AllocationUsage": "#818cf8",
+        }
+
+        entities = mgr.get_all_entities()
+        relations = mgr.get_all_relations()
+
+        # Build entity node list
+        entity_ids: set = set()
+        nodes = []
+        for e in entities:
+            eid = getattr(e, "name", "")
+            entity_ids.add(eid)
+            t = type(e).__name__
+            meta = mgr.get_entity_metadata(e.qualified_name)
+            nodes.append({
+                "id": eid,
+                "qname": e.qualified_name,
+                "type": t,
+                "cntype": _entity_type_name(e),
+                "color": _TYPE_COLORS.get(t, "#9aa3b2"),
+                "aliases": mgr._alias_registry.get_aliases(e.qualified_name),
+                "sections": meta.get("source_sections", []),
+                "description": (meta.get("description", "") or "")[:200],
+            })
+
+        # ── Helper: resolve an entity by name or alias ──
+        def _resolve_entity(name_str: str) -> Optional[str]:
+            """Return canonical entity name if found via exact match or alias."""
+            if name_str in entity_ids:
+                return name_str
+            qn = mgr._alias_registry.lookup(name_str)
+            if qn:
+                parts = qn.split("::")
+                last = parts[-1] if parts else name_str
+                if last in entity_ids:
+                    return last
+            return None
+
+        # ── Helper: heuristic parsing of relation name → (source, target) ──
+        _REL_TYPE_RE = re.compile(r'_(connection|allocation|interface)$', re.IGNORECASE)
+        def _parse_ends_from_name(rel_name: str) -> Optional[tuple]:
+            """If relation ends are empty, try to parse source/target from name."""
+            m = _REL_TYPE_RE.search(rel_name)
+            if not m:
+                return None
+            core = rel_name[:m.start()]
+            if '_' not in core:
+                return None
+            parts = core.split('_')
+            # Strategy 1: exact match both sides (entity name or alias)
+            for split in range(1, len(parts)):
+                src = '_'.join(parts[:split])
+                tgt = '_'.join(parts[split:])
+                if _resolve_entity(src) and _resolve_entity(tgt):
+                    return (_resolve_entity(src), _resolve_entity(tgt))
+            # Strategy 2: greedy longest source match
+            for split in range(len(parts) - 1, 0, -1):
+                src = '_'.join(parts[:split])
+                if _resolve_entity(src):
+                    tgt = '_'.join(parts[split:])
+                    resolved_tgt = _resolve_entity(tgt)
+                    if resolved_tgt:
+                        return (_resolve_entity(src), resolved_tgt)
+            # Strategy 3: greedy longest target match
+            for split in range(1, len(parts)):
+                tgt = '_'.join(parts[split:])
+                if _resolve_entity(tgt):
+                    src = '_'.join(parts[:split])
+                    resolved_src = _resolve_entity(src)
+                    if resolved_src:
+                        return (resolved_src, _resolve_entity(tgt))
+            return None
+
+        # Build edge list from relations; deduplicate by (source, target, label)
+        edges_seen: set = set()
+        edges = []
+        for rel in relations:
+            ends = getattr(rel, "ends", None) or []
+            rlabel = getattr(rel, "name", "")
+            rtype = type(rel).__name__
+            rcntype = _entity_type_name(rel)
+
+            # Use textual ends if present; otherwise heuristic from name
+            if len(ends) >= 2:
+                end_pairs = [(ends[i].ref, ends[j].ref) for i in range(len(ends)) for j in range(len(ends)) if i != j]
+                for src, tgt in end_pairs:
+                    key = (src, tgt, rlabel)
+                    if key in edges_seen:
+                        continue
+                    resolved_src = _resolve_entity(src) or src
+                    resolved_tgt = _resolve_entity(tgt) or tgt
+                    edges_seen.add(key)
+                    edges.append({
+                        "source": resolved_src, "target": resolved_tgt,
+                        "label": rlabel, "type": rtype, "cntype": rcntype,
+                    })
+            else:
+                # Heuristic: parse ends from relation name
+                parsed = _parse_ends_from_name(rlabel)
+                if parsed:
+                    src, tgt = parsed
+                    key = (src, tgt, rlabel)
+                    if key not in edges_seen:
+                        edges_seen.add(key)
+                        edges.append({
+                            "source": src, "target": tgt,
+                            "label": rlabel, "type": rtype, "cntype": rcntype,
+                            "heuristic": True,
+                        })
+
+        # Detect isolated nodes (no edge involvement)
+        connected_ids: set = set()
+        for e in edges:
+            connected_ids.add(e["source"])
+            connected_ids.add(e["target"])
+        isolated = [n for n in nodes if n["id"] not in connected_ids]
+
+        # Connected component analysis via BFS
+        adj: dict[str, set] = {n["id"]: set() for n in nodes}
+        for e in edges:
+            s, t = e["source"], e["target"]
+            if s in adj:
+                adj[s].add(t)
+            if t in adj:
+                adj[t].add(s)
+        visited: set = set()
+        components = []
+        for nid in adj:
+            if nid not in visited:
+                queue = [nid]
+                visited.add(nid)
+                comp: list = []
+                while queue:
+                    cur = queue.pop(0)
+                    comp.append(cur)
+                    for nb in adj.get(cur, set()):
+                        if nb not in visited:
+                            visited.add(nb)
+                            queue.append(nb)
+                components.append(comp)
+
+        return {
+            "database": name,
+            "total_entities": len(nodes),
+            "total_relations": len(relations),
+            "total_edges": len(edges),
+            "isolated_count": len(isolated),
+            "connected_components": len(components),
+            "component_sizes": sorted([len(c) for c in components], reverse=True),
+            "nodes": nodes,
+            "edges": edges,
+        }
+
     @app.post("/api/rag/dbs/{db_name}/kg/re-extract")
     async def kg_re_extract(db_name: str):
         name = _normalize_db_name(db_name)
@@ -1805,6 +1972,25 @@ def create_app() -> FastAPI:
 
             asyncio.create_task(delayed_exit())
         return {"status": "ok"}
+
+    @app.get("/kg/viz.html", response_class=HTMLResponse)
+    async def kg_viz_page():
+        viz_path = os.path.join(WEB_DIR, "kg_viz.html")
+        if not os.path.isfile(viz_path):
+            raise HTTPException(status_code=404, detail="kg_viz.html not found")
+        with open(viz_path, encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+
+    @app.get("/kg/viz/{db_name:path}", response_class=HTMLResponse)
+    async def kg_viz(db_name: str = ""):
+        viz_path = os.path.join(WEB_DIR, "kg_viz.html")
+        if not os.path.isfile(viz_path):
+            raise HTTPException(status_code=404, detail="kg_viz.html not found")
+        with open(viz_path, encoding="utf-8") as f:
+            html = f.read()
+        if db_name:
+            html = html.replace("AUTO_DB_NAME", db_name)
+        return HTMLResponse(content=html)
 
     app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
     return app
