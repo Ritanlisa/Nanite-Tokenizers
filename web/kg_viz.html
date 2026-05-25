@@ -138,7 +138,7 @@ async function loadDatabases() {
     const sel = document.getElementById("dbSelect");
     sel.innerHTML = "";
     let found = false;
-    (dbs.db_names||dbs||[]).forEach(db => {
+    (dbs.databases||dbs.db_names||dbs||[]).forEach(db => {
       const opt = document.createElement("option");
       opt.value = db; opt.textContent = db;
       sel.appendChild(opt);
