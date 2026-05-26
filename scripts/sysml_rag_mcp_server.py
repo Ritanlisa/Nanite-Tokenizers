@@ -902,6 +902,67 @@ def sysml_connected_components() -> Dict[str, Any]:
     }
 
 
+# ── Bracket expansion helpers ─────────────────────────────────
+
+import re as _re
+
+
+def _expand_bracket_name(name: str) -> list[str]:
+    """展开方括号: ion[0-99] → [ion0,...,ion99]; mn[1,3] → [mn1,mn3]"""
+    result = [name]
+    pat_range = _re.compile(r'^(.+)\[(\d+)-(\d+)\](.*)$')
+    while True:
+        changed = False
+        new_result = []
+        for n in result:
+            m = pat_range.match(n)
+            if m:
+                prefix, start, end, suffix = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
+                for i in range(start, end + 1):
+                    new_result.append(f"{prefix}{i}{suffix}")
+                changed = True
+            else:
+                new_result.append(n)
+        result = new_result
+        if not changed:
+            break
+    pat_list = _re.compile(r'^(.+)\[([\d,]+)\](.*)$')
+    while True:
+        changed = False
+        new_result = []
+        for n in result:
+            m = pat_list.match(n)
+            if m:
+                prefix, nums, suffix = m.group(1), m.group(2), m.group(3)
+                for num in nums.split(','):
+                    new_result.append(f"{prefix}{num.strip()}{suffix}")
+                changed = True
+            else:
+                new_result.append(n)
+        result = new_result
+        if not changed:
+            break
+    return result
+
+
+def _expand_relation_pair(source: str, target: str) -> list[tuple[str, str]]:
+    """扩展关系: src[0-2] conn tgt[0-1] → 3×2=6 对"""
+    src_list = _expand_bracket_name(source)
+    tgt_list = _expand_bracket_name(target)
+    if len(src_list) == 1 and len(tgt_list) == 1:
+        return [(source, target)]
+    return [(s, t) for s in src_list for t in tgt_list]
+
+
+def _sanitize_name(name: str) -> str:
+    """清理实体名: 替换括号/空格为下划线，确保 SysML 标识符合法"""
+    name = name.replace('（', '_').replace('）', '')
+    name = name.replace('(', '_').replace(')', '')
+    name = name.replace(' ', '_')
+    name = name.replace('/', '_').replace('\\', '_')
+    return name or "_"
+
+
 # ══════════════════════════════════════════════════════════════
 # 新增：实体检索工具
 # ══════════════════════════════════════════════════════════════
