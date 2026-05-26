@@ -138,10 +138,12 @@ class Settings(BaseSettings):
 
     KG_EXTRACTION_ENABLED: bool = True
     KG_EXTRACTION_MODEL: str = "qwen3-vl:32b"
+    KG_LIGHT_MODEL: str = "qwen3:8b"
+    KG_KEEP_ALIVE: str = "30s"
     KG_EXTRACTION_TEMPERATURE: float = Field(0.1, ge=0.0, le=2.0)
     KG_EXTRACTION_MAX_TOKENS: int = Field(4096, ge=256)
     KG_EXTRACTION_TIMEOUT: int = Field(120, ge=10, le=600)
-    KG_EXTRACTION_MAX_ITERATIONS: int = Field(10, ge=1, le=30)
+    KG_EXTRACTION_MAX_ITERATIONS: int = Field(10, ge=1, le=500)
     KG_MCP_SERVER_COMMAND: str = ""
     KG_MERGE_CONFIDENCE_THRESHOLD: float = Field(0.7, ge=0.0, le=1.0)
 

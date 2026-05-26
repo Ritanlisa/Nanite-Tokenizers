@@ -14,10 +14,19 @@
 RAG_DB_Document (文档树)
     → KGBuildAgent.build_kg_from_document(rag_doc)
         → DocumentTreeState 构建层次树
-        → 统一 Agent (LangChain) + MCP 工具 + 导航工具
-        → 自主导航提取 + 打勾
-        → 跨章节去重 → 保存 .sysml
+        → Phase 1a: 并行 light_llm 调用（Semaphore控制，BATCH_CONCURRENCY=5路并发）
+        → Phase 1b: 顺序 MCP 工具调用来创建实体/关系（去重+创建）
+        → Phase 2: 跨章节去重（无LLM，<1s）
+        → Phase 3: 卸载小模型 → 强模型(llm) LangChain Agent 富化关系/别名
+        → 保存 .sysml
 ```
+
+### 并行架构 (2026-05 新增)
+- Phase 1a: 使用 `asyncio.gather` + `Semaphore(BATCH_CONCURRENCY)` 并行调用 light_llm
+- 所有 LLM 调用先提交（消除 MCP 处理导致的请求间延迟），然后顺序处理 MCP 操作
+- `model_kwargs={"keep_alive": "30s"}` 确保空闲 30s 后自动卸载模型
+- Phase 2 结束后显式调用 Ollama `/api/generate` (`keep_alive=0`) 卸载小模型
+- 大模型（强模型）用于 Phase 3 富化，此时显存已清理
 
 ### 关键文件
 | 文件 | 职责 |

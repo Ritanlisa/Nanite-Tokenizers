@@ -14,9 +14,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import httpx
 
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
@@ -30,51 +34,138 @@ from mcp_client.tool_wrapper import build_mcp_tools
 
 logger = logging.getLogger(__name__)
 
+# Suppress non-fatal MCP client stdio parse errors
+logging.getLogger("mcp.client.stdio").setLevel(logging.WARNING)
+
 # ── System Prompt ────────────────────────────────────────────
 
 UNIFIED_EXTRACTION_SYSTEM_PROMPT = """你是技术文档知识提取专家。请自主导航文档树，提取系统架构知识到 SysML v2 模型。
 
-## 工作流程
-1. 先用 get_document_tree 了解文档整体层次结构
-2. 选择未处理的章节/页面，用 read_section 读取完整内容
-3. 从内容中同时识别实体和关系
-4. 提取完成后用 mark_section_done 打勾
-5. 用 get_progress 确认进度，继续处理剩余内容
-6. **从整体到局部**：先掌握章节目录脉络，再深入具体页面
-7. 无实质架构内容的页面直接打勾跳过
+## ⚠️ 关键规则 — 不打勾空页
+每读完一页，**必须先用 mcp__sysml_search_entity + mcp__sysml_add_entity (或 mcp__sysml_add_relation) 提取至少一个实体或关系**，然后才能 mark_section_done 打勾。
+- 有架构内容 → 搜索去重 → 创建/更新实体或关系 → 打勾
+- 确实没有任何系统架构内容 → 直接打勾（极少发生）
+- **禁止**读完页面后思考一下就打勾而不执行任何 MCP 知识图谱操作
+
+## 工作流程（每页的标准操作序列）
+1. read_section(node_id) → 获取页面完整文本
+2. 从文本中识别实体：组件名、模块名、参数、接口、命令、设备...
+3. 对每个发现的实体：
+   a. mcp__sysml_search_entity(name) → 查重
+   b. 无匹配 → mcp__sysml_add_entity(...) → 创建
+   c. 有匹配 → mcp__sysml_update_entity(...) → 补充
+4. 从文本中识别关系：连接、数据流、依赖...
+5. 对每个发现的关系：mcp__sysml_add_relation(...) → 创建
+6. mark_section_done([node_id]) → 打勾
+7. get_progress() → 确认进度，继续下一页
 
 ## 实体提取
-- 识别任何实质性的系统组成元素
-- 类型参考（非强制清单）：部件/模块/设备、属性/参数、接口/端口、数据结构、需求/约束
-- 对每个候选实体，先用 mcp__sysml_search_entity 搜索是否已存在
-- 搜索到高置信度匹配（confidence >= 0.7）时更新实体，而非新建
-- 搜索无匹配时创建新实体，并注册你识别到的所有别名
-- 记录每个实体的原文出处
+- 类型参考（非强制清单）：部件/模块/设备、属性/参数、接口/端口、数据结构、需求/约束、命令
+- 搜索置信度 >= 0.7 时更新，< 0.7 时新建
+- 记录原文出处和所有别名
 
 ## 关系提取
-- 在实体提取的同时识别关系
-- 关系类型：物理连接（connection）、数据流/信号（connection）、接口实现（interface）、功能分配（allocation）
-- 创建关系前必须验证端点实体存在
+- 类型：connection（物理连接/数据流）、interface（接口实现）、allocation（功能分配）
+- 创建前验证端点存在
+
+## 文档导航
+1. 先用 get_document_tree 了解整体结构
+2. **从整体到局部**：先掌握章节目录脉络，再深入具体页面
+3. 全部打勾即完成
 
 ## 可用工具
-
 ### 文档导航
-- get_document_tree: 查看文档层次结构（含打勾状态）
-- read_section: 读取指定节点/页面的完整内容
-- mark_section_done: 打勾完成，支持批量
-- get_progress: 查看提取进度百分比和剩余页面
+- get_document_tree / read_section / mark_section_done / get_progress
 
 ### 知识图谱操作
-- mcp__sysml_search_entity: 多策略搜索实体（查重用）
-- mcp__sysml_add_entity: 创建新实体
-- mcp__sysml_update_entity: 补充/合并已有实体
-- mcp__sysml_add_alias: 为实体追加别名
-- mcp__sysml_normalize_name: 标准化名称用于比较
-- mcp__sysml_list_entities: 列出所有实体
-- mcp__sysml_add_relation: 创建关系
-- mcp__sysml_get_connections: 查看实体已有的关联
-- mcp__sysml_list_relations: 列出所有关系
-- mcp__sysml_model_summary: 全局统计信息"""
+- mcp__sysml_search_entity / mcp__sysml_add_entity / mcp__sysml_update_entity
+- mcp__sysml_add_alias / mcp__sysml_normalize_name / mcp__sysml_list_entities
+- mcp__sysml_add_relation / mcp__sysml_get_connections / mcp__sysml_list_relations
+- mcp__sysml_model_summary"""
+
+
+# ── Fast Extraction Prompt (qwen3:8b — JSON output, no tool calls) ──
+
+EXTRACTION_CANDIDATES_PROMPT = """你是一个技术文档实体提取器。阅读给定的文档页面文本，输出其中描述的系统架构实体和关系。
+
+## 输出格式
+输出一个JSON数组，每个元素是一个实体或关系：
+
+实体格式: {"type":"PartDef","name":"实体名","description":"简短描述","aliases":["别名"]}
+关系格式: {"relation":true,"type":"Connection","source":"源实体","target":"目标实体","description":"关系描述"}
+
+## 实体类型
+- PartDef: 系统组件、模块、设备、子系统、机柜、服务器
+- AttributeDef: 属性、参数、特性、指标（如带宽400Gbps、处理器数量1024）
+- PortDef: 接口、端口、连接点
+- ItemDef: 数据结构、信息流、消息
+- RequirementDef: 需求、约束、规范要求
+- CommandDef: Shell命令、CLI操作、工具命令（如 yhst, smu_tranfer_cmd, ncid, lspci）
+
+## 关系类型
+- Connection: 物理连接或数据流关系
+- Interface: 接口实现关系
+- Allocation: 功能/资源分配关系
+
+## 示例
+输入文本: "系统提供1个FT计算柜（1024个处理器）和10个MT加速柜（共10240个加速器）"
+输出:
+```json
+[
+  {"type":"PartDef","name":"FT计算柜","description":"1024个处理器","aliases":["FT柜","计算柜"]},
+  {"type":"PartDef","name":"MT加速柜","description":"10个加速柜共10240个加速器","aliases":["MT柜","加速柜"]},
+  {"type":"AttributeDef","name":"处理器数量","description":"FT计算柜包含1024个处理器","aliases":["CPU数量"]}
+]
+```
+
+输入文本: "通过 smu_tranfer_cmd 转发命令，yhst 查看加电信息"
+输出:
+```json
+[
+  {"type":"CommandDef","name":"smu_tranfer_cmd","description":"通过SMU向指定CMU转发命令","aliases":["SMU命令","smu转发"]},
+  {"type":"CommandDef","name":"yhst","description":"查看所有结点加电信息","aliases":["加电查询","yhst命令"]},
+  {"relation":true,"type":"Connection","source":"smu_tranfer_cmd","target":"yhst","description":"通过smu_tranfer_cmd转发yhst命令"}
+]
+```
+
+输入文本无任何系统架构内容时输出: []"""
+
+
+# ── Enrichment Prompt (qwen3-vl:32b — adds aliases, properties, relations) ──
+
+ENRICHMENT_PROMPT = """你是SysML v2知识图谱专家。审查已有的KG实体列表，重点添加关系和别名。
+
+## ⚠️ 核心任务：关系创建（最重要）
+每个实体应与系统中其他实体至少有一条关系。
+- 对每对相关实体，判断关系类型并创建
+- 关系类型: connection(物理连接), interface(接口), allocation(包含/分配)
+- 示例: FT计算柜 allocation 计算处理分系统 (FT柜是计算系统的一部分)
+- 示例: 交换柜 connection 交换设备 (交换设备安装在交换柜中)
+- 示例: yhst allocation CMU (yhst命令在CMU上执行)
+- 示例: 处理器数量 allocation 双路服务器 (服务器有处理器数量属性)
+- **多创建关系，宁可冗余不要遗漏**
+
+## 可用工具及精确参数
+
+### mcp__sysml_get_entity
+获取实体详情: entity_name(必填)
+
+### mcp__sysml_add_alias
+添加别名: qualified_name(必填), alias(必填)
+
+### mcp__sysml_add_relation
+创建关系: relation_type(必填), source(必填), target(必填)
+  可选: name, parent_package, description, role_source, role_target
+
+### mcp__sysml_update_entity
+更新实体: qualified_name(必填)
+  可选: append_description, update_properties
+
+## 工作规则
+1. 用 mcp__sysml_get_entity 了解实体
+2. **重点: 为每对相关实体创建关系**
+3. 补充别名是中英文通用的
+4. 属性/端口类实体应关联到所属的 PartDef"""
 
 # ── Unified Tool Names ───────────────────────────────────────
 
@@ -85,6 +176,7 @@ UNIFIED_TOOL_NAMES = [
     "sysml_add_alias",
     "sysml_normalize_name",
     "sysml_list_entities",
+    "sysml_get_entity",
     "sysml_add_relation",
     "sysml_get_connections",
     "sysml_list_relations",
@@ -429,11 +521,13 @@ class KGBuildAgent:
         self,
         db_name: str,
         model: Optional[str] = None,
+        light_model: Optional[str] = None,
         temperature: Optional[float] = None,
         persist_dir: Optional[str] = None,
     ):
         self.db_name = db_name
         self.model = model or self._get_config("KG_EXTRACTION_MODEL", "qwen3-vl:32b")
+        self.light_model = light_model or self._get_config("KG_LIGHT_MODEL", "qwen3:8b")
         self.temperature = temperature if temperature is not None \
             else self._get_config("KG_EXTRACTION_TEMPERATURE", 0.1)
         self.max_iterations = self._get_config("KG_EXTRACTION_MAX_ITERATIONS", 60)
@@ -443,6 +537,7 @@ class KGBuildAgent:
 
         self._mcp_session: Optional[MCPSession] = None
         self._llm: Optional[ChatOpenAIWithReasoning] = None
+        self._light_llm: Optional[ChatOpenAIWithReasoning] = None
         self._unified_tools: Optional[List[BaseTool]] = None
         self._merge_tools: Optional[List[BaseTool]] = None
 
@@ -461,8 +556,25 @@ class KGBuildAgent:
                 base_url=config.settings.OPENAI_API_URL,
                 timeout=self.timeout,
                 streaming=True,
+                model_kwargs={"keep_alive": self._get_config("KG_KEEP_ALIVE", "30s")},
             )
         return self._llm
+
+    @property
+    def light_llm(self) -> ChatOpenAIWithReasoning:
+        """快速小模型 — 用于纯文本实体候选提取"""
+        if self._light_llm is None:
+            self._light_llm = ChatOpenAIWithReasoning(
+                model=self.light_model,
+                temperature=0.0,
+                api_key=SecretStr(config.settings.OPENAI_API_KEY)
+                if config.settings.OPENAI_API_KEY else None,
+                base_url=config.settings.OPENAI_API_URL,
+                timeout=120,
+                streaming=False,
+                model_kwargs={"keep_alive": self._get_config("KG_KEEP_ALIVE", "30s")},
+            )
+        return self._light_llm
 
     async def initialize(self) -> None:
         """初始化 MCP 会话并构建工具包装"""
@@ -493,17 +605,17 @@ class KGBuildAgent:
             await self._mcp_session.close()
             self._mcp_session = None
 
-    # ── 新接口：从文档树构建 KG ────────────────────────────────
+    # ── 新接口：从文档树构建 KG（两模型架构）────────────────
 
     async def build_kg_from_document(self, rag_doc) -> Dict[str, Any]:
         """
-        从 RAG_DB_Document 文档树构建知识图谱。
+        从 RAG_DB_Document 构建知识图谱。
 
-        Args:
-            rag_doc: RAG_DB_Document 实例
-
-        Returns:
-            构建结果摘要
+        三阶段并行架构:
+        1. 并行 light_llm 逐页扫描（Semaphore 控制并发，默认5路并发）
+        2. 系统直接调 MCP — 搜索去重 + 创建实体/关系（顺序，无 LLM）
+        3. 卸载小模型 → 强模型（llm）全局审查，补别名/属性/关系
+        keep_alive=30s 确保小模型空闲后自动卸载，释放显存
         """
         await self.initialize()
 
@@ -513,20 +625,16 @@ class KGBuildAgent:
             "relation_count_before": 0, "relation_count_after": 0,
         }
 
-        # 获取初始统计
         summary = await self._summary()
         stats["entity_count_before"] = summary.get("total_entities", 0)
         stats["relation_count_before"] = summary.get("total_relations", 0)
 
-        # 创建文档级 Package
         safe_doc_name = doc_name.replace(" ", "_").replace(".", "_")
         if safe_doc_name:
             await self._mcp_session.call_tool("sysml_add_entity", {
-                "entity_type": "Package",
-                "name": safe_doc_name,
+                "entity_type": "Package", "name": safe_doc_name,
             })
 
-        # 构建文档树状态
         tree_state = DocumentTreeState(rag_doc)
         logger.info("Document tree: %d leaf pages", tree_state.total_pages)
 
@@ -534,52 +642,102 @@ class KGBuildAgent:
             logger.warning("No content pages found in document")
             return stats
 
-        # 创建导航工具
-        nav_tools = create_navigation_tools(tree_state)
-
-        # 合并所有工具：导航工具 + MCP 统一工具
-        all_tools = list(nav_tools) + (self._unified_tools or [])
-
-        # 创建统一 Agent
-        agent = create_agent(
-            model=self.llm,
-            tools=all_tools,
-            system_prompt=UNIFIED_EXTRACTION_SYSTEM_PROMPT,
-            debug=config.settings.AGENT_VERBOSE,
-            name="kg_extractor",
-        )
-
-        prompt = f"""文档: {doc_name}
-
-请开始提取：
-1. 先用 get_document_tree 查看文档结构
-2. 从最顶层章节开始，逐章逐页向下深入
-3. 每读完一页，同时提取实体和关系，然后 mark_section_done 打勾
-4. 用 get_progress 确认进度，直到所有页面完成
-
-注意：从整体到局部，先理解文档脉络再深入细节。"""
-
-        logger.info("Starting unified extraction for '%s'", doc_name)
+        # ── Phase 1: 并行页提取 ──
         try:
-            # Agent 自主循环提取，使用较大的超时
-            await asyncio.wait_for(
-                agent.ainvoke(
-                    {"messages": [HumanMessage(content=prompt)]},
-                    config={"recursion_limit": self.max_iterations},
-                ),
-                timeout=self.timeout * 30,  # 全局超时：30个 timeouts
+            from tqdm import tqdm
+            pbar = tqdm(total=tree_state.total_pages, desc="Phase 1: Page extraction",
+                        unit="pg", ncols=120, file=sys.stderr,
+                        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}")
+        except ImportError:
+            pbar = None
+
+        page_count = 0
+        entity_count = 0
+        relation_count = 0
+        t0 = time.time()
+
+        batch_concurrency = self._get_config("BATCH_CONCURRENCY", 5)
+        logger.info("Phase 1: parallel light_llm extraction with concurrency=%d",
+                     batch_concurrency)
+        sem = asyncio.Semaphore(batch_concurrency)
+
+        async def _extract_one(nid: str) -> Any:
+            async with sem:
+                if nid not in tree_state.nodes:
+                    return None
+                node = tree_state.nodes[nid]
+                if not node.text.strip():
+                    tree_state.mark_processed(nid)
+                    return None
+                t_start = time.time()
+                candidates, relations = await self._extract_page_candidates(
+                    node.text, node.title, node.page_start
+                )
+                elapsed = time.time() - t_start
+                return (nid, node, candidates, relations, elapsed)
+
+        tasks = [_extract_one(nid) for nid in tree_state._all_page_ids]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        llm_time = time.time() - t0
+        logger.info("Phase 1a (%d parallel LLM calls) done in %.0fs", len(results), llm_time)
+
+        for result in results:
+            if result is None:
+                if pbar:
+                    pbar.update(1)
+                continue
+            if isinstance(result, Exception):
+                logger.error("Phase 1 LLM extraction error: %s", result)
+                if pbar:
+                    pbar.update(1)
+                continue
+
+            nid, node, candidates, relations, elapsed = result
+            page_count += 1
+
+            created = await self._process_candidates(
+                candidates, relations, doc_name, node.page_start, node.title
             )
-        except asyncio.TimeoutError:
-            logger.warning("Global extraction timeout for '%s'", doc_name)
+            entity_count += created["entities"]
+            relation_count += created["relations"]
+            tree_state.mark_processed(nid)
 
-        # 跨章节去重合并
-        logger.info("Cross-section entity deduplication after extraction")
-        try:
-            await self._deduplicate_entities()
-        except Exception as exc:
-            logger.warning("Dedup failed: %s", exc)
+            if pbar:
+                pbar.update(1)
+                pbar.set_postfix_str(
+                    f"p{node.page_start} {node.title[:15]} | +{created['entities']}e {created['relations']}r {elapsed:.0f}s"
+                )
+            elif page_count % 5 == 0 or page_count <= 3:
+                logger.info(
+                    "  Page %d/%d [p%d %s]: %d entities, %d relations in %.1fs",
+                    page_count, tree_state.total_pages,
+                    node.page_start, node.title[:30],
+                    created["entities"], created["relations"], elapsed,
+                )
 
-        # 保存 KG 文件
+        if pbar:
+            pbar.close()
+
+        t1 = time.time()
+        logger.info("Phase 1 complete: %d pages → %d entities, %d relations in %.0fs",
+                     page_count, entity_count, relation_count, t1 - t0)
+
+        # Checkpoint save after Phase 1
+        await self._save_knowledge_graph()
+        logger.info("Phase 1 KG checkpoint saved (%d entities, %d relations)",
+                     entity_count, relation_count)
+
+        # ── Phase 2: 跨章节去重 ──
+        await self._deduplicate_entities()
+
+        # ── 卸载小模型，释放显存给大模型 ──
+        await self._unload_light_model()
+
+        # ── Phase 3: 强模型补充别名/属性/关系 ──
+        await self._enrich_entities(doc_name)
+
+        # ── Save ──
         await self._save_knowledge_graph()
 
         summary = await self._summary()
@@ -590,6 +748,309 @@ class KGBuildAgent:
                      stats["entity_count_before"], stats["entity_count_after"],
                      stats["relation_count_before"], stats["relation_count_after"])
         return stats
+
+    # ── Phase 1 helpers ──────────────────────────────────────
+
+    async def _extract_page_candidates(
+        self, text: str, title: str, page: int
+    ) -> tuple:
+        """用轻量模型从页面文本提取实体/关系候选列表 (JSON).
+        支持滑动窗口处理长文本: >4000 字符时分块提取后合并去重。
+        """
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        max_chars = 4000
+        if len(text) <= max_chars:
+            chunks = [text]
+        else:
+            # 滑动窗口: window=3000, stride=2500 (重叠500)
+            window = min(3000, max_chars)
+            stride = max(1, window - 500)
+            chunks = []
+            start = 0
+            while start < len(text):
+                end = min(start + window, len(text))
+                chunks.append(text[start:end])
+                if end >= len(text):
+                    break
+                start += stride
+            logger.debug("  Page %d: %d chars → %d chunks", page, len(text), len(chunks))
+
+        all_candidates = []
+        all_relations = []
+        for ci, chunk in enumerate(chunks):
+            suffix = f" (chunk {ci+1}/{len(chunks)})" if len(chunks) > 1 else ""
+            prompt = f"""页面标题: {title} (第{page}页){suffix}
+
+文本内容:
+---BEGIN---
+{chunk}
+---END---
+
+请输出JSON数组。无系统架构内容则输出 []"""
+            try:
+                response = await asyncio.wait_for(
+                    self.light_llm.ainvoke([
+                        SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
+                        HumanMessage(content=prompt),
+                    ]),
+                    timeout=180,
+                )
+                raw = str(response.content) if hasattr(response, "content") else str(response)
+            except asyncio.TimeoutError:
+                logger.warning("  Light LLM timeout for page %d chunk %d, retrying...", page, ci+1)
+                try:
+                    response = await asyncio.wait_for(
+                        self.light_llm.ainvoke([
+                            SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
+                            HumanMessage(content=prompt),
+                        ]),
+                        timeout=180,
+                    )
+                    raw = str(response.content) if hasattr(response, "content") else str(response)
+                except asyncio.TimeoutError:
+                    logger.warning("  Light LLM retry also timeout for page %d chunk %d, skipping", page, ci+1)
+                    continue
+            except Exception as e:
+                logger.warning("  Light LLM error for page %d chunk %d: %s", page, ci+1, e)
+                continue
+
+            candidates, relations = self._parse_candidates(raw)
+            all_candidates.extend(candidates)
+            all_relations.extend(relations)
+
+        # 合并去重: 同名实体保留最详细的一个
+        if len(chunks) > 1:
+            seen = {}
+            merged_candidates = []
+            for c in all_candidates:
+                name = c.get("name", "")
+                if name in seen:
+                    existing = seen[name]
+                    if len(c.get("description", "")) > len(existing.get("description", "")):
+                        existing["description"] = c["description"]
+                    existing_aliases = set(existing.get("aliases", []))
+                    for a in c.get("aliases", []):
+                        if a not in existing_aliases:
+                            existing["aliases"].append(a)
+                else:
+                    seen[name] = dict(c)
+                    merged_candidates.append(c)
+            all_candidates = merged_candidates
+
+            seen_rel = set()
+            merged_relations = []
+            for r in all_relations:
+                key = (r.get("source", ""), r.get("target", ""), r.get("type", ""))
+                if key not in seen_rel:
+                    seen_rel.add(key)
+                    merged_relations.append(r)
+            all_relations = merged_relations
+
+        if all_candidates or all_relations:
+            logger.debug("  Page %d: %d entities, %d relations extracted (from %d chunks)",
+                         page, len(all_candidates), len(all_relations), len(chunks))
+        return all_candidates, all_relations
+
+    @staticmethod
+    def _parse_candidates(raw: str) -> tuple:
+        """从 LLM 输出解析实体候选和关系候选."""
+        import re
+        candidates = []
+        relations = []
+
+        # 提取 JSON 块
+        json_str = raw
+        m = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', raw, re.DOTALL)
+        if m:
+            json_str = m.group(1)
+        else:
+            m = re.search(r'(\[.*\])', raw, re.DOTALL)
+            if m:
+                json_str = m.group(1)
+
+        try:
+            items = json.loads(json_str)
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("relation"):
+                        relations.append(item)
+                    elif item.get("name"):
+                        candidates.append(item)
+        except json.JSONDecodeError:
+            # 逐行解析
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line or line.startswith("//") or line.startswith("#"):
+                    continue
+                m2 = re.search(r'\{.*\}', line)
+                if m2:
+                    try:
+                        item = json.loads(m2.group())
+                        if isinstance(item, dict):
+                            if item.get("relation"):
+                                relations.append(item)
+                            elif item.get("name"):
+                                candidates.append(item)
+                    except json.JSONDecodeError:
+                        pass
+
+        return candidates, relations
+
+    async def _process_candidates(
+        self, candidates: list, relations: list,
+        doc_name: str, page: int, section_title: str,
+    ) -> dict:
+        """系统直接调用 MCP 工具: 搜索去重 + 创建/更新实体和关系."""
+        created_entities = 0
+        created_relations = 0
+
+        # 记录已有实体名 → QN 映射（避免重复创建）
+        entity_qn_map: dict = {}
+
+        for c in candidates:
+            name = str(c.get("name", "")).strip()
+            etype = str(c.get("type", "PartDef")).strip()
+            desc = str(c.get("description", "")).strip()
+            aliases = c.get("aliases", []) or []
+
+            if not name:
+                continue
+
+            # 搜索去重
+            search_result = await self._mcp_session.call_tool(
+                "sysml_search_entity",
+                {"query": name, "regex_pattern": "", "threshold": 0.7},
+            )
+            try:
+                search_data = json.loads(search_result)
+            except json.JSONDecodeError:
+                search_data = {}
+
+            if search_data.get("total_matches", 0) > 0:
+                # 已存在 → 更新
+                match = search_data["matches"][0]
+                existing_qn = match.get("qualified_name", name)
+                entity_qn_map[name] = existing_qn
+                if aliases:
+                    for alias in aliases:
+                        await self._mcp_session.call_tool(
+                            "sysml_add_alias",
+                            {"qualified_name": existing_qn, "alias": alias},
+                        )
+                continue
+
+            # 不存在 → 创建
+            add_result = await self._mcp_session.call_tool(
+                "sysml_add_entity", {
+                    "entity_type": etype,
+                    "name": name,
+                    "parent_package": "",
+                    "description": desc,
+                    "aliases": aliases,
+                    "source_sections": [section_title or f"p{page}"],
+                    "source_text": desc,
+                    "properties": {},
+                    "supertypes": [],
+                    "short_name": name,
+                },
+            )
+            try:
+                add_data = json.loads(add_result)
+                if add_data.get("ok"):
+                    created_entities += 1
+                    entity_qn_map[name] = add_data.get("qualified_name", name)
+            except json.JSONDecodeError:
+                pass
+
+        # 创建关系
+        for r in relations:
+            rtype = str(r.get("type", "Connection")).strip()
+            source = str(r.get("source", "")).strip()
+            target = str(r.get("target", "")).strip()
+            desc = str(r.get("description", "")).strip()
+
+            if not source or not target:
+                continue
+
+            # 解析端点名（可能已通过别名解析）
+            src_qn = entity_qn_map.get(source, source)
+            tgt_qn = entity_qn_map.get(target, target)
+
+            rel_result = await self._mcp_session.call_tool(
+                "sysml_add_relation", {
+                    "relation_type": rtype.lower(),
+                    "source": src_qn,
+                    "target": tgt_qn,
+                    "name": f"{source}_{target}_{rtype}",
+                    "parent_package": "",
+                    "description": desc,
+                    "role_source": "",
+                    "role_target": "",
+                },
+            )
+            try:
+                rel_data = json.loads(rel_result)
+                if rel_data.get("ok"):
+                    created_relations += 1
+            except json.JSONDecodeError:
+                pass
+
+        return {"entities": created_entities, "relations": created_relations}
+
+    # ── Phase 3: Enrichment ──────────────────────────────────
+
+    async def _enrich_entities(self, doc_name: str) -> None:
+        """用强模型审查并补充别名/属性/关系."""
+        if not self._unified_tools or self._mcp_session is None:
+            return
+
+        summary = await self._summary()
+        if summary.get("total_entities", 0) == 0:
+            return
+
+        entity_list = await self._mcp_session.call_tool(
+            "sysml_list_entities", {"include_details": False}
+        )
+        try:
+            entities_data = json.loads(entity_list)
+        except json.JSONDecodeError:
+            return
+
+        entity_names = [e.get("name", "") for e in entities_data.get("entities", [])]
+        if not entity_names:
+            return
+
+        logger.info("Enrichment: reviewing %d entities with strong model", len(entity_names))
+
+        agent = create_agent(
+            model=self.llm,
+            tools=self._unified_tools,
+            system_prompt=ENRICHMENT_PROMPT,
+            debug=config.settings.AGENT_VERBOSE,
+            name="kg_enricher",
+        )
+
+        prompt = f"""文档: {doc_name}
+已有实体列表 ({len(entity_names)}个):
+{json.dumps(entity_names, ensure_ascii=False, indent=2)}
+
+请逐一审查实体，补充别名、属性、关系。"""
+
+        try:
+            await asyncio.wait_for(
+                agent.ainvoke(
+                    {"messages": [HumanMessage(content=prompt)]},
+                    config={"recursion_limit": self.max_iterations},
+                ),
+                timeout=self.timeout * 60,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Enrichment timeout")
+        except Exception as e:
+            logger.warning("Enrichment error: %s", e)
 
     # ── 旧接口：向后兼容 ───────────────────────────────────────
 
@@ -661,11 +1122,47 @@ class KGBuildAgent:
         stats["relation_count_after"] = summary.get("total_relations", 0)
         return stats
 
+    # ── Light model unload ─────────────────────────────────────
+
+    async def _unload_light_model(self) -> None:
+        """显式卸载小模型以释放显存，为大模型富化阶段腾出空间."""
+        base_url = config.settings.OPENAI_API_URL or "http://localhost:11434/v1"
+        ollama_url = base_url.rstrip("/").rsplit("/v1", 1)[0]
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # 检查模型是否已加载
+                ps_resp = await client.get(f"{ollama_url}/api/ps")
+                if ps_resp.status_code == 200:
+                    loaded_models = [m.get("name", "") for m in
+                                     ps_resp.json().get("models", [])]
+                    if self.light_model not in loaded_models:
+                        logger.info("Light model '%s' already unloaded", self.light_model)
+                        return
+
+                # 发送 keep_alive=0 请求卸载模型（限制输出1 token，最少消耗）
+                resp = await client.post(f"{ollama_url}/api/generate", json={
+                    "model": self.light_model,
+                    "prompt": "",
+                    "keep_alive": 0,
+                    "stream": False,
+                    "options": {"num_predict": 1},
+                })
+                if resp.status_code == 200:
+                    logger.info("Light model '%s' unloaded (keep_alive=0)", self.light_model)
+                else:
+                    logger.warning("Light model unload returned %d: %s",
+                                   resp.status_code, resp.text[:200])
+        except Exception as e:
+            logger.debug("Light model unload skipped (not critical): %s", e)
+        else:
+            await asyncio.sleep(1)
+
     # ── Cross-section dedup ────────────────────────────────────
 
     async def _deduplicate_entities(self) -> None:
-        """跨章节实体去重：获取合并建议 → Agent 审核 → 执行合并"""
-        if not self._merge_tools or self._mcp_session is None:
+        """跨章节实体去重：获取合并建议 → 直接 MCP 合并（无 LLM，<1s）"""
+        if self._mcp_session is None:
             return
 
         suggest_result = await self._mcp_session.call_tool(
@@ -676,37 +1173,29 @@ class KGBuildAgent:
             logger.info("No merge suggestions found")
             return
 
-        suggestion_count = len(suggestions["suggestions"])
-        logger.info("Found %d merge suggestions", suggestion_count)
+        items = sorted(suggestions["suggestions"], key=lambda x: -x["confidence"])
+        logger.info("Found %d merge suggestions, processing top 60", len(items))
+        merged = 0
 
-        agent = create_agent(
-            model=self.llm,
-            tools=self._merge_tools,
-            system_prompt="""你是SysML v2实体合并审核专家。
+        for i, item in enumerate(items[:60]):
+            a_qn = item["entity_a"]["qualified_name"]
+            b_qn = item["entity_b"]["qualified_name"]
+            a_name = item["entity_a"]["name"]
+            b_name = item["entity_b"]["name"]
+            conf = item["confidence"]
 
-## 工作规则：
-1. 先用 mcp__sysml_get_entity 查看要合并的两个实体的详细信息
-2. 判断它们是否是同一事物的不同名称/表述
-3. 如果是，用 mcp__sysml_merge_entities 执行合并
-4. 如果不确定，保留不合并
-5. 逐个处理合并建议""",
-            debug=config.settings.AGENT_VERBOSE,
-            name="entity_merger",
-        )
+            try:
+                result = json.loads(await self._mcp_session.call_tool(
+                    "sysml_merge_entities", {"source": a_qn, "target": b_qn},
+                ))
+                if result.get("ok"):
+                    merged += 1
+                    if i < 10 or merged % 20 == 0:
+                        logger.debug("  Merged %s → %s (%.2f)", a_name, b_name, conf)
+            except Exception as e:
+                logger.debug("  Merge skip %s→%s: %s", a_name, b_name, e)
 
-        prompt = f"""以下实体对可能需要合并，请逐一审核并处理：
-
-{json.dumps(suggestions['suggestions'], ensure_ascii=False, indent=2)}
-
-请逐个审核，对确实重复的实体对执行合并操作。"""
-
-        try:
-            await asyncio.wait_for(
-                agent.ainvoke({"messages": [HumanMessage(content=prompt)]}),
-                timeout=self.timeout * 2,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("Dedup Agent timeout")
+        logger.info("Dedup complete: %d pairs merged", merged)
 
     # ── Persistence ────────────────────────────────────────────
 
