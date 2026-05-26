@@ -23,59 +23,6 @@ from monitoring import mcp_restart_count
 
 logger = logging.getLogger(__name__)
 
-# ── MCP stdio monkey-patch: skip malformed JSONRPC messages ──
-
-
-def _apply_mcp_stdio_patch() -> None:
-    """
-    Fix a bug in mcp.client.stdio where unparseable JSONRPC messages
-    (e.g. notifications with id=null) cause the stdout_reader to send
-    pydantic ValidationError exceptions into the message stream,
-    corrupting downstream MCP tool calls.
-
-    This is applied once on first import.
-    """
-    try:
-        import mcp.client.stdio as _mod
-        from contextlib import asynccontextmanager as _acm
-
-        _original = _mod.stdio_client
-
-        if getattr(_original, "_patched_via_nanite", False):
-            return
-
-        @_acm
-        async def _patched_stdio_client(server, errlog=None):
-            async with _original(server, errlog) as (read, write):
-                # The bug is in the stdout_reader inside stdio_client.
-                # It sends Exception objects to the read stream on parse failure.
-                # We wrap the read stream to filter out Exception objects.
-                import anyio as _anyio
-                from anyio.streams.memory import MemoryObjectReceiveStream
-
-                _raw_receive = read.receive
-
-                async def _safe_receive():
-                    while True:
-                        item = await _raw_receive()
-                        if isinstance(item, Exception):
-                            logger.debug("MCP stdio: filtered exception from stream: %s",
-                                         type(item).__name__)
-                            continue
-                        return item
-
-                read.receive = _safe_receive  # type: ignore[method-assign]
-                yield read, write
-
-        _patched_stdio_client._patched_via_nanite = True  # type: ignore[attr-defined]
-        _mod.stdio_client = _patched_stdio_client
-        logger.debug("MCP stdio monkey-patch applied")
-    except Exception as e:
-        logger.debug("MCP stdio patch skipped: %s", e)
-
-
-_apply_mcp_stdio_patch()
-
 
 class MCPSession:
     """通用 MCP stdio 会话，可连接任意 MCP 服务器"""

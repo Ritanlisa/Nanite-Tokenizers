@@ -2427,6 +2427,10 @@ def _mcp_serve() -> None:
         method = request.get("method", "")
         req_id = request.get("id")
 
+        # JSONRPC notification — 不响应
+        if req_id is None:
+            continue
+
         if method == "tools/list":
             tools = []
             for name, defn in TOOL_DEFINITIONS.items():
