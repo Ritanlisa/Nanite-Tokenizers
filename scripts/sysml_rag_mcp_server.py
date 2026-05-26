@@ -908,6 +908,15 @@ def _expand_relation_pair(source: str, target: str) -> list[tuple[str, str]]:
     return pairs
 
 
+def _sanitize_name(name: str) -> str:
+    """清理实体名: 替换括号/空格为下划线，确保 SysML 标识符合法"""
+    name = name.replace('（', '_').replace('）', '')
+    name = name.replace('(', '_').replace(')', '')
+    name = name.replace(' ', '_')
+    name = name.replace('/', '_').replace('\\', '_')
+    return name or "_"
+
+
 # ══════════════════════════════════════════════════════════════
 # 新增：实体 CRUD 工具
 # ══════════════════════════════════════════════════════════════
@@ -942,6 +951,7 @@ def sysml_add_entity(
     Returns:
         创建结果
     """
+    name = _sanitize_name(name)
     mgr = _get_manager()
     names = _expand_bracket_name(name)
     if len(names) > 1:
@@ -1100,6 +1110,8 @@ def sysml_add_relation(
     Returns:
         创建结果
     """
+    source = _sanitize_name(source)
+    target = _sanitize_name(target)
     mgr = _get_manager()
     pairs = _expand_relation_pair(source, target)
     if len(pairs) > 1:
