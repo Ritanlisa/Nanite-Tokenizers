@@ -186,6 +186,7 @@ UNIFIED_TOOL_NAMES = [
     "sysml_get_connections",
     "sysml_list_relations",
     "sysml_model_summary",
+    "sysml_connected_components",
 ]
 
 # ═══════════════════════════════════════════════════════════════
@@ -786,7 +787,25 @@ class KGBuildAgent:
         stats["post_enrich_orphans"] = post_orphan_count
         logger.info("Post-enrichment: %d entities, %d relations, %d orphans",
                      stats["post_enrich_entities"], stats["post_enrich_relations"],
-                     post_orphan_count)
+                      post_orphan_count)
+
+        # ── Phase 4: 图聚合 — 消除孤立子图 ──
+        t4_start = time.time()
+        await self._aggregate_graph(doc_name)
+        t4_end = time.time()
+        stats["phase4_time_s"] = round(t4_end - t4_start, 1)
+
+        # ── 聚合后统计 ──
+        await self._save_knowledge_graph()
+        comps_after = await self._mcp_session.call_tool("sysml_connected_components", {})
+        try:
+            cc_data = json.loads(comps_after)
+            stats["final_components"] = cc_data.get("total_components", 0)
+            stats["final_component_sizes"] = [c.get("size", 0) for c in cc_data.get("components", [])[:5]]
+        except Exception:
+            stats["final_components"] = -1
+
+        logger.info("Post-aggregation: %d components", stats["final_components"])
 
         # ── Save ──
         await self._save_knowledge_graph()
@@ -1248,6 +1267,133 @@ class KGBuildAgent:
 
         orphans = [n for n in entity_names if n not in connected]
         return len(orphans)
+
+    # ── Phase 4: Graph Aggregation ─────────────────────────────
+
+    async def _aggregate_graph(self, doc_name: str) -> None:
+        """迭代合并连通分量，消除孤立子图，直到全图连通."""
+        if self._mcp_session is None:
+            return
+
+        max_rounds = 20
+        for round_idx in range(max_rounds):
+            comps_result = await self._mcp_session.call_tool("sysml_connected_components", {})
+            try:
+                cc_data = json.loads(comps_result)
+            except json.JSONDecodeError:
+                break
+            components = cc_data.get("components", [])
+            if len(components) <= 1:
+                logger.info("Phase 4: graph fully connected (%d component, round %d)",
+                             len(components), round_idx + 1)
+                break
+
+            smallest = components[0]
+            # 选一个目标分量（除最小外的最大分量，优先 merge 入大图）
+            target = components[-1] if len(components) >= 2 else components[0]
+
+            logger.info("Phase 4 round %d: merging component size=%d into size=%d (%d total)",
+                         round_idx + 1, smallest["size"], target["size"], len(components))
+
+            # 获取双方实体的 source_sections
+            small_entities = await self._get_entities_with_sections(smallest["entities"])
+            target_entities = await self._get_entities_with_sections(target["entities"])
+
+            # 找同章节的实体对
+            bridge_candidates = []
+            for s_name, s_sections in small_entities.items():
+                for t_name, t_sections in target_entities.items():
+                    common = set(s_sections) & set(t_sections)
+                    if common:
+                        bridge_candidates.append((s_name, t_name, list(common)[:5]))
+
+            if bridge_candidates:
+                logger.info("  Found %d bridge candidates via shared sections", len(bridge_candidates))
+            else:
+                # 没有同章节的，尝试任意配对
+                bridge_candidates = [
+                    (smallest["entities"][0], target["entities"][0], ["无共同章节"])
+                ]
+
+            # 最后两个分量 → 用强模型做最终聚合
+            use_strong = len(components) == 2
+            created = await self._bridge_components(
+                bridge_candidates, use_strong=use_strong
+            )
+            logger.info("  Created %d bridge relations", created)
+            if created == 0 and not use_strong:
+                # 如果小模型没找到关系，最后跳转强模型
+                created = await self._bridge_components(bridge_candidates, use_strong=True)
+                logger.info("  Fallback strong model: %d relations", created)
+
+    async def _get_entities_with_sections(self, entity_names: list) -> dict:
+        """获取实体的 source_sections 映射."""
+        result = {}
+        for name in entity_names:
+            try:
+                r = await self._mcp_session.call_tool(
+                    "sysml_get_entity", {"entity_name": name}
+                )
+                data = json.loads(r)
+                sections = data.get("source_sections", []) or []
+                result[name] = [str(s) for s in sections if s]
+            except Exception:
+                result[name] = []
+        return result
+
+    async def _bridge_components(self, candidates: list, use_strong: bool = False) -> int:
+        """用 LLM 判断候选实体对是否存在有意义的关系并创建."""
+        if not candidates:
+            return 0
+
+        llm = self.llm if use_strong else self.light_llm
+        model_label = "strong" if use_strong else "light"
+        created = 0
+
+        for s_name, t_name, shared_sections in candidates[:20]:
+            prompt = f"""你是知识图谱关系审查员。判断以下两个实体之间是否存在有意义的关系。
+
+实体A: {s_name}
+实体B: {t_name}
+共同出现的章节: {', '.join(shared_sections[:3])}
+
+关系类型:
+- allocation: A是B的一部分, B包含A, A属于B系统
+- connection: A和B之间有物理连接或数据流
+- None: 两者无直接关系
+
+请只回答一个词: allocation, connection, 或 None"""
+
+            try:
+                response = await asyncio.wait_for(
+                    llm.ainvoke([HumanMessage(content=prompt)]),
+                    timeout=120,
+                )
+                answer = str(response.content).strip().lower()
+            except Exception:
+                continue
+
+            if answer in ("none", "无", ""):
+                continue
+
+            rel_type = "allocation" if "allocation" in answer else "connection"
+            try:
+                rel_result = await self._mcp_session.call_tool(
+                    "sysml_add_relation", {
+                        "relation_type": rel_type,
+                        "source": s_name,
+                        "target": t_name,
+                        "description": f"桥接关系: {s_name} ↔ {t_name} (同章: {', '.join(shared_sections[:2])})",
+                    }
+                )
+                rel_data = json.loads(rel_result)
+                if rel_data.get("ok"):
+                    created += 1
+                    logger.debug("  Bridge: %s --[%s]--> %s", s_name, rel_type, t_name)
+            except Exception:
+                pass
+
+        return created
 
     # ── Light model unload ─────────────────────────────────────
 

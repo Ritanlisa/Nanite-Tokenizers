@@ -855,68 +855,55 @@ def sysml_model_summary() -> Dict[str, Any]:
     }
 
 
-# ── Bracket expansion helpers ─────────────────────────────────
+def sysml_connected_components() -> Dict[str, Any]:
+    """
+    计算知识图谱的连通分量（子图），返回各分量包含的实体名称列表。
+    """
+    mgr = _get_manager()
+    entities = mgr.get_all_entities()
+    relations = mgr.get_all_relations()
 
-import re as _re
+    adj: Dict[str, set] = {}
+    for e in entities:
+        name = getattr(e, "name", "")
+        adj.setdefault(name, set())
 
+    for rel in relations:
+        ends = getattr(rel, "ends", None) or []
+        refs = [end.ref for end in ends if end.ref]
+        for i in range(len(refs)):
+            for j in range(i + 1, len(refs)):
+                adj.setdefault(refs[i], set()).add(refs[j])
+                adj.setdefault(refs[j], set()).add(refs[i])
 
-def _expand_bracket_name(name: str) -> list[str]:
-    """展开方括号: ion[0-99] → [ion0,...,ion99]; mn[1,3] → [mn1,mn3]"""
-    result = [name]
-    pat_range = _re.compile(r'^(.+)\[(\d+)-(\d+)\](.*)$')
-    while True:
-        changed = False
-        new_result = []
-        for n in result:
-            m = pat_range.match(n)
-            if m:
-                prefix, start, end, suffix = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
-                for i in range(start, end + 1):
-                    new_result.append(f"{prefix}{i}{suffix}")
-                changed = True
-            else:
-                new_result.append(n)
-        result = new_result
-        if not changed:
-            break
-    pat_list = _re.compile(r'^(.+)\[([\d,]+)\](.*)$')
-    while True:
-        changed = False
-        new_result = []
-        for n in result:
-            m = pat_list.match(n)
-            if m:
-                prefix, nums, suffix = m.group(1), m.group(2), m.group(3)
-                for num in nums.split(','):
-                    new_result.append(f"{prefix}{num.strip()}{suffix}")
-                changed = True
-            else:
-                new_result.append(n)
-        result = new_result
-        if not changed:
-            break
-    return result
+    visited: set = set()
+    components = []
+    for name in adj:
+        if name in visited:
+            continue
+        queue = [name]
+        visited.add(name)
+        comp = []
+        while queue:
+            node = queue.pop(0)
+            comp.append(node)
+            for neighbor in adj.get(node, []):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+        components.append(comp)
 
-
-def _expand_relation_pair(source: str, target: str) -> list[tuple[str, str]]:
-    """扩展关系: src[0-2] conn tgt[0-1] → 3×2=6 对"""
-    src_list = _expand_bracket_name(source)
-    tgt_list = _expand_bracket_name(target)
-    if len(src_list) == 1 and len(tgt_list) == 1:
-        return [(source, target)]
-    pairs = [(s, t) for s in src_list for t in tgt_list]
-    return pairs
+    components.sort(key=len)
+    return {
+        "ok": True,
+        "total_entities": len(entities),
+        "total_components": len(components),
+        "components": [{"size": len(c), "entities": c} for c in components],
+    }
 
 
-def _sanitize_name(name: str) -> str:
-    """清理实体名: 替换括号/空格为下划线，确保 SysML 标识符合法"""
-    name = name.replace('（', '_').replace('）', '')
-    name = name.replace('(', '_').replace(')', '')
-    name = name.replace(' ', '_')
-    name = name.replace('/', '_').replace('\\', '_')
-    return name or "_"
-
-
+# ══════════════════════════════════════════════════════════════
+# 新增：实体检索工具
 # ══════════════════════════════════════════════════════════════
 # 新增：实体 CRUD 工具
 # ══════════════════════════════════════════════════════════════
@@ -2236,6 +2223,11 @@ TOOL_DEFINITIONS = {
     "sysml_model_summary": {
         "function": sysml_model_summary,
         "description": "获取当前已加载模型的全局摘要统计",
+        "parameters": {},
+    },
+    "sysml_connected_components": {
+        "function": sysml_connected_components,
+        "description": "计算知识图谱连通分量（子图），返回各分量实体列表（按大小升序）",
         "parameters": {},
     },
     # ── 超变量 / 文档章节 ──
