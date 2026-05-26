@@ -135,9 +135,10 @@ EXTRACTION_CANDIDATES_PROMPT = """你是一个技术文档实体提取器。阅�
 
 ENRICHMENT_PROMPT = """你是SysML v2知识图谱专家。审查已有的KG实体列表，重点添加关系和别名。
 
-## ⚠️ 核心任务：关系创建（最重要）
-每个实体应与系统中其他实体至少有一条关系。
-- 对每对相关实体，判断关系类型并创建
+## ⚠️ 硬性规则：每个实体至少1条关系
+- **每个实体必须关联至少1条关系**（connection/interface/allocation）
+- 无关系的孤立实体是不允许的！请在任务结束时自检
+- 如果某个实体确实无法关联任何其他实体，将其连接到文档 Package
 - 关系类型: connection(物理连接), interface(接口), allocation(包含/分配)
 - 示例: FT计算柜 allocation 计算处理分系统 (FT柜是计算系统的一部分)
 - 示例: 交换柜 connection 交换设备 (交换设备安装在交换柜中)
@@ -157,15 +158,19 @@ ENRICHMENT_PROMPT = """你是SysML v2知识图谱专家。审查已有的KG实�
 创建关系: relation_type(必填), source(必填), target(必填)
   可选: name, parent_package, description, role_source, role_target
 
+### mcp__sysml_get_connections
+查看实体现有关系: entity_name(必填)
+
 ### mcp__sysml_update_entity
 更新实体: qualified_name(必填)
   可选: append_description, update_properties
 
 ## 工作规则
-1. 用 mcp__sysml_get_entity 了解实体
-2. **重点: 为每对相关实体创建关系**
+1. 用 mcp__sysml_get_entity 了解实体，用 mcp__sysml_get_connections 检查现有关系
+2. **重点: 为每对相关实体创建关系，尤其是用户提示词中列出的孤立实体**
 3. 补充别名是中英文通用的
-4. 属性/端口类实体应关联到所属的 PartDef"""
+4. 属性/端口类实体应关联到所属的 PartDef
+5. **任务结束前用 mcp__sysml_get_connections 验证所有用户指定的孤立实体已有关系**"""
 
 # ── Unified Tool Names ───────────────────────────────────────
 
@@ -556,7 +561,6 @@ class KGBuildAgent:
                 base_url=config.settings.OPENAI_API_URL,
                 timeout=self.timeout,
                 streaming=True,
-                model_kwargs={"keep_alive": self._get_config("KG_KEEP_ALIVE", "30s")},
             )
         return self._llm
 
@@ -570,9 +574,8 @@ class KGBuildAgent:
                 api_key=SecretStr(config.settings.OPENAI_API_KEY)
                 if config.settings.OPENAI_API_KEY else None,
                 base_url=config.settings.OPENAI_API_URL,
-                timeout=120,
+                timeout=600,
                 streaming=False,
-                model_kwargs={"keep_alive": self._get_config("KG_KEEP_ALIVE", "30s")},
             )
         return self._light_llm
 
@@ -642,10 +645,10 @@ class KGBuildAgent:
             logger.warning("No content pages found in document")
             return stats
 
-        # ── Phase 1: 并行页提取 ──
+        # ── Phase 1: 按小节分组提取（跨页不断开）──
         try:
             from tqdm import tqdm
-            pbar = tqdm(total=tree_state.total_pages, desc="Phase 1: Page extraction",
+            pbar = tqdm(total=tree_state.total_pages, desc="Phase 1: Section extraction",
                         unit="pg", ncols=120, file=sys.stderr,
                         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}")
         except ImportError:
@@ -656,72 +659,94 @@ class KGBuildAgent:
         relation_count = 0
         t0 = time.time()
 
+        # 将页面按小节(section)分组——同小节内页面合并提取，避免跨页截断
+        section_pages: Dict[str, List[Any]] = {}  # parent_id → [DocTreeNode]
+        section_order: list = []
+        for nid in tree_state._all_page_ids:
+            if nid not in tree_state.nodes:
+                continue
+            node = tree_state.nodes[nid]
+            if not node.text.strip():
+                tree_state.mark_processed(nid)
+                continue
+            parent_id = node.parent_id or "__root__"
+            if parent_id not in section_pages:
+                section_pages[parent_id] = []
+                section_order.append(parent_id)
+            section_pages[parent_id].append(node)
+
         batch_concurrency = self._get_config("BATCH_CONCURRENCY", 5)
-        logger.info("Phase 1: parallel light_llm extraction with concurrency=%d",
-                     batch_concurrency)
+        logger.info("Phase 1: section-based extraction, %d sections, concurrency=%d",
+                     len(section_order), batch_concurrency)
         sem = asyncio.Semaphore(batch_concurrency)
 
-        async def _extract_one(nid: str) -> Any:
+        async def _extract_section(nodes: list) -> Any:
             async with sem:
-                if nid not in tree_state.nodes:
-                    return None
-                node = tree_state.nodes[nid]
-                if not node.text.strip():
-                    tree_state.mark_processed(nid)
-                    return None
+                page_range = f"p{nodes[0].page_start}-{nodes[-1].page_start}"
+                section_title = nodes[0].title[:40]
+                # 拼接同小节内所有页面文本
+                text_parts = [
+                    f"## 页面{nd.page_start}: {nd.title}\n{nd.text}"
+                    for nd in nodes
+                ]
+                merged_text = "\n\n".join(text_parts)
                 t_start = time.time()
                 candidates, relations = await self._extract_page_candidates(
-                    node.text, node.title, node.page_start
+                    merged_text, section_title, nodes[0].page_start
                 )
                 elapsed = time.time() - t_start
-                return (nid, node, candidates, relations, elapsed)
+                # 标注所有页面为来源
+                all_pages = [f"p{nd.page_start}" for nd in nodes]
+                for c in candidates:
+                    c.setdefault("source_pages", []).extend(all_pages)
+                return (nodes, candidates, relations, elapsed)
 
-        tasks = [_extract_one(nid) for nid in tree_state._all_page_ids]
+        tasks = [_extract_section(section_pages[pid]) for pid in section_order]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         llm_time = time.time() - t0
-        logger.info("Phase 1a (%d parallel LLM calls) done in %.0fs", len(results), llm_time)
+        logger.info("Phase 1a (%d section LLM calls) done in %.0fs", len(results), llm_time)
 
         for result in results:
-            if result is None:
-                if pbar:
-                    pbar.update(1)
-                continue
             if isinstance(result, Exception):
-                logger.error("Phase 1 LLM extraction error: %s", result)
-                if pbar:
-                    pbar.update(1)
+                logger.error("Section extraction error: %s", result)
                 continue
+            nodes, candidates, relations, elapsed = result
+            n_pages = len(nodes)
+            page_count += n_pages
 
-            nid, node, candidates, relations, elapsed = result
-            page_count += 1
+            section_title = nodes[0].title[:40]
+            all_sections = [f"p{nd.page_start} {nd.title[:20]}" for nd in nodes]
 
             created = await self._process_candidates(
-                candidates, relations, doc_name, node.page_start, node.title
+                candidates, relations, doc_name,
+                nodes[0].page_start, section_title,
+                source_pages=all_sections,
             )
             entity_count += created["entities"]
             relation_count += created["relations"]
-            tree_state.mark_processed(nid)
+            for nd in nodes:
+                tree_state.mark_processed(nd.node_id)
 
             if pbar:
-                pbar.update(1)
+                pbar.update(n_pages)
                 pbar.set_postfix_str(
-                    f"p{node.page_start} {node.title[:15]} | +{created['entities']}e {created['relations']}r {elapsed:.0f}s"
+                    f"x{n_pages} {nodes[0].title[:15]} | +{created['entities']}e {created['relations']}r {elapsed:.0f}s"
                 )
-            elif page_count % 5 == 0 or page_count <= 3:
+            else:
                 logger.info(
-                    "  Page %d/%d [p%d %s]: %d entities, %d relations in %.1fs",
-                    page_count, tree_state.total_pages,
-                    node.page_start, node.title[:30],
+                    "  Section [%d pages, p%d-p%d]: %d entities, %d relations in %.1fs",
+                    n_pages, nodes[0].page_start, nodes[-1].page_start,
                     created["entities"], created["relations"], elapsed,
                 )
-
-        if pbar:
-            pbar.close()
 
         t1 = time.time()
         logger.info("Phase 1 complete: %d pages → %d entities, %d relations in %.0fs",
                      page_count, entity_count, relation_count, t1 - t0)
+        stats["phase1_pages"] = page_count
+        stats["phase1_entities"] = entity_count
+        stats["phase1_relations"] = relation_count
+        stats["phase1_time_s"] = round(t1 - t0, 1)
 
         # Checkpoint save after Phase 1
         await self._save_knowledge_graph()
@@ -729,13 +754,39 @@ class KGBuildAgent:
                      entity_count, relation_count)
 
         # ── Phase 2: 跨章节去重 ──
+        t2_start = time.time()
         await self._deduplicate_entities()
+        t2_end = time.time()
+        stats["phase2_time_s"] = round(t2_end - t2_start, 1)
 
         # ── 卸载小模型，释放显存给大模型 ──
         await self._unload_light_model()
 
+        # ── 统计富化前状态 ──
+        pre_enrich_summary = await self._summary()
+        stats["pre_enrich_entities"] = pre_enrich_summary.get("total_entities", 0)
+        stats["pre_enrich_relations"] = pre_enrich_summary.get("total_relations", 0)
+        pre_orphan_count = await self._count_orphan_entities()
+        stats["pre_enrich_orphans"] = pre_orphan_count
+        logger.info("Pre-enrichment: %d entities, %d relations, %d orphans",
+                     stats["pre_enrich_entities"], stats["pre_enrich_relations"],
+                     pre_orphan_count)
+
         # ── Phase 3: 强模型补充别名/属性/关系 ──
+        t3_start = time.time()
         await self._enrich_entities(doc_name)
+        t3_end = time.time()
+        stats["phase3_time_s"] = round(t3_end - t3_start, 1)
+
+        # ── 统计富化后状态 ──
+        post_enrich_summary = await self._summary()
+        stats["post_enrich_entities"] = post_enrich_summary.get("total_entities", 0)
+        stats["post_enrich_relations"] = post_enrich_summary.get("total_relations", 0)
+        post_orphan_count = await self._count_orphan_entities()
+        stats["post_enrich_orphans"] = post_orphan_count
+        logger.info("Post-enrichment: %d entities, %d relations, %d orphans",
+                     stats["post_enrich_entities"], stats["post_enrich_relations"],
+                     post_orphan_count)
 
         # ── Save ──
         await self._save_knowledge_graph()
@@ -743,10 +794,12 @@ class KGBuildAgent:
         summary = await self._summary()
         stats["entity_count_after"] = summary.get("total_entities", 0)
         stats["relation_count_after"] = summary.get("total_relations", 0)
+        stats["total_time_s"] = round(time.time() - t0, 1)
 
-        logger.info("KG build complete: entities %d→%d, relations %d→%d",
+        logger.info("KG build complete: entities %d→%d, relations %d→%d, orphans %d→%d",
                      stats["entity_count_before"], stats["entity_count_after"],
-                     stats["relation_count_before"], stats["relation_count_after"])
+                     stats["relation_count_before"], stats["relation_count_after"],
+                     pre_orphan_count, post_orphan_count)
         return stats
 
     # ── Phase 1 helpers ──────────────────────────────────────
@@ -902,6 +955,7 @@ class KGBuildAgent:
     async def _process_candidates(
         self, candidates: list, relations: list,
         doc_name: str, page: int, section_title: str,
+        source_pages: Optional[list] = None,
     ) -> dict:
         """系统直接调用 MCP 工具: 搜索去重 + 创建/更新实体和关系."""
         created_entities = 0
@@ -909,6 +963,7 @@ class KGBuildAgent:
 
         # 记录已有实体名 → QN 映射（避免重复创建）
         entity_qn_map: dict = {}
+        pages_list = source_pages or [section_title or f"p{page}"]
 
         for c in candidates:
             name = str(c.get("name", "")).strip()
@@ -930,10 +985,16 @@ class KGBuildAgent:
                 search_data = {}
 
             if search_data.get("total_matches", 0) > 0:
-                # 已存在 → 更新
+                # 已存在 → 追加来源页面
                 match = search_data["matches"][0]
                 existing_qn = match.get("qualified_name", name)
                 entity_qn_map[name] = existing_qn
+                # 追加新的来源页面
+                await self._mcp_session.call_tool(
+                    "sysml_update_entity",
+                    {"qualified_name": existing_qn,
+                     "append_source_sections": pages_list},
+                )
                 if aliases:
                     for alias in aliases:
                         await self._mcp_session.call_tool(
@@ -942,7 +1003,7 @@ class KGBuildAgent:
                         )
                 continue
 
-            # 不存在 → 创建
+            # 不存在 → 创建（记录所有来源页面）
             add_result = await self._mcp_session.call_tool(
                 "sysml_add_entity", {
                     "entity_type": etype,
@@ -950,7 +1011,7 @@ class KGBuildAgent:
                     "parent_package": "",
                     "description": desc,
                     "aliases": aliases,
-                    "source_sections": [section_title or f"p{page}"],
+                    "source_sections": pages_list,
                     "source_text": desc,
                     "properties": {},
                     "supertypes": [],
@@ -1003,27 +1064,54 @@ class KGBuildAgent:
     # ── Phase 3: Enrichment ──────────────────────────────────
 
     async def _enrich_entities(self, doc_name: str) -> None:
-        """用强模型审查并补充别名/属性/关系."""
+        """用强模型按小节分组审查并补充别名/属性/关系."""
         if not self._unified_tools or self._mcp_session is None:
             return
 
         summary = await self._summary()
-        if summary.get("total_entities", 0) == 0:
+        total_entities = summary.get("total_entities", 0)
+        if total_entities == 0:
             return
 
+        # 获取带 source_sections 的实体详情
         entity_list = await self._mcp_session.call_tool(
-            "sysml_list_entities", {"include_details": False}
+            "sysml_list_entities", {"include_details": True}
         )
         try:
             entities_data = json.loads(entity_list)
         except json.JSONDecodeError:
             return
 
-        entity_names = [e.get("name", "") for e in entities_data.get("entities", [])]
-        if not entity_names:
+        entities = entities_data.get("entities", [])
+        if not entities:
             return
 
-        logger.info("Enrichment: reviewing %d entities with strong model", len(entity_names))
+        # 按 source_section 分组实体
+        section_groups: dict = {}
+        for e in entities:
+            name = e.get("name", "")
+            # source_sections 通常是 ["p4 1.1 系统技术指标", "p5 1.1 ..."]
+            sections = e.get("source_sections") or e.get("source_section") or []
+            if isinstance(sections, str):
+                sections = [sections]
+            if not sections:
+                key = "__no_section__"
+            else:
+                # 取第一个来源的节号作为分组键
+                first = str(sections[0])
+                # 尝试提取章节号: "p4 1.1 系统技术指标" → "1.1"
+                import re
+                m = re.search(r'([\d]+\.[\d]+)', first)
+                if m:
+                    key = m.group(1)
+                else:
+                    key = first[:30]
+            if key not in section_groups:
+                section_groups[key] = []
+            section_groups[key].append(e)
+
+        logger.info("Enrichment: %d entities in %d sections",
+                     len(entities), len(section_groups))
 
         agent = create_agent(
             model=self.llm,
@@ -1033,24 +1121,34 @@ class KGBuildAgent:
             name="kg_enricher",
         )
 
-        prompt = f"""文档: {doc_name}
-已有实体列表 ({len(entity_names)}个):
-{json.dumps(entity_names, ensure_ascii=False, indent=2)}
+        section_items = sorted(section_groups.items())
+        for sec_idx, (sec_key, sec_entities) in enumerate(section_items):
+            sec_names = [e.get("name", "") for e in sec_entities]
+            if not sec_names:
+                continue
 
-请逐一审查实体，补充别名、属性、关系。"""
+            logger.info("  Enrich section [%s]: %d entities", sec_key, len(sec_names))
 
-        try:
-            await asyncio.wait_for(
-                agent.ainvoke(
-                    {"messages": [HumanMessage(content=prompt)]},
-                    config={"recursion_limit": self.max_iterations},
-                ),
-                timeout=self.timeout * 60,
-            )
-        except asyncio.TimeoutError:
-            logger.warning("Enrichment timeout")
-        except Exception as e:
-            logger.warning("Enrichment error: %s", e)
+            prompt = f"""文档: {doc_name}
+小节: {sec_key}
+本小节实体列表 ({len(sec_names)}个):
+{json.dumps(sec_names, ensure_ascii=False, indent=2)}
+
+请为本小节的实体创建关系。**每个实体至少一条关系。**
+只在同小节的实体之间创建关系，不要跨越到其他未知实体。"""
+
+            try:
+                await asyncio.wait_for(
+                    agent.ainvoke(
+                        {"messages": [HumanMessage(content=prompt)]},
+                        config={"recursion_limit": min(self.max_iterations // len(section_items) + 1, 20)},
+                    ),
+                    timeout=self.timeout * 60 // len(section_items),
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Enrichment timeout for section [%s]", sec_key)
+            except Exception as e:
+                logger.warning("Enrichment error for section [%s]: %s", sec_key, e)
 
     # ── 旧接口：向后兼容 ───────────────────────────────────────
 
@@ -1121,6 +1219,35 @@ class KGBuildAgent:
         stats["entity_count_after"] = summary.get("total_entities", 0)
         stats["relation_count_after"] = summary.get("total_relations", 0)
         return stats
+
+    async def _count_orphan_entities(self) -> int:
+        """计算零关系实体的数量."""
+        if self._mcp_session is None:
+            return 0
+
+        entity_list = await self._mcp_session.call_tool(
+            "sysml_list_entities", {"include_details": False}
+        )
+        relation_list = await self._mcp_session.call_tool(
+            "sysml_list_relations", {"include_details": True}
+        )
+
+        try:
+            entities_data = json.loads(entity_list)
+            relations_data = json.loads(relation_list)
+        except json.JSONDecodeError:
+            return 0
+
+        entity_names = [e.get("name", "") for e in entities_data.get("entities", [])]
+        connected: set = set()
+        for rel in relations_data.get("relations", []):
+            for end in rel.get("ends", []):
+                ref = end.get("ref", "")
+                if ref:
+                    connected.add(ref)
+
+        orphans = [n for n in entity_names if n not in connected]
+        return len(orphans)
 
     # ── Light model unload ─────────────────────────────────────
 

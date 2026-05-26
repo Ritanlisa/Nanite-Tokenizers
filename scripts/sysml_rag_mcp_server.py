@@ -135,6 +135,12 @@ def _entity_summary(entity: SysMLElement, include_body: bool = False) -> Dict[st
                 {"ref": e.ref, "role": e.role} for e in entity.ends
             ]
 
+    # 从 metadata 获取 source_sections
+    mgr = _get_manager()
+    meta = mgr._entity_metadata.get(entity.qualified_name, {})
+    if meta.get("source_sections"):
+        info["source_sections"] = meta["source_sections"]
+
     if include_body:
         members = getattr(entity, "members", None)
         if members:
@@ -849,6 +855,59 @@ def sysml_model_summary() -> Dict[str, Any]:
     }
 
 
+# ── Bracket expansion helpers ─────────────────────────────────
+
+import re as _re
+
+
+def _expand_bracket_name(name: str) -> list[str]:
+    """展开方括号: ion[0-99] → [ion0,...,ion99]; mn[1,3] → [mn1,mn3]"""
+    result = [name]
+    pat_range = _re.compile(r'^(.+)\[(\d+)-(\d+)\](.*)$')
+    while True:
+        changed = False
+        new_result = []
+        for n in result:
+            m = pat_range.match(n)
+            if m:
+                prefix, start, end, suffix = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
+                for i in range(start, end + 1):
+                    new_result.append(f"{prefix}{i}{suffix}")
+                changed = True
+            else:
+                new_result.append(n)
+        result = new_result
+        if not changed:
+            break
+    pat_list = _re.compile(r'^(.+)\[([\d,]+)\](.*)$')
+    while True:
+        changed = False
+        new_result = []
+        for n in result:
+            m = pat_list.match(n)
+            if m:
+                prefix, nums, suffix = m.group(1), m.group(2), m.group(3)
+                for num in nums.split(','):
+                    new_result.append(f"{prefix}{num.strip()}{suffix}")
+                changed = True
+            else:
+                new_result.append(n)
+        result = new_result
+        if not changed:
+            break
+    return result
+
+
+def _expand_relation_pair(source: str, target: str) -> list[tuple[str, str]]:
+    """扩展关系: src[0-2] conn tgt[0-1] → 3×2=6 对"""
+    src_list = _expand_bracket_name(source)
+    tgt_list = _expand_bracket_name(target)
+    if len(src_list) == 1 and len(tgt_list) == 1:
+        return [(source, target)]
+    pairs = [(s, t) for s in src_list for t in tgt_list]
+    return pairs
+
+
 # ══════════════════════════════════════════════════════════════
 # 新增：实体 CRUD 工具
 # ══════════════════════════════════════════════════════════════
@@ -884,17 +943,31 @@ def sysml_add_entity(
         创建结果
     """
     mgr = _get_manager()
+    names = _expand_bracket_name(name)
+    if len(names) > 1:
+        results = []
+        for n in names:
+            element = mgr.add_entity_with_metadata(
+                entity_type=entity_type, name=n,
+                parent_package=parent_package, description=description,
+                aliases=aliases, source_sections=source_sections,
+                source_text=source_text, properties=properties,
+                supertypes=supertypes, short_name=n,
+            )
+            if element is None:
+                results.append({"ok": False, "error": f"Invalid entity_type: {entity_type}"})
+            else:
+                results.append({
+                    "ok": True, "qualified_name": element.qualified_name,
+                    "name": element.name, "type": type(element).__name__,
+                })
+        return {"ok": True, "expanded_from": name, "count": len(results), "items": results}
     element = mgr.add_entity_with_metadata(
-        entity_type=entity_type,
-        name=name,
-        parent_package=parent_package,
-        description=description,
-        aliases=aliases,
-        source_sections=source_sections,
-        source_text=source_text,
-        properties=properties,
-        supertypes=supertypes,
-        short_name=short_name,
+        entity_type=entity_type, name=name,
+        parent_package=parent_package, description=description,
+        aliases=aliases, source_sections=source_sections,
+        source_text=source_text, properties=properties,
+        supertypes=supertypes, short_name=short_name,
     )
     if element is None:
         return {"ok": False, "error": f"Invalid entity_type: {entity_type}"}
@@ -1028,14 +1101,29 @@ def sysml_add_relation(
         创建结果
     """
     mgr = _get_manager()
+    pairs = _expand_relation_pair(source, target)
+    if len(pairs) > 1:
+        results = []
+        for s, t in pairs:
+            rel = mgr.add_relation(
+                relation_type=relation_type, source_name=s, target_name=t,
+                name=name, parent_package=parent_package,
+                description=description, role_source=role_source,
+                role_target=role_target,
+            )
+            if rel is None:
+                results.append({"ok": False, "error": f"Invalid relation_type: {relation_type}"})
+            else:
+                results.append({
+                    "ok": True, "qualified_name": rel.qualified_name,
+                    "name": rel.name, "type": type(rel).__name__,
+                    "source": s, "target": t,
+                })
+        return {"ok": True, "expanded_from": f"{source}→{target}", "count": len(results), "items": results}
     rel = mgr.add_relation(
-        relation_type=relation_type,
-        source_name=source,
-        target_name=target,
-        name=name,
-        parent_package=parent_package,
-        description=description,
-        role_source=role_source,
+        relation_type=relation_type, source_name=source, target_name=target,
+        name=name, parent_package=parent_package,
+        description=description, role_source=role_source,
         role_target=role_target,
     )
     if rel is None:
@@ -1141,15 +1229,7 @@ def _get_hv_config(mgr: SysMLManager, hv_id: str) -> Optional[dict]:
                         value = getattr(m, "value_expr", None)
                         if m_name and value is not None:
                             info[m_name] = str(value).strip("'\" ")
-                    return info
-            members = getattr(item, "members", None)
-            if members:
-                result = walk(members)
-                if result:
-                    return result
-        return None
-
-    return walk(mgr.root_elements)
+    return info
 
 
 def _build_hv_lookup(mgr: SysMLManager, text: str) -> dict[str, tuple[str, str]]:
