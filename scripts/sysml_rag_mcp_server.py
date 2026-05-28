@@ -955,12 +955,13 @@ def _expand_relation_pair(source: str, target: str) -> list[tuple[str, str]]:
 
 
 def _sanitize_name(name: str) -> str:
-    """清理实体名: 替换括号/空格为下划线，确保 SysML 标识符合法"""
-    name = name.replace('（', '_').replace('）', '')
-    name = name.replace('(', '_').replace(')', '')
-    name = name.replace(' ', '_')
-    name = name.replace('/', '_').replace('\\', '_')
-    return name or "_"
+    """清理实体名: 去除所有非 SysML 标识符字符"""
+    for ch in ['（', '）', '(', ')', '<', '>', '"', '\'', ' ', '/', '\\', ',', ';', ':']:
+        name = name.replace(ch, '_')
+    # Collapse consecutive underscores
+    while '__' in name:
+        name = name.replace('__', '_')
+    return name.strip('_') or "_"
 
 
 # ══════════════════════════════════════════════════════════════
