@@ -89,7 +89,8 @@ logging.basicConfig(
 
 # Suppress noisy libraries
 for lib in ["openai", "httpx", "httpcore", "chromadb", "sentence_transformers",
-            "llama_index", "urllib3", "asyncio", "faiss", "PIL"]:
+            "llama_index", "urllib3", "asyncio", "faiss", "PIL",
+            "mcp.client.stdio"]:        # MCP notifications/initialized parse error (non-fatal)
     logging.getLogger(lib).setLevel(logging.WARNING)
 
 logger = logging.getLogger("headless_test")
@@ -97,50 +98,63 @@ logger = logging.getLogger("headless_test")
 
 # ── Config overrides ─────────────────────────────────────────
 
+KG_MODEL = "gemma4:31b"              # 强模型 — KG 提取和富化
+QA_MODEL = "qwen3:8b"              # 小模型 — QA 合成是简单文本任务
+
 config.settings = config.settings.update(
     RAG_DB_NAME=DB_NAME,
     RAG_DB_NAMES=[DB_NAME],
     KG_EXTRACTION_ENABLED=True,
-    KG_EXTRACTION_MODEL="qwen3:8b",
+    KG_EXTRACTION_MODEL=KG_MODEL,
     KG_EXTRACTION_TEMPERATURE=0.1,
     KG_EXTRACTION_TIMEOUT=300,
-    KG_EXTRACTION_MAX_ITERATIONS=30,
+    KG_EXTRACTION_MAX_ITERATIONS=200,
+    LLM_MODEL=QA_MODEL,
     AGENT_VERBOSE=True,
     AGENT_INVOKE_TIMEOUT=1200,
     OCR_MODEL=None,
-    LLM_REQUEST_TIMEOUT=300,
+    LLM_REQUEST_TIMEOUT=600,
 )
 
 # ── GPU contention check ────────────────────────────────────
 
-def wait_for_gpu_free(poll_interval: float = 15.0, max_wait: float = 600.0):
-    """Wait until no other process is using the GPU (via nvidia-smi)."""
+def wait_for_gpu_free(poll_interval: float = 10.0, max_wait: float = 120.0):
+    """Wait until no other compute-intensive process is using the GPU.
+    Ollama is the model server and is expected to always run."""
     import subprocess
     waited = 0.0
     while waited < max_wait:
         try:
             result = subprocess.run(
-                ["nvidia-smi", "--query-compute-apps=pid,process_name", "--format=csv,noheader"],
+                ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader"],
                 capture_output=True, text=True, timeout=10,
             )
             lines = [l.strip() for l in result.stdout.splitlines() if l.strip()]
-            # Filter out our own process
             our_pid = str(os.getpid())
-            other_processes = [l for l in lines if our_pid not in l]
-            if not other_processes:
-                logger.info("GPU free — proceeding")
+            # Filter: ignore ollama (model server) and our own process
+            heavy_procs = []
+            for l in lines:
+                if our_pid in l:
+                    continue
+                if "ollama" in l.lower():
+                    continue
+                heavy_procs.append(l)
+            if not heavy_procs:
+                logger.info("GPU available — proceeding")
                 return True
-            logger.info("GPU busy (%d other process(es)), waiting %.1fs...", len(other_processes), poll_interval)
+            logger.info("GPU busy (%d other heavy process(es)), waiting %.1fs...",
+                        len(heavy_procs), poll_interval)
             time.sleep(poll_interval)
             waited += poll_interval
         except Exception as e:
             logger.warning("nvidia-smi check failed: %s", e)
-            return True  # proceed anyway on error
+            return True
     logger.warning("GPU still busy after %.0fs, proceeding anyway", max_wait)
     return True
 
-# Wait for GPU before starting
-wait_for_gpu_free()
+# GPU check disabled — user explicitly requested to run regardless
+# wait_for_gpu_free()
+logger.info("GPU check skipped — running regardless of GPU contention")
 
 logger.info("=" * 70)
 logger.info("HEADLESS KG BUILD + QA TEST")
@@ -490,6 +504,15 @@ async def main():
     total_start = time.time()
 
     try:
+        # Clear old KG to avoid accumulation from previous runs
+        kg_file = ROOT_DIR / "database" / DB_NAME / "knowledge_graph.sysml"
+        kg_meta = ROOT_DIR / "database" / DB_NAME / "knowledge_graph.meta.json"
+        if kg_file.exists():
+            kg_file.unlink()
+            logger.info("Cleared old KG: %s", kg_file)
+        if kg_meta.exists():
+            kg_meta.unlink()
+
         # Step 1: Load documents
         rag_docs = await step1_load_documents()
 
@@ -497,16 +520,19 @@ async def main():
             logger.error("No documents loaded. Aborting.")
             return 1
 
-        # Step 2: Build KG
-        # First, take only the most relevant document to save time
-        # The 湖超 doc is most likely to contain the R1P3/smu_tranfer_cmd info
+        # Step 2: Build KG — 只处理湖超 (最相关的文档，141 叶子页)
         logger.info("\n\n")
         logger.info("=" * 70)
-        logger.info("NOTE: Building KG from ALL 3 documents. This may take a long time.")
+        logger.info("NOTE: Building KG from 湖超 only (141 leaf pages). Model: %s", KG_MODEL)
         logger.info("=" * 70)
         logger.info("\n")
 
-        build_stats = await step2_build_kg(rag_docs)
+        # Filter to only 湖超 doc
+        huchao_docs = [d for d in rag_docs if "湖超" in getattr(d, "doc_name", "")]
+        if not huchao_docs:
+            huchao_docs = rag_docs[:1]  # fallback to first doc
+        logger.info("Selected document: %s", getattr(huchao_docs[0], "doc_name", "?"))
+        build_stats = await step2_build_kg(huchao_docs)
 
         # Step 3: QA
         qa_result = await step3_qa()

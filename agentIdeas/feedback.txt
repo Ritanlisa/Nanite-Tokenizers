@@ -35,3 +35,11 @@ test
 [2026-05-19 15:13:47] QA session (sysml-only): db=AIOPS, entities_retrieved=6, not_found=0, model=qwen3:8b
   question=天河高性能计算机系统的mn0节点上只有命令行可用，需要怎么做才能获取机柜R1P3上所有节点的加电信息？
   answer_len=643
+
+[2026-05-21 10:59:56] QA session (sysml-only): db=AIOPS, entities_retrieved=6, not_found=0, model=qwen3-vl:32b
+  question=天河高性能计算机系统的mn0节点上只有命令行可用，需要怎么做才能获取机柜R1P3上所有节点的加电信息？
+  answer_len=30
+
+[2026-05-21 11:04:17] QA session (sysml-only): db=AIOPS, entities_retrieved=6, not_found=0, model=qwen3:8b
+  question=天河高性能计算机系统的mn0节点上只有命令行可用，需要怎么做才能获取机柜R1P3上所有节点的加电信息？
+  answer_len=30

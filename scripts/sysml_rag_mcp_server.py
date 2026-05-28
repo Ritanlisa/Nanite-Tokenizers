@@ -1001,6 +1001,8 @@ def sysml_add_entity(
         创建结果
     """
     name = _sanitize_name(name)
+    if short_name:
+        short_name = _sanitize_name(short_name)
     mgr = _get_manager()
     names = _expand_bracket_name(name)
     if len(names) > 1:
