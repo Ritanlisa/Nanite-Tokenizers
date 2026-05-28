@@ -1346,8 +1346,8 @@ class KGBuildAgent:
         if not candidates:
             return 0
 
-        llm = self.llm if use_strong else self.light_llm
-        model_label = "strong" if use_strong else "light"
+        model_name = self.model if use_strong else self.light_model
+        api_url = (config.settings.OPENAI_API_URL or "http://localhost:11434/v1").rstrip("/")
         created = 0
 
         for s_name, t_name, shared_sections in candidates[:20]:
@@ -1365,11 +1365,19 @@ class KGBuildAgent:
 请只回答一个词: allocation, connection, 或 None"""
 
             try:
-                response = await asyncio.wait_for(
-                    llm.ainvoke([HumanMessage(content=prompt)]),
-                    timeout=120,
-                )
-                answer = str(response.content).strip().lower()
+                async with httpx.AsyncClient(timeout=120) as client:
+                    resp = await client.post(
+                        f"{api_url}/chat/completions",
+                        json={
+                            "model": model_name,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "stream": False,
+                            "options": {"num_predict": 8},
+                        },
+                    )
+                    data = resp.json()
+                    answer = (data.get("choices", [{}])[0]
+                              .get("message", {}).get("content", "")).strip().lower()
             except Exception:
                 continue
 
