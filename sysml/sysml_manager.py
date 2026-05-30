@@ -656,6 +656,8 @@ class SysMLManager:
         description: Optional[str] = None,
         role_source: Optional[str] = None,
         role_target: Optional[str] = None,
+        source_sections: Optional[List[str]] = None,
+        source_text: Optional[str] = None,
     ) -> Optional[Usage]:
         cls = RELATION_CLASS_MAP.get(relation_type)
         if cls is None:
@@ -688,11 +690,11 @@ class SysMLManager:
 
         self.add_element(rel, parent=parent_ns)
         qn = rel.qualified_name
-        if description:
+        if description or source_sections:
             self._entity_metadata[qn] = {
-                "description": description,
-                "source_sections": [],
-                "source_text": "",
+                "description": description or "",
+                "source_sections": source_sections or [],
+                "source_text": source_text or "",
                 "properties": {},
             }
         return rel

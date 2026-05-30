@@ -17,9 +17,10 @@ import logging
 import sys
 import time
 import traceback
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
 
@@ -1779,6 +1780,598 @@ class KGBuildAgent:
             return json.loads(result)
         except json.JSONDecodeError:
             return {}
+
+    # ═══════════════════════════════════════════════════════════════
+    # 递归级联 KG 构建 (cascading-recursive pipeline)
+    # ═══════════════════════════════════════════════════════════════
+
+    async def build_kg_recursive(self, rag_doc) -> Dict[str, Any]:
+        """
+        递归级联知识图谱构建管线:
+        Phase 0: gemma4:31b 识别根实体和起点小节
+        Phase 1: gemma4:31b 根小节完整提取
+        Phase 2: 实体传播 → 全文搜索 → 构建队列
+        Phase 3: 级联队列处理 (qwen3:8b)
+        循环 Phase 2→3 直到队列为空
+        最后: 跨章节去重 + 图聚合
+
+        支持断点续跑: 完整序列化 build_queue/processed_pairs/实体队列状态
+        """
+        await self.initialize()
+
+        doc_name = getattr(rag_doc, "doc_name", "")
+        build = self._load_build_state(doc_name)
+        pipeline = build.get("pipeline", "")
+        phase = build.get("phase", "")
+
+        if phase == "done" and pipeline == "recursive":
+            logger.info("Document %s already fully built (recursive), reusing stats", doc_name)
+            return build.get("stats", {})
+
+        stats: Dict[str, Any] = {
+            "entity_count_before": 0, "entity_count_after": 0,
+            "relation_count_before": 0, "relation_count_after": 0,
+            "pipeline": "recursive",
+        }
+        stats.update(build.get("stats", {}))
+
+        try:
+            summary = await self._summary()
+            stats["entity_count_before"] = summary.get("total_entities", 0)
+            stats["relation_count_before"] = summary.get("total_relations", 0)
+
+            safe_doc_name = doc_name.replace(" ", "_").replace(".", "_")
+            if safe_doc_name:
+                await self._mcp_session.call_tool("sysml_add_entity", {
+                    "entity_type": "Package", "name": safe_doc_name,
+                })
+
+            tree_state = DocumentTreeState(rag_doc)
+            logger.info("Recursive: %d leaf pages in document tree", tree_state.total_pages)
+
+            if tree_state.total_pages == 0:
+                logger.warning("No content pages found in document")
+                return stats
+
+            # 构建 sections 映射 (parent_id → [nodes])
+            sections = self._build_section_map(tree_state)
+
+            # ── Phase 0: 根实体识别 ──
+            root_entity = build.get("root_entity")
+            start_sections = build.get("start_sections", [])
+            if not root_entity or not start_sections:
+                root_entity, start_sections = await self._identify_root(
+                    rag_doc, tree_state, sections, doc_name
+                )
+                self._save_recursive_state(doc_name, "recursive_phase1",
+                    root_entity=root_entity, start_sections=start_sections, stats=stats)
+                logger.info("Phase 0 done: root=%s, start_sections=%s",
+                             root_entity.get("name", "?"), start_sections)
+            else:
+                logger.info("Phase 0 already done (resume): root=%s", root_entity.get("name", "?"))
+
+            # ── Phase 1: 根小节处理 ──
+            processed_sections = set(build.get("processed_sections", []))
+            if not processed_sections:
+                new_entity_names = await self._process_root_sections(
+                    tree_state, sections, root_entity, start_sections, doc_name
+                )
+                for sid in start_sections:
+                    processed_sections.add(sid)
+                self._save_recursive_state(doc_name, "recursive_phase2",
+                    root_entity=root_entity, start_sections=start_sections,
+                    processed_sections=list(processed_sections),
+                    stats=stats)
+                logger.info("Phase 1 done: %d entities discovered", len(new_entity_names))
+            else:
+                logger.info("Phase 1 already done: %d processed sections", len(processed_sections))
+                new_entity_names = []  # will be rebuilt from Phase 2 search
+
+            # ── 恢复队列 ──
+            build_queue = deque()
+            for pair in build.get("build_queue", []):
+                build_queue.append(tuple(pair))
+            processed_pairs = set(
+                tuple(p) for p in build.get("processed_pairs", [])
+            )
+            section_entity_queue = deque(build.get("current_section_entity_queue", []))
+            current_section = build.get("current_section")
+
+            t0 = time.time()
+
+            # ── Phase 2 → Phase 3 循环 ──
+            iteration = 0
+            max_iterations = 500
+            while iteration < max_iterations:
+                iteration += 1
+                logger.debug("Recursive loop iteration %d: build_queue=%d, processed=%d",
+                              iteration, len(build_queue), len(processed_sections))
+
+                if not build_queue and not section_entity_queue:
+                    # Phase 2: 传播新实体到未处理小节
+                    if new_entity_names:
+                        build_queue = await self._propagate_entities(
+                            tree_state, sections, new_entity_names,
+                            processed_sections, processed_pairs, build_queue, doc_name
+                        )
+                        new_entity_names = []
+                        self._save_recursive_state(doc_name, "recursive_phase3",
+                            root_entity=root_entity, start_sections=start_sections,
+                            processed_sections=list(processed_sections),
+                            build_queue=list(build_queue),
+                            processed_pairs=[list(p) for p in processed_pairs],
+                            stats=stats)
+                        logger.info("Phase 2: queue size=%d after propagation", len(build_queue))
+
+                    if not build_queue:
+                        logger.info("Recursive pipeline: queue empty, build complete")
+                        break
+                    continue
+
+                # Phase 3: 处理队列
+                if section_entity_queue:
+                    # 小节内实体级联
+                    entity_name = section_entity_queue.popleft()
+                    section_id = current_section
+                    logger.info("Phase 3: intra-section cascade entity=%s section=%s (queue_remaining=%d)",
+                                 entity_name, section_id, len(section_entity_queue))
+                else:
+                    # 从 build_queue 取新配对
+                    entity_name, section_id = build_queue.popleft()
+                    current_section = section_id
+                    logger.info("Phase 3: new pair entity=%s section=%s (queue_remaining=%d)",
+                                 entity_name, section_id, len(build_queue))
+
+                pair = (entity_name, section_id)
+                if pair in processed_pairs:
+                    logger.debug("Phase 3: skip already processed pair %s", pair)
+                    continue
+
+                # 处理小节（如果尚未处理）
+                if section_id not in processed_sections:
+                    section_nodes = sections.get(section_id, [])
+                    if section_nodes:
+                        new_ents = await self._process_queued_section(
+                            section_nodes, entity_name, section_id, doc_name
+                        )
+                        new_entity_names.extend(new_ents)
+                        if not section_entity_queue:
+                            for nd in section_nodes:
+                                tree_state.mark_processed(nd.node_id)
+                            processed_sections.add(section_id)
+                            current_section = None
+                            logger.info("Phase 3: section %s fully done, %d new entities",
+                                         section_id, len(new_ents))
+                    else:
+                        processed_sections.add(section_id)
+
+                processed_pairs.add(pair)
+
+                if iteration % 10 == 0:
+                    await self._trigger_save()
+                    self._save_recursive_state(doc_name, phase or "recursive_phase3",
+                        root_entity=root_entity, start_sections=start_sections,
+                        processed_sections=list(processed_sections),
+                        build_queue=list(build_queue),
+                        processed_pairs=[list(p) for p in processed_pairs],
+                        current_section=current_section,
+                        current_section_entity_queue=list(section_entity_queue),
+                        stats=stats)
+
+            # ── 收尾: 跨章节去重 ──
+            logger.info("Recursive pipeline: deduplicating across sections...")
+            await self._deduplicate_entities()
+            await self._trigger_save()
+            stats["phase_dedup_time_s"] = round(time.time() - t0, 1)
+
+            # ── 图聚合 ──
+            logger.info("Recursive pipeline: aggregating graph...")
+            await self._aggregate_graph(doc_name)
+            await self._trigger_save()
+
+            summary = await self._summary()
+            stats["entity_count_after"] = summary.get("total_entities", 0)
+            stats["relation_count_after"] = summary.get("total_relations", 0)
+            stats["total_time_s"] = round(time.time() - t0, 1)
+
+            self._save_recursive_state(doc_name, "done",
+                root_entity=root_entity, start_sections=start_sections,
+                processed_sections=list(processed_sections),
+                stats=stats, errors=None)
+            logger.info("Recursive KG build complete: entities %d→%d, relations %d→%d",
+                         stats["entity_count_before"], stats["entity_count_after"],
+                         stats["relation_count_before"], stats["relation_count_after"])
+            return stats
+
+        except KeyboardInterrupt:
+            logger.warning("Recursive build interrupted, saving state...")
+            await self._trigger_save()
+            self._save_recursive_state(doc_name, "recursive_phase3",
+                root_entity=build.get("root_entity", {}),
+                start_sections=build.get("start_sections", []),
+                processed_sections=list(processed_sections) if "processed_sections" in dir() else [],
+                build_queue=list(build_queue) if "build_queue" in dir() else [],
+                processed_pairs=[list(p) for p in processed_pairs] if "processed_pairs" in dir() else [],
+                stats=stats)
+            raise
+        except Exception as e:
+            logger.error("Recursive build error: %s\n%s", e, traceback.format_exc())
+            await self._trigger_save()
+            raise
+
+    def _build_section_map(self, tree_state: DocumentTreeState) -> Dict[str, List[DocTreeNode]]:
+        """构建 parent_id → [nodes] 映射（按小节分组）"""
+        sections: Dict[str, List[DocTreeNode]] = {}
+        for nid in tree_state._all_page_ids:
+            if nid not in tree_state.nodes:
+                continue
+            node = tree_state.nodes[nid]
+            parent_id = node.parent_id or "__root__"
+            sections.setdefault(parent_id, []).append(node)
+        return sections
+
+    async def _identify_root(
+        self, rag_doc, tree_state: DocumentTreeState,
+        sections: Dict[str, List], doc_name: str
+    ) -> tuple:
+        """Phase 0: 用 gemma4:31b 识别根实体和起点小节"""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        doc_title = getattr(rag_doc, "title", "") or doc_name
+        tree_desc = json.dumps(tree_state.get_tree_structure(), ensure_ascii=False, indent=2)
+
+        prompt = f"""你是技术文档分析专家。分析以下文档的目录结构，识别根实体和最佳构建起点。
+
+## 文档信息
+- 标题: {doc_title}
+
+## 文档目录结构
+{tree_desc}
+
+## 任务
+1. **根实体识别**: 文档描述的核心实体是什么？（文档主题：某个系统、设备、项目？）
+   - name: 根实体名称（用文档中最正式的称谓）
+   - type: SysML实体类型 (PartDef|ItemDef|Package)
+   - description: 一句话描述
+
+2. **起点小节选择**: 从上述章节中选择2-4个小节作为构建起点（对根实体描述最集中的小节）
+   - start_sections: node_id 列表，如 ["n5", "n8"]
+
+## 输出格式（仅JSON）"""
+        prompt += """
+{"root_entity":{"name":"...","type":"PartDef","description":"..."},"start_sections":["n5"],"reasoning":"..."}"""
+
+        logger.debug("Phase 0: identifying root entity via %s", self.model)
+        try:
+            response = await asyncio.wait_for(
+                self.llm.ainvoke([
+                    SystemMessage(content="你是技术文档分析专家。仅输出JSON，无其他内容。"),
+                    HumanMessage(content=prompt),
+                ]),
+                timeout=180,
+            )
+            raw = str(response.content) if hasattr(response, "content") else str(response)
+            logger.debug("Phase 0 LLM response: %s", raw[:500])
+
+            result = self._parse_json_response(raw)
+            root = result.get("root_entity", {})
+            starts = result.get("start_sections", [])
+
+            if not root.get("name"):
+                root = {"name": doc_title or doc_name, "type": "PartDef",
+                         "description": f"文档:{doc_title or doc_name}"}
+            if not starts:
+                starts = list(sections.keys())[:3]
+
+            return root, starts
+        except asyncio.TimeoutError:
+            logger.warning("Phase 0 timed out, using defaults")
+            return (
+                {"name": doc_title or doc_name, "type": "PartDef",
+                 "description": f"Document root entity for {doc_name}"},
+                list(sections.keys())[:3],
+            )
+        except Exception as e:
+            logger.error("Phase 0 LLM error: %s", e)
+            return (
+                {"name": doc_title or doc_name, "type": "PartDef",
+                 "description": f"Document root entity for {doc_name}"},
+                list(sections.keys())[:3],
+            )
+
+    async def _process_root_sections(
+        self, tree_state: DocumentTreeState,
+        sections: Dict[str, List], root_entity: Dict[str, Any],
+        start_section_ids: List[str], doc_name: str,
+    ) -> List[str]:
+        """Phase 1: 用 gemma4:31b 提取根小节中的全部实体和关系"""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        all_new_entity_names: List[str] = []
+        root_name = root_entity.get("name", "")
+        root_type = root_entity.get("type", "PartDef")
+        root_desc = root_entity.get("description", "")
+
+        for sid in start_section_ids:
+            nodes = sections.get(sid, [])
+            if not nodes:
+                continue
+
+            section_title = nodes[0].title[:60]
+            text_parts = [
+                f"## 页面{nd.page_start}: {nd.title}\n{nd.text}"
+                for nd in nodes
+            ]
+            merged_text = "\n\n".join(text_parts)
+
+            prompt = f"""你是SysML v2知识图谱专家。从文档小节中提取**所有**系统架构实体和关系。
+
+## 文档根实体
+- 名称: {root_name}
+- 类型: {root_type}
+- 描述: {root_desc}
+
+## 当前小节
+- ID: {sid}
+- 标题: {section_title}
+
+## 可用实体类型
+PartDef(系统组件/模块/设备/机柜/服务器), AttributeDef(属性/参数/指标), PortDef(接口/端口), ItemDef(数据结构/信息流), RequirementDef(需求/约束), CommandDef(Shell命令/CLI操作), InterfaceDef, ConnectionDef
+
+## 关系类型
+Connection(物理连接/数据流), Interface(接口实现), Allocation(功能/资源分配)
+
+## 小节内容
+{merged_text}
+
+## 输出格式 (仅JSON数组，无Markdown包裹)"""
+            prompt += f"""
+[
+  {{"type":"PartDef","name":"实体名","description":"简短描述","aliases":["别名"],"source_section":"{section_title}"}},
+  {{"type":"Connection","source":"源","target":"目标","description":"关系描述","source_section":"{section_title}"}}
+]
+无相关内容输出 []"""
+
+            logger.debug("Phase 1: extracting root section %s via %s", sid, self.model)
+            try:
+                t_call = time.time()
+                response = await asyncio.wait_for(
+                    self.llm.ainvoke([
+                        SystemMessage(content="你是SysML v2知识图谱专家。仅输出JSON数组，无其他内容。"),
+                        HumanMessage(content=prompt),
+                    ]),
+                    timeout=300,
+                )
+                raw = str(response.content) if hasattr(response, "content") else str(response)
+                logger.debug("Phase 1 LLM (root section %s, %.1fs): %s",
+                              sid, time.time() - t_call, raw[:500])
+            except asyncio.TimeoutError:
+                logger.warning("Phase 1 timeout for root section %s", sid)
+                continue
+            except Exception as e:
+                logger.error("Phase 1 LLM error for section %s: %s", sid, e)
+                continue
+
+            candidates, relations = self._parse_candidates(raw)
+
+            # 记录新实体名
+            for c in candidates:
+                name = c.get("name", "").strip()
+                if name:
+                    all_new_entity_names.append(name)
+
+            # 通过 MCP 创建实体和关系
+            source_pages = [f"p{nd.page_start} {section_title}" for nd in nodes]
+            section_key = section_title if section_title else f"Section {sid}"
+            await self._process_candidates(
+                candidates, relations, doc_name,
+                nodes[0].page_start, section_key,
+                source_pages=source_pages,
+            )
+
+            for nd in nodes:
+                tree_state.mark_processed(nd.node_id)
+
+            await self._trigger_save()
+
+        return all_new_entity_names
+
+    async def _propagate_entities(
+        self, tree_state: DocumentTreeState,
+        sections: Dict[str, List], new_entity_names: List[str],
+        processed_sections: Set[str], processed_pairs: Set[Tuple[str, str]],
+        build_queue: deque, doc_name: str,
+    ) -> deque:
+        """Phase 2: 全文搜索实体在新小节的提及，构建 (entity, section) 队列"""
+        for entity_name in new_entity_names:
+            if not entity_name:
+                continue
+
+            aliases: List[str] = []
+            try:
+                detail_raw = await self._mcp_session.call_tool(
+                    "sysml_get_entity", {"entity_name": entity_name}
+                )
+                detail = json.loads(detail_raw)
+                aliases = detail.get("aliases", []) or []
+            except Exception:
+                pass
+
+            for section_id, nodes in sections.items():
+                if section_id in processed_sections:
+                    continue
+
+                pair = (entity_name, section_id)
+                if pair in processed_pairs:
+                    continue
+
+                already_queued = any(
+                    qe == entity_name and qs == section_id
+                    for qe, qs in build_queue
+                )
+                if already_queued:
+                    continue
+
+                found = False
+                search_names = [entity_name] + aliases
+                for nd in nodes:
+                    text = nd.text
+                    for sn in search_names:
+                        if sn and len(sn) >= 2 and sn.lower() in text.lower():
+                            found = True
+                            break
+                    if found:
+                        break
+
+                if found:
+                    build_queue.append((entity_name, section_id))
+                    logger.debug("  Phase 2: entity=%s found in section=%s (aliases=%s)",
+                                  entity_name, section_id, aliases[:3])
+
+        return build_queue
+
+    async def _process_queued_section(
+        self, nodes: List[DocTreeNode], entity_name: str,
+        section_id: str, doc_name: str,
+    ) -> List[str]:
+        """Phase 3: 用 qwen3:8b 提取小节中与焦点实体相关的实体"""
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        section_title = nodes[0].title[:60]
+        text_parts = [
+            f"## 页面{nd.page_start}: {nd.title}\n{nd.text}"
+            for nd in nodes
+        ]
+        merged_text = "\n\n".join(text_parts)
+
+        prompt = f"""你是SysML v2知识图谱专家。从文档小节中提取与焦点实体相关的新知识。
+
+## 焦点实体
+- 名称: {entity_name}
+
+## 当前小节
+- 标题: {section_title}
+
+## 实体类型
+PartDef|AttributeDef|PortDef|ItemDef|RequirementDef|CommandDef|InterfaceDef|ConnectionDef
+
+## 关系类型
+Connection|Interface|Allocation
+
+## 小节内容
+{merged_text}
+
+## 输出格式 (仅JSON数组)"""
+        prompt += f"""
+[
+  {{"type":"PartDef","name":"实体名","description":"简短描述","aliases":["别名"],"source_section":"{section_title}"}},
+  {{"type":"Connection","source":"源","target":"目标","description":"关系描述","source_section":"{section_title}"}}
+]
+无相关内容输出 []"""
+
+        try:
+            t_call = time.time()
+            response = await asyncio.wait_for(
+                self.light_llm.ainvoke([
+                    SystemMessage(content="你是SysML v2知识图谱专家。仅输出JSON数组，无其他内容。"),
+                    HumanMessage(content=prompt),
+                ]),
+                timeout=180,
+            )
+            raw = str(response.content) if hasattr(response, "content") else str(response)
+            logger.debug("Phase 3 LLM (section %s, entity %s, %.1fs): %s",
+                          section_id, entity_name, time.time() - t_call, raw[:400])
+        except asyncio.TimeoutError:
+            logger.warning("Phase 3 timeout for section %s", section_id)
+            return []
+        except Exception as e:
+            logger.error("Phase 3 LLM error for section %s: %s", section_id, e)
+            return []
+
+        candidates, relations = self._parse_candidates(raw)
+        new_entity_names = [c.get("name", "").strip() for c in candidates if c.get("name", "").strip()]
+
+        # 创建实体和关系
+        source_pages = [f"p{nd.page_start} {section_title}" for nd in nodes]
+        section_key = section_title if section_title else f"Section {section_id}"
+        await self._process_candidates(
+            candidates, relations, doc_name,
+            nodes[0].page_start, section_key,
+            source_pages=source_pages,
+        )
+
+        return new_entity_names
+
+    @staticmethod
+    def _parse_json_response(raw: str) -> Dict[str, Any]:
+        """从 LLM 输出解析 JSON 对象（非数组）"""
+        import re
+        json_str = raw.strip()
+        m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+        if m:
+            json_str = m.group(1)
+        else:
+            m = re.search(r'(\{.*\})', raw, re.DOTALL)
+            if m:
+                json_str = m.group(1)
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError:
+            return {}
+
+    def _save_recursive_state(
+        self, doc_name: str, phase: str,
+        root_entity: Optional[Dict] = None,
+        start_sections: Optional[List[str]] = None,
+        processed_sections: Optional[List[str]] = None,
+        build_queue: Optional[List[List]] = None,
+        processed_pairs: Optional[List[List]] = None,
+        current_section: Optional[str] = None,
+        current_section_entity_queue: Optional[List[str]] = None,
+        stats: Optional[Dict[str, Any]] = None,
+        errors: Optional[List[Dict]] = None,
+    ) -> None:
+        """扩展的断点续跑状态保存（含队列状态）"""
+        try:
+            bsf = self._build_state_file
+            data = {}
+            if bsf.exists():
+                with open(bsf, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            docs = data.get("documents", {})
+            entry = docs.get(doc_name, {})
+            entry.update({
+                "phase": phase, "pipeline": "recursive",
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            })
+            if root_entity is not None:
+                entry["root_entity"] = root_entity
+            if start_sections is not None:
+                entry["start_sections"] = start_sections
+            if processed_sections is not None:
+                entry["processed_sections"] = processed_sections
+            if build_queue is not None:
+                entry["build_queue"] = build_queue
+            if processed_pairs is not None:
+                entry["processed_pairs"] = processed_pairs
+            if current_section is not None:
+                entry["current_section"] = current_section
+            if current_section_entity_queue is not None:
+                entry["current_section_entity_queue"] = current_section_entity_queue
+            if stats is not None:
+                entry.setdefault("stats", {}).update(stats)
+            if errors is not None:
+                entry.setdefault("errors", []).extend(errors)
+
+            docs[doc_name] = entry
+            data["documents"] = docs
+            data["version"] = 2
+            tmp = bsf.with_suffix(".tmp")
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp.replace(bsf)
+        except Exception as e:
+            logger.warning("Failed to save recursive build state: %s", e)
 
 
 def _build_simple_tree(doc_name: str, sections: List[SectionInfo]) -> DocumentTreeState:

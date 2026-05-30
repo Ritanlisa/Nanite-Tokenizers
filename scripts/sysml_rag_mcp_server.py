@@ -141,6 +141,13 @@ def _entity_summary(entity: SysMLElement, include_body: bool = False) -> Dict[st
     if meta.get("source_sections"):
         info["source_sections"] = meta["source_sections"]
 
+    # 从 alias registry 获取别名列表
+    qn = entity.qualified_name
+    if qn in mgr._alias_registry._aliases_by_entity:
+        entity_aliases = [a for a in mgr._alias_registry._aliases_by_entity[qn] if a != entity.name]
+        if entity_aliases:
+            info["aliases"] = entity_aliases
+
     if include_body:
         members = getattr(entity, "members", None)
         if members:
@@ -1144,6 +1151,8 @@ def sysml_add_relation(
     description: Optional[str] = None,
     role_source: Optional[str] = None,
     role_target: Optional[str] = None,
+    source_sections: Optional[List[str]] = None,
+    source_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     创建关系（connection / interface / allocation）。
@@ -1157,6 +1166,8 @@ def sysml_add_relation(
         description: 关系描述
         role_source: 源端角色名
         role_target: 目标端角色名
+        source_sections: 来源小节列表（可选）
+        source_text: 来源原文（可选）
 
     Returns:
         创建结果
@@ -1173,6 +1184,7 @@ def sysml_add_relation(
                 name=name, parent_package=parent_package,
                 description=description, role_source=role_source,
                 role_target=role_target,
+                source_sections=source_sections, source_text=source_text,
             )
             if rel is None:
                 results.append({"ok": False, "error": f"Invalid relation_type: {relation_type}"})
@@ -1188,6 +1200,7 @@ def sysml_add_relation(
         name=name, parent_package=parent_package,
         description=description, role_source=role_source,
         role_target=role_target,
+        source_sections=source_sections, source_text=source_text,
     )
     if rel is None:
         return {"ok": False, "error": f"Invalid relation_type: {relation_type}"}
@@ -2209,7 +2222,7 @@ TOOL_DEFINITIONS = {
     # ── 关系 CRUD ──
     "sysml_add_relation": {
         "function": sysml_add_relation,
-        "description": "创建关系（connection/interface/allocation）",
+        "description": "创建关系（connection/interface/allocation），可选来源追踪",
         "parameters": {
             "relation_type": {"type": "string", "description": "关系类型: connection, interface, allocation"},
             "source": {"type": "string", "description": "源实体名称"},
@@ -2219,6 +2232,8 @@ TOOL_DEFINITIONS = {
             "description": {"type": "string", "description": "关系描述（可选）", "default": None},
             "role_source": {"type": "string", "description": "源端角色名（可选）", "default": None},
             "role_target": {"type": "string", "description": "目标端角色名（可选）", "default": None},
+            "source_sections": {"type": "array", "items": {"type": "string"}, "description": "来源小节列表（可选）", "default": None},
+            "source_text": {"type": "string", "description": "来源原文（可选）", "default": None},
         },
     },
     "sysml_delete_relation": {
