@@ -45,7 +45,7 @@ class DocRAGDocument(RAG_DB_Document):
         source_ranges = self._extract_structured_catalog_ranges(source_page_texts, source_page_count, source_page_count)
         main_markers = self._extract_main_compatible_markers(page_texts)
         main_ranges = self._ranges_from_main_markers(main_markers, len(page_texts))
-        main_section_map = self._extract_main_page_section_map(page_texts)
+        main_section_map = {} if getattr(self, "_skip_main_section_map", False) else self._extract_main_page_section_map(page_texts)
         page_signals = self.build_page_signals(page_texts, source_ranges)
 
         physical_page_nodes: List[MonoPage] = []
@@ -715,6 +715,7 @@ class DocRAGDocument(RAG_DB_Document):
         try:
             merged_text = "\n\f\n".join(str(item or "") for item in page_texts)
             temp_doc = main_cls(self.source_document, str(self.base_doc_id))
+            temp_doc._skip_main_section_map = True
             temp_doc.cleaned_text = merged_text
             temp_doc.build()
 
@@ -798,6 +799,7 @@ class DocRAGDocument(RAG_DB_Document):
         try:
             merged_text = "\n\f\n".join(str(item or "") for item in page_texts)
             temp_doc = main_cls(self.source_document, str(self.base_doc_id))
+            temp_doc._skip_main_section_map = True
             temp_doc.cleaned_text = merged_text
             temp_doc.build()
 

@@ -504,14 +504,20 @@ async def main():
     total_start = time.time()
 
     try:
-        # Clear old KG to avoid accumulation from previous runs
+        # ── Check existing build state ──
         kg_file = ROOT_DIR / "database" / DB_NAME / "knowledge_graph.sysml"
-        kg_meta = ROOT_DIR / "database" / DB_NAME / "knowledge_graph.meta.json"
+        build_file = ROOT_DIR / "database" / DB_NAME / "knowledge_graph.build.json"
+        if build_file.exists():
+            try:
+                with open(build_file, 'r', encoding='utf-8') as f:
+                    prev_state = json.load(f)
+                logger.info("Found previous build state: %s", json.dumps(prev_state, ensure_ascii=False))
+            except Exception:
+                pass
         if kg_file.exists():
-            kg_file.unlink()
-            logger.info("Cleared old KG: %s", kg_file)
-        if kg_meta.exists():
-            kg_meta.unlink()
+            logger.info("Resuming from existing KG: %s", kg_file)
+        else:
+            logger.info("Starting fresh KG build")
 
         # Step 1: Load documents
         rag_docs = await step1_load_documents()
@@ -572,10 +578,12 @@ async def main():
             "model": config.settings.KG_EXTRACTION_MODEL,
             "total_time_s": round(total_elapsed, 1),
             "build_stats": [
-                {"doc": bs["doc"], "elapsed_s": round(bs["elapsed"], 1), "stats": bs["stats"]}
+                {"doc": bs["doc"], "elapsed_s": round(bs["elapsed"], 1),
+                 "stats": bs["stats"], "errors": bs.get("errors", [])}
                 for bs in build_stats
             ],
             "qa": qa_result,
+            "build_state_file": str(build_file) if build_file.exists() else None,
         }
         results_file = OUTPUT_DIR / f"results_{RUN_TIMESTAMP}.json"
         with open(results_file, "w", encoding="utf-8") as f:

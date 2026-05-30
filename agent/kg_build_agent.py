@@ -16,6 +16,7 @@ import json
 import logging
 import sys
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -131,46 +132,31 @@ EXTRACTION_CANDIDATES_PROMPT = """你是一个技术文档实体提取器。阅�
 输入文本无任何系统架构内容时输出: []"""
 
 
-# ── Enrichment Prompt (qwen3-vl:32b — adds aliases, properties, relations) ──
+# ── Enrichment JSON Prompt (qwen3:8b — JSON enrichment instructions) ──
 
-ENRICHMENT_PROMPT = """你是SysML v2知识图谱专家。审查已有的KG实体列表，重点添加关系和别名。
+ENRICHMENT_JSON_PROMPT = """你是SysML v2知识图谱专家。审查已有KG实体列表，以JSON格式输出需要添加的关系和别名。
 
-## ⚠️ 硬性规则：每个实体至少1条关系
-- **每个实体必须关联至少1条关系**（connection/interface/allocation）
-- 无关系的孤立实体是不允许的！请在任务结束时自检
-- 如果某个实体确实无法关联任何其他实体，将其连接到文档 Package
-- 关系类型: connection(物理连接), interface(接口), allocation(包含/分配)
-- 示例: FT计算柜 allocation 计算处理分系统 (FT柜是计算系统的一部分)
-- 示例: 交换柜 connection 交换设备 (交换设备安装在交换柜中)
-- 示例: yhst allocation CMU (yhst命令在CMU上执行)
-- 示例: 处理器数量 allocation 双路服务器 (服务器有处理器数量属性)
-- **多创建关系，宁可冗余不要遗漏**
+## 输出格式
+输出一个JSON数组，每个元素是一个富化操作：
 
-## 可用工具及精确参数
+关系操作: {"action":"add_relation","type":"allocation|connection|interface","source":"实体A","target":"实体B","description":"关系描述"}
+别名操作: {"action":"add_alias","entity":"实体名","alias":"别名"}
+更新操作: {"action":"update_entity","entity":"实体名","append_description":"补充描述"}
 
-### mcp__sysml_get_entity
-获取实体详情: entity_name(必填)
+## 硬性规则
+- **每个实体至少创建1条关系**（add_relation），禁止孤立实体
+- 如果实在无法关联，连接到文档 Package
+- 优先在同章节实体之间创建关系
+- 补充常用中英文别名
+- 属性/端口类实体应关联到所属的 PartDef
+- 宁可冗余不要遗漏
 
-### mcp__sysml_add_alias
-添加别名: qualified_name(必填), alias(必填)
-
-### mcp__sysml_add_relation
-创建关系: relation_type(必填), source(必填), target(必填)
-  可选: name, parent_package, description, role_source, role_target
-
-### mcp__sysml_get_connections
-查看实体现有关系: entity_name(必填)
-
-### mcp__sysml_update_entity
-更新实体: qualified_name(必填)
-  可选: append_description, update_properties
-
-## 工作规则
-1. 用 mcp__sysml_get_entity 了解实体，用 mcp__sysml_get_connections 检查现有关系
-2. **重点: 为每对相关实体创建关系，尤其是用户提示词中列出的孤立实体**
-3. 补充别名是中英文通用的
-4. 属性/端口类实体应关联到所属的 PartDef
-5. **任务结束前用 mcp__sysml_get_connections 验证所有用户指定的孤立实体已有关系**"""
+## 示例
+实体: [{"name":"FT计算柜","type":"PartDef","description":"1024个处理器"},{"name":"处理器数量","type":"AttributeDef","description":"1024"}]
+输出:
+```json
+[{"action":"add_relation","type":"allocation","source":"处理器数量","target":"FT计算柜","description":"处理器数量是FT计算柜的属性"}]
+```"""
 
 # ── Unified Tool Names ───────────────────────────────────────
 
@@ -532,7 +518,7 @@ class KGBuildAgent:
         persist_dir: Optional[str] = None,
     ):
         self.db_name = db_name
-        self.model = model or self._get_config("KG_EXTRACTION_MODEL", "qwen3-vl:32b")
+        self.model = model or self._get_config("KG_EXTRACTION_MODEL", "qwen3:8b")
         self.light_model = light_model or self._get_config("KG_LIGHT_MODEL", "qwen3:8b")
         self.temperature = temperature if temperature is not None \
             else self._get_config("KG_EXTRACTION_TEMPERATURE", 0.1)
@@ -546,6 +532,10 @@ class KGBuildAgent:
         self._light_llm: Optional[ChatOpenAIWithReasoning] = None
         self._unified_tools: Optional[List[BaseTool]] = None
         self._merge_tools: Optional[List[BaseTool]] = None
+
+        self._save_lock = asyncio.Lock()
+        self._save_desired = False
+        self._save_task: Optional[asyncio.Task] = None
 
     @staticmethod
     def _get_config(key: str, default: Any = None) -> Any:
@@ -614,39 +604,146 @@ class KGBuildAgent:
     async def build_kg_from_document(self, rag_doc) -> Dict[str, Any]:
         """
         从 RAG_DB_Document 构建知识图谱。
+        支持断点续跑：崩溃/Ctrl+C 后可恢复，不重复已完成阶段。
 
-        三阶段并行架构:
-        1. 并行 light_llm 逐页扫描（Semaphore 控制并发，默认5路并发）
-        2. 系统直接调 MCP — 搜索去重 + 创建实体/关系（顺序，无 LLM）
-        3. 卸载小模型 → 强模型（llm）全局审查，补别名/属性/关系
-        keep_alive=30s 确保小模型空闲后自动卸载，释放显存
+        阶段:
+        1. 并行 qwen3:8b 逐节扫描提取实体/关系候选（Semaphore 控制并发）
+        2. 跨章节去重合并（无 LLM）
+        3. 并行 qwen3:8b 逐节 JSON 富化关系/别名
+        4. 并行图聚合消除孤立子图
         """
         await self.initialize()
 
         doc_name = getattr(rag_doc, "doc_name", "")
-        stats = {
+        build = self._load_build_state(doc_name)
+        phase = build.get("phase", "")
+
+        if phase == "done":
+            logger.info("Document %s already fully built, reusing stats", doc_name)
+            return build.get("stats", {})
+
+        stats: Dict[str, Any] = {
             "entity_count_before": 0, "entity_count_after": 0,
             "relation_count_before": 0, "relation_count_after": 0,
         }
+        stats.update(build.get("stats", {}))
+        errors: List[Dict] = []
 
-        summary = await self._summary()
-        stats["entity_count_before"] = summary.get("total_entities", 0)
-        stats["relation_count_before"] = summary.get("total_relations", 0)
+        try:
+            summary = await self._summary()
+            stats["entity_count_before"] = summary.get("total_entities", 0)
+            stats["relation_count_before"] = summary.get("total_relations", 0)
 
-        safe_doc_name = doc_name.replace(" ", "_").replace(".", "_")
-        if safe_doc_name:
-            await self._mcp_session.call_tool("sysml_add_entity", {
-                "entity_type": "Package", "name": safe_doc_name,
-            })
+            safe_doc_name = doc_name.replace(" ", "_").replace(".", "_")
+            if safe_doc_name:
+                await self._mcp_session.call_tool("sysml_add_entity", {
+                    "entity_type": "Package", "name": safe_doc_name,
+                })
 
-        tree_state = DocumentTreeState(rag_doc)
-        logger.info("Document tree: %d leaf pages", tree_state.total_pages)
+            tree_state = DocumentTreeState(rag_doc)
+            logger.info("Document tree: %d leaf pages", tree_state.total_pages)
 
-        if tree_state.total_pages == 0:
-            logger.warning("No content pages found in document")
+            if tree_state.total_pages == 0:
+                logger.warning("No content pages found in document")
+                return stats
+
+            # ── Phase 1: 按小节分组提取 ──
+            run_phase1 = phase in ("", "phase1")
+            phase1_processed = set(build.get("phase1_processed_sections", []))
+            if run_phase1:
+                stats, errors_ph1 = await self._run_phase1(
+                    rag_doc, doc_name, tree_state, stats, phase1_processed
+                )
+                errors.extend(errors_ph1)
+                self._save_build_state(doc_name, "phase2", stats=stats, errors=errors)
+            else:
+                logger.info("Phase 1 already done (resuming from phase: %s)", phase)
+                # Re-mark processed sections so tree_state reflects reality
+                for nid in list(tree_state._all_page_ids):
+                    if nid in tree_state.nodes:
+                        parent_id = tree_state.nodes[nid].parent_id or "__root__"
+                        if parent_id in phase1_processed:
+                            tree_state.mark_processed(nid)
+
+            # ── Phase 2: 跨章节去重 ──
+            run_phase2 = phase in ("", "phase1", "phase2")
+            if run_phase2:
+                logger.debug("=== Phase 2 START: cross-section dedup ===")
+                t2_start = time.time()
+                await self._deduplicate_entities()
+                await self._trigger_save()
+                stats["phase2_time_s"] = round(time.time() - t2_start, 1)
+                self._save_build_state(doc_name, "phase3", stats=stats, errors=errors)
+                logger.debug("=== Phase 2 DONE (%.1fs) ===", stats["phase2_time_s"])
+
+            # ── Phase 3: 并行 JSON 富化 ──
+            run_phase3 = phase in ("", "phase1", "phase2", "phase3")
+            if run_phase3:
+                pre_enrich_summary = await self._summary()
+                stats["pre_enrich_entities"] = pre_enrich_summary.get("total_entities", 0)
+                stats["pre_enrich_relations"] = pre_enrich_summary.get("total_relations", 0)
+                pre_orphan_count = await self._count_orphan_entities()
+                stats["pre_enrich_orphans"] = pre_orphan_count
+                logger.info("Pre-enrichment: %d entities, %d relations, %d orphans",
+                             stats["pre_enrich_entities"], stats["pre_enrich_relations"],
+                             pre_orphan_count)
+
+                processed_sections = set(build.get("processed_sections", []))
+                stats, errors_ph3 = await self._run_phase3(doc_name, processed_sections, stats)
+                errors.extend(errors_ph3)
+                self._save_build_state(doc_name, "phase4", stats=stats, errors=errors)
+            else:
+                logger.info("Phase 3 already done (resuming from phase: %s)", phase)
+
+            # ── Phase 4: 图聚合 ──
+            run_phase4 = phase in ("", "phase1", "phase2", "phase3", "phase4")
+            if run_phase4:
+                stats, errors_ph4 = await self._run_phase4(doc_name, stats)
+                errors.extend(errors_ph4)
+
+                comps_after = await self._mcp_session.call_tool("sysml_connected_components", {})
+                try:
+                    cc_data = json.loads(comps_after)
+                    stats["final_components"] = cc_data.get("total_components", 0)
+                    stats["final_component_sizes"] = [c.get("size", 0) for c in cc_data.get("components", [])[:5]]
+                except Exception:
+                    stats["final_components"] = -1
+                logger.info("Post-aggregation: %d components", stats["final_components"])
+
+            # ── Final Save ──
+            await self._trigger_save()
+
+            summary = await self._summary()
+            stats["entity_count_after"] = summary.get("total_entities", 0)
+            stats["relation_count_after"] = summary.get("total_relations", 0)
+            stats["total_time_s"] = round(time.time(), 1)
+
+            self._save_build_state(doc_name, "done", stats=stats, errors=errors if errors else None)
+            logger.info("KG build complete: entities %d→%d, relations %d→%d",
+                         stats["entity_count_before"], stats["entity_count_after"],
+                         stats["relation_count_before"], stats["relation_count_after"])
             return stats
 
-        # ── Phase 1: 按小节分组提取（跨页不断开）──
+        except KeyboardInterrupt:
+            logger.warning("Build interrupted by user (Ctrl+C), saving current state...")
+            await self._trigger_save()
+            self._save_build_state(doc_name, phase or "phase1", stats=stats, errors=errors)
+            raise
+        except Exception as e:
+            logger.error("Build error for %s: %s\n%s", doc_name, e, traceback.format_exc())
+            await self._trigger_save()
+            errors.append({"phase": phase or "phase1", "error": str(e), "time": time.strftime("%H:%M:%S")})
+            self._save_build_state(doc_name, phase or "phase1", stats=stats, errors=errors)
+            raise
+
+    async def _run_phase1(
+        self, rag_doc, doc_name: str, tree_state, stats: Dict[str, Any],
+        phase1_processed: set = None,
+    ) -> tuple:
+        """Phase 1: 并行 light_llm 逐节提取 + 顺序 MCP 创建实体。每节结束后保存。支持断点续跑。"""
+        if phase1_processed is None:
+            phase1_processed = set()
+        errors: List[Dict] = []
         try:
             from tqdm import tqdm
             pbar = tqdm(total=tree_state.total_pages, desc="Phase 1: Section extraction",
@@ -660,8 +757,7 @@ class KGBuildAgent:
         relation_count = 0
         t0 = time.time()
 
-        # 将页面按小节(section)分组——同小节内页面合并提取，避免跨页截断
-        section_pages: Dict[str, List[Any]] = {}  # parent_id → [DocTreeNode]
+        section_pages: Dict[str, List[Any]] = {}
         section_order: list = []
         for nid in tree_state._all_page_ids:
             if nid not in tree_state.nodes:
@@ -685,7 +781,6 @@ class KGBuildAgent:
             async with sem:
                 page_range = f"p{nodes[0].page_start}-{nodes[-1].page_start}"
                 section_title = nodes[0].title[:40]
-                # 拼接同小节内所有页面文本
                 text_parts = [
                     f"## 页面{nd.page_start}: {nd.title}\n{nd.text}"
                     for nd in nodes
@@ -696,7 +791,6 @@ class KGBuildAgent:
                     merged_text, section_title, nodes[0].page_start
                 )
                 elapsed = time.time() - t_start
-                # 标注所有页面为来源
                 all_pages = [f"p{nd.page_start}" for nd in nodes]
                 for c in candidates:
                     c.setdefault("source_pages", []).extend(all_pages)
@@ -711,23 +805,52 @@ class KGBuildAgent:
         for result in results:
             if isinstance(result, Exception):
                 logger.error("Section extraction error: %s", result)
+                errors.append({"section": "unknown", "phase": "phase1a", "error": str(result)})
                 continue
             nodes, candidates, relations, elapsed = result
             n_pages = len(nodes)
             page_count += n_pages
 
             section_title = nodes[0].title[:40]
+            section_key = tree_state.nodes[nodes[0].node_id].parent_id or "__root__"
             all_sections = [f"p{nd.page_start} {nd.title[:20]}" for nd in nodes]
 
-            created = await self._process_candidates(
-                candidates, relations, doc_name,
-                nodes[0].page_start, section_title,
-                source_pages=all_sections,
-            )
-            entity_count += created["entities"]
-            relation_count += created["relations"]
+            if section_key in phase1_processed:
+                logger.info("Phase 1 skip [%s]: already processed", section_title)
+                for nd in nodes:
+                    tree_state.mark_processed(nd.node_id)
+                if pbar:
+                    pbar.update(n_pages)
+                continue
+
+            try:
+                created = await self._process_candidates(
+                    candidates, relations, doc_name,
+                    nodes[0].page_start, section_title,
+                    source_pages=all_sections,
+                )
+                entity_count += created["entities"]
+                relation_count += created["relations"]
+            except Exception as e:
+                logger.error("Process candidates error for section %s: %s", section_title, e)
+                errors.append({"section": section_title, "phase": "phase1b", "error": str(e)})
+                created = {"entities": 0, "relations": 0}
+
             for nd in nodes:
                 tree_state.mark_processed(nd.node_id)
+
+            phase1_processed.add(section_key)
+
+            # 每节结束后异步保存 + 更新断点续跑状态
+            await self._trigger_save()
+            try:
+                self._save_build_state(
+                    doc_name, "phase1",
+                    phase1_processed_sections=list(phase1_processed),
+                    stats=stats, errors=errors,
+                )
+            except Exception:
+                pass
 
             if pbar:
                 pbar.update(n_pages)
@@ -748,38 +871,22 @@ class KGBuildAgent:
         stats["phase1_entities"] = entity_count
         stats["phase1_relations"] = relation_count
         stats["phase1_time_s"] = round(t1 - t0, 1)
+        await self._trigger_save()
+        return stats, errors
 
-        # Checkpoint save after Phase 1
-        await self._save_knowledge_graph()
-        logger.info("Phase 1 KG checkpoint saved (%d entities, %d relations)",
-                     entity_count, relation_count)
-
-        # ── Phase 2: 跨章节去重 ──
-        t2_start = time.time()
-        await self._deduplicate_entities()
-        t2_end = time.time()
-        stats["phase2_time_s"] = round(t2_end - t2_start, 1)
-
-        # ── 卸载小模型，释放显存给大模型 ──
-        await self._unload_light_model()
-
-        # ── 统计富化前状态 ──
-        pre_enrich_summary = await self._summary()
-        stats["pre_enrich_entities"] = pre_enrich_summary.get("total_entities", 0)
-        stats["pre_enrich_relations"] = pre_enrich_summary.get("total_relations", 0)
-        pre_orphan_count = await self._count_orphan_entities()
-        stats["pre_enrich_orphans"] = pre_orphan_count
-        logger.info("Pre-enrichment: %d entities, %d relations, %d orphans",
-                     stats["pre_enrich_entities"], stats["pre_enrich_relations"],
-                     pre_orphan_count)
-
-        # ── Phase 3: 强模型补充别名/属性/关系 ──
+    async def _run_phase3(
+        self, doc_name: str, processed_sections: set, stats: Dict[str, Any]
+    ) -> tuple:
+        """Phase 3: 并行 JSON 模式富化。支持断点续跑（跳过已处理小节）。"""
+        errors: List[Dict] = []
         t3_start = time.time()
-        await self._enrich_entities(doc_name)
-        t3_end = time.time()
-        stats["phase3_time_s"] = round(t3_end - t3_start, 1)
+        try:
+            await self._enrich_entities(doc_name, processed_sections, errors)
+        except Exception as e:
+            logger.error("Phase 3 enrichment error: %s", e)
+            errors.append({"phase": "phase3", "error": str(e)})
+        stats["phase3_time_s"] = round(time.time() - t3_start, 1)
 
-        # ── 统计富化后状态 ──
         post_enrich_summary = await self._summary()
         stats["post_enrich_entities"] = post_enrich_summary.get("total_entities", 0)
         stats["post_enrich_relations"] = post_enrich_summary.get("total_relations", 0)
@@ -787,39 +894,24 @@ class KGBuildAgent:
         stats["post_enrich_orphans"] = post_orphan_count
         logger.info("Post-enrichment: %d entities, %d relations, %d orphans",
                      stats["post_enrich_entities"], stats["post_enrich_relations"],
-                      post_orphan_count)
+                     post_orphan_count)
+        await self._trigger_save()
+        return stats, errors
 
-        # ── Phase 4: 图聚合 — 消除孤立子图 ──
+    async def _run_phase4(
+        self, doc_name: str, stats: Dict[str, Any]
+    ) -> tuple:
+        """Phase 4: 图聚合。每轮后保存。"""
+        errors: List[Dict] = []
         t4_start = time.time()
-        await self._aggregate_graph(doc_name)
-        t4_end = time.time()
-        stats["phase4_time_s"] = round(t4_end - t4_start, 1)
-
-        # ── 聚合后统计 ──
-        await self._save_knowledge_graph()
-        comps_after = await self._mcp_session.call_tool("sysml_connected_components", {})
         try:
-            cc_data = json.loads(comps_after)
-            stats["final_components"] = cc_data.get("total_components", 0)
-            stats["final_component_sizes"] = [c.get("size", 0) for c in cc_data.get("components", [])[:5]]
-        except Exception:
-            stats["final_components"] = -1
-
-        logger.info("Post-aggregation: %d components", stats["final_components"])
-
-        # ── Save ──
-        await self._save_knowledge_graph()
-
-        summary = await self._summary()
-        stats["entity_count_after"] = summary.get("total_entities", 0)
-        stats["relation_count_after"] = summary.get("total_relations", 0)
-        stats["total_time_s"] = round(time.time() - t0, 1)
-
-        logger.info("KG build complete: entities %d→%d, relations %d→%d, orphans %d→%d",
-                     stats["entity_count_before"], stats["entity_count_after"],
-                     stats["relation_count_before"], stats["relation_count_after"],
-                     pre_orphan_count, post_orphan_count)
-        return stats
+            await self._aggregate_graph(doc_name)
+        except Exception as e:
+            logger.error("Phase 4 aggregation error: %s", e)
+            errors.append({"phase": "phase4", "error": str(e)})
+        stats["phase4_time_s"] = round(time.time() - t4_start, 1)
+        await self._trigger_save()
+        return stats, errors
 
     # ── Phase 1 helpers ──────────────────────────────────────
 
@@ -861,6 +953,7 @@ class KGBuildAgent:
 
 请输出JSON数组。无系统架构内容则输出 []"""
             try:
+                t_call = time.time()
                 response = await asyncio.wait_for(
                     self.light_llm.ainvoke([
                         SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
@@ -869,6 +962,9 @@ class KGBuildAgent:
                     timeout=180,
                 )
                 raw = str(response.content) if hasattr(response, "content") else str(response)
+                logger.debug("  Phase1a LLM p%d c%d (%.1fs): prompt=%dch resp=%dch",
+                             page, ci+1, time.time()-t_call, len(prompt), len(raw))
+                logger.debug("  Phase1a RESP p%d c%d: %s", page, ci+1, raw[:500])
             except asyncio.TimeoutError:
                 logger.warning("  Light LLM timeout for page %d chunk %d, retrying...", page, ci+1)
                 try:
@@ -971,6 +1067,26 @@ class KGBuildAgent:
 
         return candidates, relations
 
+    @staticmethod
+    def _parse_enrichment_json(raw: str) -> list:
+        """从 LLM 输出解析富化操作 JSON 数组."""
+        import re
+        json_str = raw
+        m = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', raw, re.DOTALL)
+        if m:
+            json_str = m.group(1)
+        else:
+            m = re.search(r'(\[.*\])', raw, re.DOTALL)
+            if m:
+                json_str = m.group(1)
+        try:
+            items = json.loads(json_str)
+            if isinstance(items, list):
+                return [i for i in items if isinstance(i, dict) and i.get("action")]
+        except json.JSONDecodeError:
+            pass
+        return []
+
     async def _process_candidates(
         self, candidates: list, relations: list,
         doc_name: str, page: int, section_title: str,
@@ -1008,6 +1124,8 @@ class KGBuildAgent:
                 match = search_data["matches"][0]
                 existing_qn = match.get("qualified_name", name)
                 entity_qn_map[name] = existing_qn
+                logger.debug("  Phase1b: entity EXISTS '%s' (qn=%s, matched=%.2f)",
+                             name, existing_qn, match.get("confidence", 0))
                 # 追加新的来源页面
                 await self._mcp_session.call_tool(
                     "sysml_update_entity",
@@ -1042,6 +1160,8 @@ class KGBuildAgent:
                 if add_data.get("ok"):
                     created_entities += 1
                     entity_qn_map[name] = add_data.get("qualified_name", name)
+                    logger.debug("  Phase1b: entity NEW '%s' <%s> (qn=%s)",
+                                 name, etype, add_data.get("qualified_name", name))
             except json.JSONDecodeError:
                 pass
 
@@ -1075,6 +1195,8 @@ class KGBuildAgent:
                 rel_data = json.loads(rel_result)
                 if rel_data.get("ok"):
                     created_relations += 1
+                    logger.debug("  Phase1b: relation NEW '%s' --[%s]--> '%s'",
+                                 src_qn, rtype, tgt_qn)
             except json.JSONDecodeError:
                 pass
 
@@ -1082,9 +1204,16 @@ class KGBuildAgent:
 
     # ── Phase 3: Enrichment ──────────────────────────────────
 
-    async def _enrich_entities(self, doc_name: str) -> None:
-        """用强模型按小节分组审查并补充别名/属性/关系."""
-        if not self._unified_tools or self._mcp_session is None:
+    async def _enrich_entities(
+        self, doc_name: str, processed_sections: set = None, errors: list = None
+    ) -> None:
+        """JSON 模式：并行 LLM 逐节生成富化指令 → 顺序 MCP 应用。支持断点续跑。"""
+        if processed_sections is None:
+            processed_sections = set()
+        if errors is None:
+            errors = []
+
+        if self._mcp_session is None:
             return
 
         summary = await self._summary()
@@ -1092,7 +1221,6 @@ class KGBuildAgent:
         if total_entities == 0:
             return
 
-        # 获取带 source_sections 的实体详情
         entity_list = await self._mcp_session.call_tool(
             "sysml_list_entities", {"include_details": True}
         )
@@ -1105,20 +1233,16 @@ class KGBuildAgent:
         if not entities:
             return
 
-        # 按 source_section 分组实体
         section_groups: dict = {}
         for e in entities:
             name = e.get("name", "")
-            # source_sections 通常是 ["p4 1.1 系统技术指标", "p5 1.1 ..."]
             sections = e.get("source_sections") or e.get("source_section") or []
             if isinstance(sections, str):
                 sections = [sections]
             if not sections:
                 key = "__no_section__"
             else:
-                # 取第一个来源的节号作为分组键
                 first = str(sections[0])
-                # 尝试提取章节号: "p4 1.1 系统技术指标" → "1.1"
                 import re
                 m = re.search(r'([\d]+\.[\d]+)', first)
                 if m:
@@ -1132,42 +1256,131 @@ class KGBuildAgent:
         logger.info("Enrichment: %d entities in %d sections",
                      len(entities), len(section_groups))
 
-        agent = create_agent(
-            model=self.llm,
-            tools=self._unified_tools,
-            system_prompt=ENRICHMENT_PROMPT,
-            debug=config.settings.AGENT_VERBOSE,
-            name="kg_enricher",
-        )
+        batch_concurrency = self._get_config("BATCH_CONCURRENCY", 5)
+        sem = asyncio.Semaphore(batch_concurrency)
+
+        MAX_ENTITIES_PER_BATCH = 15
+
+        async def _enrich_section(sec_key, sec_entities, doc_name, sem):
+            async with sem:
+                sec_names = [e.get("name", "") for e in sec_entities if e.get("name")]
+                if not sec_names:
+                    return None
+
+                if sec_key in processed_sections:
+                    logger.info("  Enrich section [%s]: SKIP (already processed)", sec_key)
+                    return None
+
+                entity_details = [{
+                    "name": e.get("name", ""),
+                    "type": e.get("type", ""),
+                    "description": (e.get("description") or "")[:200],
+                } for e in sec_entities if e.get("name")]
+
+                all_actions = []
+                from langchain_core.messages import HumanMessage, SystemMessage
+
+                # Split into batches to avoid overwhelming small model
+                for batch_start in range(0, len(entity_details), MAX_ENTITIES_PER_BATCH):
+                    batch = entity_details[batch_start:batch_start + MAX_ENTITIES_PER_BATCH]
+                    chunk_label = f" ({batch_start//MAX_ENTITIES_PER_BATCH + 1}/{(len(entity_details)-1)//MAX_ENTITIES_PER_BATCH + 1})" if len(entity_details) > MAX_ENTITIES_PER_BATCH else ""
+                    prompt = f"""文档: {doc_name}
+小节: {sec_key}{chunk_label}
+本小节实体列表:
+{json.dumps(batch, ensure_ascii=False, indent=2)}
+
+请为本小节实体输出JSON格式的富化操作。每个实体至少一条关系。
+只在同小节实体之间创建关系。"""
+                    try:
+                        t_call = time.time()
+                        response = await asyncio.wait_for(
+                            self.light_llm.ainvoke([
+                                SystemMessage(content=ENRICHMENT_JSON_PROMPT),
+                                HumanMessage(content=prompt),
+                            ]),
+                            timeout=300,
+                        )
+                        raw = str(response.content) if hasattr(response, "content") else str(response)
+                        logger.debug("  Phase3 LLM [%s] b%d (%.1fs): prompt=%dch resp=%dch",
+                                     sec_key, batch_start//MAX_ENTITIES_PER_BATCH,
+                                     time.time()-t_call, len(prompt), len(raw))
+                        logger.debug("  Phase3 RESP [%s] b%d: %s", sec_key,
+                                     batch_start//MAX_ENTITIES_PER_BATCH, raw[:500])
+                    except asyncio.TimeoutError:
+                        logger.warning("Enrichment LLM timeout for section [%s] batch %d", sec_key, batch_start//MAX_ENTITIES_PER_BATCH)
+                        errors.append({"section": sec_key, "phase": "phase3", "error": "TimeoutError"})
+                        continue
+                    except Exception as e:
+                        logger.warning("Enrichment LLM error for section [%s]: %s", sec_key, e)
+                        errors.append({"section": sec_key, "phase": "phase3", "error": str(e)})
+                        continue
+
+                    batch_actions = self._parse_enrichment_json(raw) if raw else []
+                    if isinstance(batch_actions, list):
+                        all_actions.extend(batch_actions)
+
+                if all_actions:
+                    logger.info("  Enrich section [%s]: %d entities, %d actions generated",
+                                 sec_key, len(sec_names), len(all_actions))
+                return sec_key, all_actions
 
         section_items = sorted(section_groups.items())
-        for sec_idx, (sec_key, sec_entities) in enumerate(section_items):
-            sec_names = [e.get("name", "") for e in sec_entities]
-            if not sec_names:
+        tasks = [_enrich_section(key, ents, doc_name, sem)
+                  for key, ents in section_items]
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for result in results:
+            if result is None or isinstance(result, Exception):
+                if isinstance(result, Exception):
+                    errors.append({"phase": "phase3", "error": str(result)})
+                continue
+            sec_key, actions = result
+            if not actions:
                 continue
 
-            logger.info("  Enrich section [%s]: %d entities", sec_key, len(sec_names))
+            created_relations = 0
+            for act in actions[:50]:
+                action_type = act.get("action", "")
+                try:
+                    if action_type == "add_relation":
+                        rel_type = act.get("type", "connection")
+                        if rel_type not in ("connection", "interface", "allocation"):
+                            rel_type = "connection"
+                        rel_res = await self._mcp_session.call_tool("sysml_add_relation", {
+                            "relation_type": rel_type,
+                            "source": act.get("source", ""),
+                            "target": act.get("target", ""),
+                            "description": act.get("description", ""),
+                        })
+                        rdata = json.loads(rel_res)
+                        if rdata.get("ok"):
+                            created_relations += 1
+                            logger.debug("  Phase3 REL: '%s' --[%s]--> '%s'",
+                                         act.get("source", ""), rel_type, act.get("target", ""))
+                    elif action_type == "add_alias":
+                        await self._mcp_session.call_tool("sysml_add_alias", {
+                            "qualified_name": act.get("entity", ""),
+                            "alias": act.get("alias", ""),
+                        })
+                        logger.debug("  Phase3 ALIAS: '%s' ← '%s'",
+                                     act.get("entity", ""), act.get("alias", ""))
+                    elif action_type == "update_entity":
+                        await self._mcp_session.call_tool("sysml_update_entity", {
+                            "qualified_name": act.get("entity", ""),
+                            "append_description": act.get("append_description", ""),
+                        })
+                except Exception as e:
+                    logger.debug("Enrich action error: %s", e)
 
-            prompt = f"""文档: {doc_name}
-小节: {sec_key}
-本小节实体列表 ({len(sec_names)}个):
-{json.dumps(sec_names, ensure_ascii=False, indent=2)}
-
-请为本小节的实体创建关系。**每个实体至少一条关系。**
-只在同小节的实体之间创建关系，不要跨越到其他未知实体。"""
-
+            logger.info("  Enrich section [%s]: %d relations created", sec_key, created_relations)
+            processed_sections.add(sec_key)
+            await self._trigger_save()
             try:
-                await asyncio.wait_for(
-                    agent.ainvoke(
-                        {"messages": [HumanMessage(content=prompt)]},
-                        config={"recursion_limit": min(self.max_iterations // len(section_items) + 1, 20)},
-                    ),
-                    timeout=self.timeout * 60 // len(section_items),
-                )
-            except asyncio.TimeoutError:
-                logger.warning("Enrichment timeout for section [%s]", sec_key)
-            except Exception as e:
-                logger.warning("Enrichment error for section [%s]: %s", sec_key, e)
+                self._save_build_state(
+                    doc_name, "phase3", processed_sections=list(processed_sections))
+            except Exception:
+                pass
 
     # ── 旧接口：向后兼容 ───────────────────────────────────────
 
@@ -1271,7 +1484,7 @@ class KGBuildAgent:
     # ── Phase 4: Graph Aggregation ─────────────────────────────
 
     async def _aggregate_graph(self, doc_name: str) -> None:
-        """迭代合并连通分量，消除孤立子图，直到全图连通."""
+        """迭代合并连通分量，消除孤立子图，直到全图连通. 每轮后保存."""
         if self._mcp_session is None:
             return
 
@@ -1286,20 +1499,18 @@ class KGBuildAgent:
             if len(components) <= 1:
                 logger.info("Phase 4: graph fully connected (%d component, round %d)",
                              len(components), round_idx + 1)
+                await self._trigger_save()
                 break
 
             smallest = components[0]
-            # 选一个目标分量（除最小外的最大分量，优先 merge 入大图）
             target = components[-1] if len(components) >= 2 else components[0]
 
             logger.info("Phase 4 round %d: merging component size=%d into size=%d (%d total)",
                          round_idx + 1, smallest["size"], target["size"], len(components))
 
-            # 获取双方实体的 source_sections
             small_entities = await self._get_entities_with_sections(smallest["entities"])
             target_entities = await self._get_entities_with_sections(target["entities"])
 
-            # 找同章节的实体对
             bridge_candidates = []
             for s_name, s_sections in small_entities.items():
                 for t_name, t_sections in target_entities.items():
@@ -1310,21 +1521,14 @@ class KGBuildAgent:
             if bridge_candidates:
                 logger.info("  Found %d bridge candidates via shared sections", len(bridge_candidates))
             else:
-                # 没有同章节的，尝试任意配对
                 bridge_candidates = [
                     (smallest["entities"][0], target["entities"][0], ["无共同章节"])
                 ]
 
-            # 最后两个分量 → 用强模型做最终聚合
-            use_strong = len(components) == 2
-            created = await self._bridge_components(
-                bridge_candidates, use_strong=use_strong
-            )
+            created = await self._bridge_components(bridge_candidates)
             logger.info("  Created %d bridge relations", created)
-            if created == 0 and not use_strong:
-                # 如果小模型没找到关系，最后跳转强模型
-                created = await self._bridge_components(bridge_candidates, use_strong=True)
-                logger.info("  Fallback strong model: %d relations", created)
+
+            await self._trigger_save()
 
     async def _get_entities_with_sections(self, entity_names: list) -> dict:
         """获取实体的 source_sections 映射."""
@@ -1341,17 +1545,19 @@ class KGBuildAgent:
                 result[name] = []
         return result
 
-    async def _bridge_components(self, candidates: list, use_strong: bool = False) -> int:
-        """用 LLM 判断候选实体对是否存在有意义的关系并创建."""
+    async def _bridge_components(self, candidates: list) -> int:
+        """并行 LLM 判断候选实体对是否存在有意义的关系并创建."""
         if not candidates:
             return 0
 
-        model_name = self.model if use_strong else self.light_model
+        model_name = self.light_model
         api_url = (config.settings.OPENAI_API_URL or "http://localhost:11434/v1").rstrip("/")
-        created = 0
+        batch_concurrency = self._get_config("BATCH_CONCURRENCY", 5)
+        sem = asyncio.Semaphore(batch_concurrency)
 
-        for s_name, t_name, shared_sections in candidates[:20]:
-            prompt = f"""你是知识图谱关系审查员。判断以下两个实体之间是否存在有意义的关系。
+        async def _classify_one(s_name, t_name, shared_sections):
+            async with sem:
+                prompt = f"""你是知识图谱关系审查员。判断以下两个实体之间是否存在有意义的关系。
 
 实体A: {s_name}
 实体B: {t_name}
@@ -1363,25 +1569,38 @@ class KGBuildAgent:
 - None: 两者无直接关系
 
 请只回答一个词: allocation, connection, 或 None"""
+                try:
+                    t_call = time.time()
+                    async with httpx.AsyncClient(timeout=120) as client:
+                        resp = await client.post(
+                            f"{api_url}/chat/completions",
+                            json={
+                                "model": model_name,
+                                "messages": [{"role": "user", "content": prompt}],
+                                "stream": False,
+                                "options": {"num_predict": 8},
+                            },
+                        )
+                        data = resp.json()
+                        choice = data.get("choices", [{}])[0]
+                        answer = (choice.get("message", {})
+                                   .get("content", "")).strip().lower()
+                        logger.debug("  Phase4 BRIDGE '%s' ↔ '%s' (%.1fs): %s",
+                                     s_name, t_name, time.time()-t_call, answer or 'none')
+                        return s_name, t_name, shared_sections, answer
+                except Exception:
+                    return s_name, t_name, shared_sections, None
 
-            try:
-                async with httpx.AsyncClient(timeout=120) as client:
-                    resp = await client.post(
-                        f"{api_url}/chat/completions",
-                        json={
-                            "model": model_name,
-                            "messages": [{"role": "user", "content": prompt}],
-                            "stream": False,
-                            "options": {"num_predict": 8},
-                        },
-                    )
-                    data = resp.json()
-                    answer = (data.get("choices", [{}])[0]
-                              .get("message", {}).get("content", "")).strip().lower()
-            except Exception:
+        tasks = [_classify_one(s_name, t_name, shared)
+                  for s_name, t_name, shared in candidates[:20]]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        created = 0
+        for result in results:
+            if isinstance(result, Exception) or result is None:
                 continue
-
-            if answer in ("none", "无", ""):
+            s_name, t_name, shared_sections, answer = result
+            if not answer or answer in ("none", "无", ""):
                 continue
 
             rel_type = "allocation" if "allocation" in answer else "connection"
@@ -1479,6 +1698,68 @@ class KGBuildAgent:
         logger.info("Dedup complete: %d pairs merged", merged)
 
     # ── Persistence ────────────────────────────────────────────
+
+    @property
+    def _build_state_file(self) -> Path:
+        return self.persist_dir / "knowledge_graph.build.json"
+
+    def _load_build_state(self, doc_name: str) -> Dict[str, Any]:
+        try:
+            bsf = self._build_state_file
+            if bsf.exists():
+                with open(bsf, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                docs = data.get("documents", {})
+                if doc_name in docs:
+                    return docs[doc_name]
+        except Exception:
+            pass
+        return {}
+
+    def _save_build_state(
+        self, doc_name: str, phase: str,
+        processed_sections: Optional[List[str]] = None,
+        phase1_processed_sections: Optional[List[str]] = None,
+        stats: Optional[Dict[str, Any]] = None,
+        errors: Optional[List[Dict]] = None,
+    ) -> None:
+        try:
+            bsf = self._build_state_file
+            data = {}
+            if bsf.exists():
+                with open(bsf, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            docs = data.get("documents", {})
+            entry = docs.get(doc_name, {})
+            entry |= {"phase": phase, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            if processed_sections is not None:
+                entry["processed_sections"] = processed_sections
+            if phase1_processed_sections is not None:
+                entry["phase1_processed_sections"] = phase1_processed_sections
+            if stats is not None:
+                entry.setdefault("stats", {}).update(stats)
+            if errors is not None:
+                entry.setdefault("errors", []).extend(errors)
+            docs[doc_name] = entry
+            data["documents"] = docs
+            data["version"] = 1
+            tmp = bsf.with_suffix(".tmp")
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp.replace(bsf)
+        except Exception as e:
+            logger.warning("Failed to save build state: %s", e)
+
+    async def _trigger_save(self) -> None:
+        self._save_desired = True
+        if self._save_task is None or self._save_task.done():
+            self._save_task = asyncio.create_task(self._do_save())
+
+    async def _do_save(self) -> None:
+        async with self._save_lock:
+            while self._save_desired:
+                self._save_desired = False
+                await self._save_knowledge_graph()
 
     async def _save_knowledge_graph(self) -> None:
         """保存知识图谱到 .sysml 文件"""

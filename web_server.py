@@ -762,9 +762,9 @@ def create_app() -> FastAPI:
         _complete_rag_build_job(job_id, db_name=db_name, added=added)
 
     async def _run_kg_build_for_job(job_id: str, db_name: str) -> None:
-        """异步运行知识图谱构建"""
+        """异步运行知识图谱构建（使用新 4 阶段管线 + 断点续跑）"""
         from rag.documents import load_rag_documents_from_persist_dir
-        from agent.kg_build_agent import KGBuildAgent, SectionInfo
+        from agent.kg_build_agent import KGBuildAgent
 
         persist_dir = os.path.join(config.settings.PERSIST_DIR, db_name)
         if not os.path.isdir(persist_dir):
@@ -779,19 +779,17 @@ def create_app() -> FastAPI:
             return
 
         agent = KGBuildAgent(db_name=db_name)
-        for rag_doc in rag_docs:
-            sections = _extract_sections_from_rag_doc(rag_doc)
-            if not sections:
-                continue
-            try:
-                await agent.build_kg_for_sections(getattr(rag_doc, "doc_name", db_name), sections)
-            except Exception as exc:
-                logging.getLogger(__name__).warning(
-                    "KG build failed for doc '%s': %s",
-                    getattr(rag_doc, "doc_name", db_name), exc,
-                )
-
-        await agent.close()
+        try:
+            for rag_doc in rag_docs:
+                try:
+                    await agent.build_kg_from_document(rag_doc)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "KG build failed for doc '%s': %s",
+                        getattr(rag_doc, "doc_name", db_name), exc,
+                    )
+        finally:
+            await agent.close()
         callback("kg_build_completed", {"doc_name": db_name})
 
 
@@ -1907,6 +1905,56 @@ def create_app() -> FastAPI:
         job = _register_rag_build_job(name, "rebuild", [os.path.basename(p) for p in paths])
         asyncio.create_task(_run_rag_build_job(job["job_id"], name, "rebuild", paths))
         return {**job, "status": "accepted"}
+
+    @app.post("/api/rag/dbs/{db_name}/kg/continue")
+    async def kg_continue_build(db_name: str):
+        """从断点恢复 KG 构建（不删除已有数据，不重跑 RAG 索引）"""
+        name = _normalize_db_name(db_name)
+        if not _is_valid_db(name):
+            raise HTTPException(status_code=404, detail="Database not found")
+
+        persist_dir = os.path.join(config.settings.PERSIST_DIR, name)
+        build_state_file = os.path.join(persist_dir, "knowledge_graph.build.json")
+
+        if not os.path.isfile(build_state_file):
+            raise HTTPException(status_code=400,
+                                 detail="No build state found; start a full build first")
+
+        from rag.documents import load_rag_documents_from_persist_dir
+        from agent.kg_build_agent import KGBuildAgent
+
+        rag_docs = load_rag_documents_from_persist_dir(persist_dir,
+                                                        SUPPORTED_RAG_EXTENSIONS)
+        if not rag_docs:
+            return {"status": "ok", "message": "No documents to process"}
+
+        job_id = str(uuid.uuid4().hex)
+        job_entry = {
+            "job_id": job_id, "db_name": name, "status": "accepted",
+            "phase": "kg_continuing", "progress": 0, "error": None,
+            "per_doc": {},
+        }
+        with rag_build_jobs_lock:
+            rag_build_jobs[job_id] = job_entry
+
+        async def _continue_kg_build():
+            try:
+                agent = KGBuildAgent(db_name=name)
+                try:
+                    for rag_doc in rag_docs:
+                        stats = await agent.build_kg_from_document(rag_doc)
+                        job_entry["per_doc"][getattr(rag_doc, "doc_name", name)] = stats
+                finally:
+                    await agent.close()
+                job_entry["status"] = "completed"
+                job_entry["progress"] = 100
+            except Exception as exc:
+                logging.getLogger(__name__).error("KG continue failed: %s", exc)
+                job_entry["status"] = "kg_error"
+                job_entry["error"] = str(exc)[:500]
+
+        asyncio.create_task(_continue_kg_build())
+        return {**job_entry, "status": "accepted"}
 
     # ═══════════════════════════════════════════════════════════
     # SysML 知识图谱对话

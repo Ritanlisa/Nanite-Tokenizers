@@ -137,7 +137,7 @@ class Settings(BaseSettings):
     OCR_TIMEOUT: int = Field(120, ge=10)
 
     KG_EXTRACTION_ENABLED: bool = True
-    KG_EXTRACTION_MODEL: str = "qwen3-vl:32b"
+    KG_EXTRACTION_MODEL: str = "qwen3:8b"
     KG_LIGHT_MODEL: str = "qwen3:8b"
     KG_KEEP_ALIVE: str = "30s"
     KG_EXTRACTION_TEMPERATURE: float = Field(0.1, ge=0.0, le=2.0)

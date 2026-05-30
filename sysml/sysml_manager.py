@@ -245,16 +245,27 @@ class SysMLManager:
             if not file_path.is_absolute():
                 file_path = self.workspace_root / file_path
         text = self.to_text()
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(text)
-        self.current_model_file = file_path
+        # 原子写入：先写临时文件，再 rename 覆盖
+        tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
         meta_path = self._meta_path(file_path)
-        with open(meta_path, 'w', encoding='utf-8') as f:
-            json.dump({
-                "entities": self._entity_metadata,
-                "aliases": self._alias_registry.to_dict(),
-                "version": 2,
-            }, f, ensure_ascii=False, indent=2)
+        tmp_meta = meta_path.with_suffix(meta_path.suffix + ".tmp")
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                f.write(text)
+            with open(tmp_meta, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "entities": self._entity_metadata,
+                    "aliases": self._alias_registry.to_dict(),
+                    "version": 2,
+                }, f, ensure_ascii=False, indent=2)
+            tmp_path.replace(file_path)
+            tmp_meta.replace(meta_path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+            if tmp_meta.exists():
+                tmp_meta.unlink(missing_ok=True)
+        self.current_model_file = file_path
 
     def to_text(self) -> str:
         return "\n\n".join(elem.to_text() for elem in self.root_elements)

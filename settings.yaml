@@ -95,7 +95,7 @@ OCR_PROMPT: '<image>
   <|grounding|>Convert the document to markdown.'
 OCR_TIMEOUT: 120
 KG_EXTRACTION_ENABLED: true
-KG_EXTRACTION_MODEL: gemma4:31b
+KG_EXTRACTION_MODEL: qwen3:8b
 KG_LIGHT_MODEL: qwen3:8b
 KG_KEEP_ALIVE: 30s
 KG_EXTRACTION_TEMPERATURE: 0.1
