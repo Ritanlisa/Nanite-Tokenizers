@@ -2,16 +2,12 @@
 """
 快速递归KG管线验证 (不跑全流程)
 ===============================
-测试:
-1. Phase 0: 根实体识别 (gemma4:31b)
-2. Phase 1: 根小节实体提取
-3. Phase 2: 实体传播 (文本搜索+队列构建)
-4. Phase 3: 小节处理 (处理1-2个队列项)
+测试: Phase 0/1/2/3 各阶段基本逻辑
 
 Usage:
   uv run python scripts/test_recursive_kg.py
 
-预期运行时间: 1-2分钟
+预期: ~5-8分钟 (gemma4:31b × 2-3 calls)
 """
 
 from __future__ import annotations
@@ -22,6 +18,9 @@ import logging
 import os
 import sys
 import time
+import traceback
+from typing import Dict, List
+from collections import deque
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -31,13 +30,13 @@ if str(ROOT_DIR) not in sys.path:
 import config
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)-5s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
     stream=sys.stderr,
 )
 
-for name in ["agent.kg_build_agent", "kg_test"]:
+for name in ["agent.kg_build_agent"]:
     l = logging.getLogger(name)
     l.setLevel(logging.DEBUG)
     l.propagate = True
@@ -50,7 +49,7 @@ for lib in ["openai", "httpx", "httpcore", "chromadb", "sentence_transformers",
 logger = logging.getLogger("kg_test")
 
 # ═══════════════════════════════════════════════════════════════
-# Minimal Test Document
+# Minimal test doc — using text + DocumentTreeState builder
 # ═══════════════════════════════════════════════════════════════
 
 MINIMAL_DOC_TEXT = """## 1.1 系统概述
@@ -80,248 +79,187 @@ mn0节点只有命令行可用，通过SMU转发命令到CMU来执行运维操�
 yhst命令运行在CMU上，用于查看所有结点加电信息。
 ncid命令用于查看各节点逻辑ID。
 smu_tranfer_cmd用于通过SMU向CMU转发命令。
-
 R1P3机柜由4个机柜组成：r1.p03a.m、r1.p03b.m、r1.p03c.m、r1.p03d.m。
 """
 
 
 class _FakeDoc:
+    TEXT = MINIMAL_DOC_TEXT
+
     def __init__(self):
         self.doc_name = "天河测试文档"
         self.title = "天河高性能计算机系统简介"
-        self._skip_build = True
-        self._mono_pages = []
-        self._build_mono_pages()
 
-    def _build_mono_pages(self):
+    def get_mono_pages(self):
         from rag.document_interface import MonoPage, PageType
-        lines = MINIMAL_DOC_TEXT.strip().split("\n")
-        current_section = ""
-        page_num = 1
-        for line in lines:
+        sections = {}
+        current_section = "概述"
+        for line in self.TEXT.split("\n"):
+            line = line.strip()
             if line.startswith("## "):
                 current_section = line[3:].strip()
                 continue
-            if line.strip():
-                meta = {"page": page_num, "section_title": current_section}
-                mp = MonoPage(
-                    metadata=meta,
-                    markdown_text=line.strip(),
-                    category=PageType.CONTENT,
-                )
-                mp.page_num = page_num
-                self._mono_pages.append(mp)
-                page_num += 1
+            if not line:
+                continue
+            sections.setdefault(current_section, []).append(line)
 
-    def get_mono_pages(self):
-        return self._mono_pages
+        result = []
+        page_num = 1
+        for sec_title, lines in sections.items():
+            text = " ".join(lines)
+            mp = MonoPage(
+                metadata={"page": page_num, "section_title": sec_title},
+                markdown_text=text,
+                title=sec_title,
+                page_type=PageType.CONTENT,
+            )
+            result.append(mp)
+            page_num += 1
+        return result
 
     @property
     def page_count(self):
-        return len(self._mono_pages)
+        return len(self.get_mono_pages())
 
 
 # ═══════════════════════════════════════════════════════════════
-# Test Suite
+# Config
 # ═══════════════════════════════════════════════════════════════
 
 config.settings = config.settings.update(
     KG_EXTRACTION_ENABLED=True,
-    KG_EXTRACTION_MODEL="gemma4:31b",
+    KG_EXTRACTION_MODEL="qwen3:8b",
     KG_LIGHT_MODEL="qwen3:8b",
     KG_EXTRACTION_TEMPERATURE=0.1,
-    KG_EXTRACTION_TIMEOUT=180,
-    KG_EXTRACTION_MAX_ITERATIONS=200,
+    KG_EXTRACTION_TIMEOUT=300,
+    KG_EXTRACTION_MAX_ITERATIONS=50,
+    KG_EXTRACTION_MAX_TOKENS=4096,
     BATCH_CONCURRENCY=1,
     KG_KEEP_ALIVE="600s",
-    OCR_MODEL=None,
-    OCR_API_URL=None,
 )
 
 
-async def test_phase0_root_identification(agent, doc, sections):
-    """Phase 0: 根实体识别"""
-    logger.info("=" * 60)
-    logger.info("TEST: Phase 0 - Root Identification")
-    logger.info("=" * 60)
-
-    from agent.kg_build_agent import DocumentTreeState
-    tree = DocumentTreeState(doc)
-    logger.info("Tree structure:\n%s", tree.get_tree_structure()[:1000])
-
-    root, starts = await agent._identify_root(doc, tree, sections, "test_doc")
-    logger.info("Root entity: %s", json.dumps(root, ensure_ascii=False))
-    logger.info("Start sections: %s", starts)
-
-    assert root.get("name"), "Root entity must have a name"
-    assert starts, "Must have at least one start section"
-    logger.info("Phase 0: PASSED")
-
-
-async def test_phase1_root_extraction(agent, doc, sections, root, starts):
-    """Phase 1: 根小节实体提取"""
-    logger.info("=" * 60)
-    logger.info("TEST: Phase 1 - Root Section Extraction")
-    logger.info("=" * 60)
-
-    from agent.kg_build_agent import DocumentTreeState
-    tree = DocumentTreeState(doc)
-
-    new_names = await agent._process_root_sections(
-        tree, sections, root, starts, "test_doc"
-    )
-    logger.info("New entities discovered: %s", new_names)
-
-    assert len(new_names) > 0, "Must find at least one entity"
-    logger.info("Phase 1: PASSED (%d entities)", len(new_names))
-
-
-async def test_phase2_propagation(agent, doc, sections):
-    """Phase 2: 实体传播"""
-    logger.info("=" * 60)
-    logger.info("TEST: Phase 2 - Entity Propagation")
-    logger.info("=" * 60)
-
-    from agent.kg_build_agent import DocumentTreeState
-    from collections import deque
-    tree = DocumentTreeState(doc)
-
-    # Get existing entity names from the KG
-    entities_raw = await agent._mcp_session.call_tool(
-        "sysml_list_entities", {"include_details": False}
-    )
-    entities_data = json.loads(entities_raw) if isinstance(entities_raw, str) else entities_raw
-    entity_names = []
-    if isinstance(entities_data, list):
-        entity_names = [e.get("name", "") for e in entities_data if e.get("name")]
-    elif isinstance(entities_data, dict):
-        for v in entities_data.values():
-            if isinstance(v, list):
-                for e in v:
-                    if isinstance(e, dict) and e.get("name"):
-                        entity_names.append(e["name"])
-
-    logger.info("Existing entities: %s", entity_names[:10])
-
-    build_queue = deque()
-    processed_pairs = set()
-    processed_sections = set()
-
-    build_queue = await agent._propagate_entities(
-        tree, sections, entity_names,
-        processed_sections, processed_pairs, build_queue, "test_doc"
-    )
-
-    logger.info("Build queue after propagation: %d items", len(build_queue))
-    for item in list(build_queue)[:10]:
-        logger.info("  Queue: %s → %s", item[0], item[1])
-
-    logger.info("Phase 2: PASSED")
-
-
-async def test_phase3_cascading(agent, doc, sections):
-    """Phase 3: 处理1-2个队列项"""
-    logger.info("=" * 60)
-    logger.info("TEST: Phase 3 - Cascading Section Processing")
-    logger.info("=" * 60)
-
-    from agent.kg_build_agent import DocumentTreeState
-    from collections import deque
-    tree = DocumentTreeState(doc)
-
-    # Get entities again
-    entities_raw = await agent._mcp_session.call_tool(
-        "sysml_list_entities", {"include_details": False}
-    )
-    entities_data = json.loads(entities_raw) if isinstance(entities_raw, str) else entities_raw
-    entity_names = []
-    if isinstance(entities_data, list):
-        entity_names = [e.get("name", "") for e in entities_data if e.get("name")]
-    elif isinstance(entities_data, dict):
-        for v in entities_data.values():
-            if isinstance(v, list):
-                for e in v:
-                    if isinstance(e, dict) and e.get("name"):
-                        entity_names.append(e["name"])
-
-    build_queue = deque()
-    processed_pairs = set()
-    processed_sections = set()
-
-    build_queue = await agent._propagate_entities(
-        tree, sections, entity_names,
-        processed_sections, processed_pairs, build_queue, "test_doc"
-    )
-
-    processed_count = 0
-    while build_queue and processed_count < 2:
-        entity_name, section_id = build_queue.popleft()
-        logger.info("Processing queue item: (%s, %s)", entity_name, section_id)
-
-        section_nodes = sections.get(section_id, [])
-        if not section_nodes:
-            processed_sections.add(section_id)
-            continue
-
-        new_ents = await agent._process_queued_section(
-            section_nodes, entity_name, section_id, "test_doc"
-        )
-        logger.info("  New entities: %s", new_ents)
-        processed_sections.add(section_id)
-        processed_pairs.add((entity_name, section_id))
-        processed_count += 1
-
-        for nd in section_nodes:
-            tree.mark_processed(nd.node_id)
-
-    logger.info("Phase 3: PASSED (processed %d queue items)", processed_count)
-
+# ═══════════════════════════════════════════════════════════════
+# Tests
+# ═══════════════════════════════════════════════════════════════
 
 async def main():
     from agent.kg_build_agent import KGBuildAgent, DocumentTreeState
 
     doc = _FakeDoc()
-    logger.info("Test document: %d pages", doc.page_count)
+    pages = doc.get_mono_pages()
+    logger.info("Test document: %d mono pages", len(pages))
+    for p in pages:
+        logger.info("  p%d: %s (%d chars)",
+                     p.metadata.get("page", 0), p.title, len(p.markdown_text or ""))
 
     agent = KGBuildAgent(
         db_name="_test_recursive",
-        model="gemma4:31b",
+        model="qwen3:8b",
         light_model="qwen3:8b",
         persist_dir=str(ROOT_DIR / "tmp" / "_test_recursive"),
     )
-    agent.timeout = 180
-    agent.max_iterations = 200
+    agent.timeout = 600
+    agent.max_iterations = 50
 
     try:
         await agent.initialize()
 
-        # Build section map
-        tree = DocumentTreeState(doc)
-        sections = agent._build_section_map(tree)
-        logger.info("Sections: %d", len(sections))
-        for sid, nodes in sections.items():
-            titles = [n.title[:30] for n in nodes]
-            logger.info("  %s: %d pages (%s)", sid, len(nodes), titles)
+        # Build tree from fake doc (uses _build_tree from DocumentTreeState)
+        tree_state = DocumentTreeState(doc)
+        logger.info("Tree: %d leaf pages", tree_state.total_pages)
 
-        # Run tests
-        await test_phase0_root_identification(agent, doc, sections)
+        # Build section map using the same logic as _build_section_map
+        sections: Dict[str, List] = {}
+        for nid in tree_state._all_page_ids:
+            if nid not in tree_state.nodes:
+                continue
+            node = tree_state.nodes[nid]
+            parent_id = node.parent_id or "__root__"
+            sections.setdefault(parent_id, []).append(node)
+        logger.info("Section groups: %d", len(sections))
+        for pid, nodes in sections.items():
+            logger.info("  %s: %d pages (%s)", pid, len(nodes),
+                         [n.title[:30] for n in nodes])
 
-        root, starts = await agent._identify_root(doc, tree, sections, "test_doc")
-        await test_phase1_root_extraction(agent, doc, sections, root, starts)
+        # ── Test 1: Phase 0 - Root identification ──
+        logger.info("=" * 60)
+        logger.info("TEST 1: Phase 0 - Root Identification")
+        logger.info("=" * 60)
 
-        await test_phase2_propagation(agent, doc, sections)
-        await test_phase3_cascading(agent, doc, sections)
+        root, starts = await agent._identify_root(doc, tree_state, sections, "test_doc")
+        logger.info("Root entity: %s", json.dumps(root, ensure_ascii=False))
+        logger.info("Start sections: %s", starts)
+        assert root.get("name"), "Root entity must have name"
+        assert starts, "Must have start sections"
+        logger.info("TEST 1 PASSED")
 
-        # Final summary
+        # ── Test 2: Phase 1 - Root section extraction ──
+        logger.info("=" * 60)
+        logger.info("TEST 2: Phase 1 - Root Section Extraction")
+        logger.info("=" * 60)
+
+        new_names = await agent._process_root_sections(
+            tree_state, sections, root, starts, "test_doc"
+        )
+        logger.info("New entities from root section: %d: %s", len(new_names), new_names)
+        assert len(new_names) > 0, f"Must find at least one entity, got: {new_names}"
+        logger.info("TEST 2 PASSED")
+
+        # ── Test 3: Phase 2 - Entity propagation ──
+        logger.info("=" * 60)
+        logger.info("TEST 3: Phase 2 - Entity Propagation")
+        logger.info("=" * 60)
+
+        build_queue = deque()
+        processed_pairs = set()
+        processed_sections = set(starts)
+
+        build_queue = await agent._propagate_entities(
+            tree_state, sections, new_names,
+            processed_sections, processed_pairs, build_queue, "test_doc"
+        )
+        logger.info("Build queue after propagation: %d items", len(build_queue))
+        for item in list(build_queue)[:10]:
+            logger.info("  Queue: entity=%s section=%s", item[0], item[1])
+        logger.info("TEST 3 PASSED")
+
+        # ── Test 4: Phase 3 - Process 1-2 queue items ──
+        processed_count = 0
+        while build_queue and processed_count < 2:
+            entity_name, section_id = build_queue.popleft()
+            pair = (entity_name, section_id)
+            if pair in processed_pairs or section_id in processed_sections:
+                continue
+
+            logger.info("=" * 60)
+            logger.info("TEST 4.%d: Phase 3 - Process (%s, %s)",
+                         processed_count + 1, entity_name, section_id)
+            logger.info("=" * 60)
+
+            section_nodes = sections.get(section_id, [])
+            if not section_nodes:
+                processed_sections.add(section_id)
+                continue
+
+            new_ents = await agent._process_queued_section(
+                section_nodes, entity_name, section_id, "test_doc"
+            )
+            logger.info("  New entities from cascade: %s", new_ents)
+            processed_sections.add(section_id)
+            processed_pairs.add(pair)
+            processed_count += 1
+
+        logger.info("TEST 4 PASSED")
+
+        # ── Final Summary ──
         summary_raw = await agent._mcp_session.call_tool("sysml_model_summary", {})
         summary = json.loads(summary_raw) if isinstance(summary_raw, str) else summary_raw
         logger.info("=" * 60)
         logger.info("ALL TESTS PASSED")
-        logger.info("KG Summary: entities=%d, relations=%d",
-                     summary.get("total_entities", 0),
-                     summary.get("total_relations", 0))
+        logger.info("  Entities: %d", summary.get("total_entities", 0))
+        logger.info("  Relations: %d", summary.get("total_relations", 0))
         logger.info("=" * 60)
-
         return 0
 
     except Exception as e:

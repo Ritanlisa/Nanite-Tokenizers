@@ -545,6 +545,7 @@ class KGBuildAgent:
     @property
     def llm(self) -> ChatOpenAIWithReasoning:
         if self._llm is None:
+            max_tokens = self._get_config("KG_EXTRACTION_MAX_TOKENS", 4096)
             self._llm = ChatOpenAIWithReasoning(
                 model=self.model,
                 temperature=self.temperature,
@@ -553,6 +554,7 @@ class KGBuildAgent:
                 base_url=config.settings.OPENAI_API_URL,
                 timeout=self.timeout,
                 streaming=True,
+                max_tokens=max_tokens,
             )
         return self._llm
 
@@ -560,6 +562,7 @@ class KGBuildAgent:
     def light_llm(self) -> ChatOpenAIWithReasoning:
         """快速小模型 — 用于纯文本实体候选提取"""
         if self._light_llm is None:
+            max_tokens = self._get_config("KG_EXTRACTION_MAX_TOKENS", 4096)
             self._light_llm = ChatOpenAIWithReasoning(
                 model=self.light_model,
                 temperature=0.0,
@@ -568,6 +571,7 @@ class KGBuildAgent:
                 base_url=config.settings.OPENAI_API_URL,
                 timeout=600,
                 streaming=False,
+                max_tokens=max_tokens,
             )
         return self._light_llm
 
@@ -962,7 +966,6 @@ class KGBuildAgent:
                     ]),
                     timeout=180,
                 )
-                raw = str(response.content) if hasattr(response, "content") else str(response)
                 logger.debug("  Phase1a LLM p%d c%d (%.1fs): prompt=%dch resp=%dch",
                              page, ci+1, time.time()-t_call, len(prompt), len(raw))
                 logger.debug("  Phase1a RESP p%d c%d: %s", page, ci+1, raw[:500])
@@ -1299,7 +1302,7 @@ class KGBuildAgent:
                                 SystemMessage(content=ENRICHMENT_JSON_PROMPT),
                                 HumanMessage(content=prompt),
                             ]),
-                            timeout=300,
+                    timeout=600,
                         )
                         raw = str(response.content) if hasattr(response, "content") else str(response)
                         logger.debug("  Phase3 LLM [%s] b%d (%.1fs): prompt=%dch resp=%dch",
@@ -2048,7 +2051,7 @@ class KGBuildAgent:
                     SystemMessage(content="你是技术文档分析专家。仅输出JSON，无其他内容。"),
                     HumanMessage(content=prompt),
                 ]),
-                timeout=180,
+                timeout=600,
             )
             raw = str(response.content) if hasattr(response, "content") else str(response)
             logger.debug("Phase 0 LLM response: %s", raw[:500])
@@ -2094,6 +2097,11 @@ class KGBuildAgent:
 
         for sid in start_section_ids:
             nodes = sections.get(sid, [])
+
+            # 如果 sections 里没有 (如个别 node_id)，尝试从 tree_state 直接查找
+            if not nodes and sid in tree_state.nodes:
+                node = tree_state.nodes[sid]
+                nodes = [node]
             if not nodes:
                 continue
 
@@ -2140,7 +2148,7 @@ Connection(物理连接/数据流), Interface(接口实现), Allocation(功能/�
                         SystemMessage(content="你是SysML v2知识图谱专家。仅输出JSON数组，无其他内容。"),
                         HumanMessage(content=prompt),
                     ]),
-                    timeout=300,
+                    timeout=600,
                 )
                 raw = str(response.content) if hasattr(response, "content") else str(response)
                 logger.debug("Phase 1 LLM (root section %s, %.1fs): %s",
