@@ -236,8 +236,9 @@ async def main():
     # Show section overview
     from agent.kg_build_agent import DocumentTreeState
     tree = DocumentTreeState(doc)
+    tree_str = json.dumps(tree.get_tree_structure(), ensure_ascii=False, indent=2)
     logger.info("Document tree: %d leaf pages\n%s",
-                 tree.total_pages, tree.get_tree_structure()[:2000])
+                 tree.total_pages, tree_str[:2000])
 
     # Create agent
     from agent.kg_build_agent import KGBuildAgent
