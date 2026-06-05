@@ -355,8 +355,16 @@ class InterfaceUsage(ConnectionUsage):   # 改为继承 ConnectionUsage
         return "interface"
 
     def to_text(self, indent: int = 0) -> str:
-        # 接口通常不使用 connect 简写，调用父级 Usage 的 to_text
-        return Usage.to_text(self, indent)
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {e1.ref} to {e2.ref};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
 
 class AllocationDef(Definition):
     def def_kind(self) -> str:
@@ -367,8 +375,16 @@ class AllocationUsage(ConnectionUsage):  # 改为继承 ConnectionUsage
         return "allocation"
 
     def to_text(self, indent: int = 0) -> str:
-        # 分配同样不使用 connect 简写，调用父级 Usage 的 to_text
-        return Usage.to_text(self, indent)
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {e1.ref} to {e2.ref};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
 
 class CommandDef(Definition):
     """运维命令定义"""
