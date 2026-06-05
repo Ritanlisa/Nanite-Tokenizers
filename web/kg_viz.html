@@ -15,29 +15,39 @@
 }
 *,*::before,*::after{box-sizing:border-box}
 body{margin:0;font-family:"Space Grotesk",system-ui,sans-serif;color:var(--text);background:var(--bg);overflow:hidden;height:100vh}
-.app{display:grid;grid-template-columns:260px 1fr 300px;height:100vh;gap:0}
+.app{display:grid;grid-template-columns:310px 1fr 300px;height:100vh;gap:0}
 
 /* ── Left Sidebar ── */
-.sidebar{background:var(--panel);border-right:1px solid rgba(255,255,255,0.08);display:flex;flex-direction:column;padding:16px;gap:12px;overflow-y:auto}
+.sidebar{background:var(--panel);border-right:1px solid rgba(255,255,255,0.08);display:flex;flex-direction:column;padding:16px;gap:8px;overflow-y:auto}
 .sidebar h2{font-size:15px;margin:0;color:var(--accent);letter-spacing:0.04em}
 .db-select select{width:100%;padding:8px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.12);background:var(--panel2);color:var(--text);font-size:13px;font-family:inherit}
-.stats{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.stat{padding:10px;border-radius:8px;background:var(--panel2);text-align:center}
-.stat .val{font-size:18px;font-weight:600;font-family:"IBM Plex Mono",monospace}
+.stats{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.stat{padding:8px;border-radius:8px;background:var(--panel2);text-align:center}
+.stat .val{font-size:16px;font-weight:600;font-family:"IBM Plex Mono",monospace}
 .stat .lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;margin-top:2px}
 .stat.good .val{color:#34d399}.stat.warn .val{color:var(--accent)}.stat.bad .val{color:#f87171}
 
 .search input{width:100%;padding:8px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.12);background:var(--panel2);color:var(--text);font-size:13px;font-family:inherit}
 .search input::placeholder{color:var(--muted)}
 
-.type-filters{display:flex;flex-wrap:wrap;gap:6px}
-.type-chip{font-size:10px;padding:4px 10px;border-radius:20px;border:1px solid;cursor:pointer;opacity:0.45;transition:opacity 0.15s;user-select:none}
+.type-filters{display:flex;flex-wrap:wrap;gap:4px}
+.type-chip{font-size:10px;padding:3px 8px;border-radius:20px;border:1px solid;cursor:pointer;opacity:0.45;transition:opacity 0.15s;user-select:none}
 .type-chip.on{opacity:1}
-.comp-list{font-size:11px;color:var(--muted);overflow-y:auto;flex:1}
-.comp-list .comp{display:flex;justify-content:space-between;padding:4px 8px;border-radius:4px;cursor:pointer;border:1px solid transparent}
-.comp-list .comp:hover{background:var(--panel2);border-color:rgba(255,255,255,0.08)}
-.comp-list .comp.selected{border-color:var(--accent2)}
-.comp-list .comp .size{font-family:"IBM Plex Mono",monospace;color:var(--text)}
+
+/* ── Section Selector ── */
+.sec-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:2px}
+.sec-header h3{font-size:12px;margin:0;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em}
+.sec-header .sec-actions{display:flex;gap:6px}
+.sec-btn{font-size:9px;padding:2px 8px;border-radius:10px;border:1px solid rgba(255,255,255,0.15);background:var(--panel2);color:var(--muted);cursor:pointer;transition:all 0.15s}
+.sec-btn:hover{color:var(--text);border-color:var(--accent2)}
+.sec-btn.all-on{color:var(--accent2);border-color:var(--accent2)}
+.sec-list{overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:1px}
+.sec-item{display:flex;align-items:flex-start;gap:6px;padding:3px 6px;border-radius:4px;cursor:pointer;font-size:11px;border:1px solid transparent;transition:background 0.1s;margin-bottom:1px}
+.sec-item:hover{background:var(--panel2)}
+.sec-item input[type=checkbox]{margin-top:2px;accent-color:var(--accent2);cursor:pointer;flex-shrink:0}
+.sec-item label{cursor:pointer;color:var(--muted);line-height:1.3;word-break:break-all;flex:1;font-size:10px}
+.sec-item:has(input:checked) label{color:var(--text)}
+.sec-count{font-size:9px;color:var(--muted);font-family:"IBM Plex Mono",monospace;flex-shrink:0;min-width:24px;text-align:right}
 
 /* ── Center Canvas ── */
 .canvas-wrap{position:relative}
@@ -54,18 +64,17 @@ body{margin:0;font-family:"Space Grotesk",system-ui,sans-serif;color:var(--text)
 .detail .tags{display:flex;flex-wrap:wrap;gap:4px}
 .detail .tag{font-size:10px;padding:2px 8px;border-radius:12px;background:var(--panel2);color:var(--muted)}
 .detail .section h4{font-size:11px;color:var(--accent);text-transform:uppercase;letter-spacing:0.06em;margin:0 0 4px}
-.detail .section .list{font-size:12px;color:var(--muted)}
+.detail .section .list{font-size:12px;color:var(--muted);line-height:1.6}
 .detail .empty{font-size:13px;color:var(--muted);text-align:center;margin-top:60px}
 .detail a{color:var(--accent2);text-decoration:none;font-size:11px}
 .detail a:hover{text-decoration:underline}
 
-/* ── Edge type legends in center ── */
+/* ── Edge type legends ── */
 .canvas-legend{position:absolute;top:16px;right:16px;display:flex;flex-direction:column;gap:4px;background:rgba(23,26,33,0.92);padding:8px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.08);font-size:10px;color:var(--muted)}
 .canvas-legend .el{display:flex;align-items:center;gap:6px}
 .canvas-legend .eline{width:24px;height:2px}
 .canvas-legend .eline.solid{border-top:2px solid}.canvas-legend .eline.dashed{border-top:2px dashed}.canvas-legend .eline.dotted{border-top:2px dotted}
 
-/* loading */
 .loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:var(--bg);z-index:10}
 .loading .spinner{width:40px;height:40px;border:3px solid var(--panel2);border-top-color:var(--accent);border-radius:50%;animation:spin 0.8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -87,7 +96,16 @@ body{margin:0;font-family:"Space Grotesk",system-ui,sans-serif;color:var(--text)
     </div>
     <div class="search"><input id="searchInput" placeholder="Search entity name..."/></div>
     <div class="type-filters" id="typeFilters"></div>
-    <div class="comp-list" id="compList"></div>
+
+    <!-- Section Selector -->
+    <div class="sec-header">
+      <h3>SECTIONS</h3>
+      <div class="sec-actions">
+        <span class="sec-btn" id="secAllBtn" onclick="toggleAllSections()">All</span>
+        <span class="sec-btn" id="secNoneBtn" onclick="clearAllSections()">None</span>
+      </div>
+    </div>
+    <div class="sec-list" id="secList"></div>
   </div>
 
   <!-- Canvas -->
@@ -115,6 +133,7 @@ const AUTO_DB = "AUTO_DB_NAME";
 let currentData = null;
 let cy = null;
 let activeTypes = new Set();
+let activeSections = new Set();  // empty = all selected (no filter)
 
 const TYPE_COLORS = {
   PartDef:"#6bd1f5",AttributeDef:"#a78bfa",PortDef:"#f5c26b",
@@ -158,6 +177,7 @@ async function loadGraph(dbName) {
   try {
     const r = await fetch(`/api/rag/dbs/${encodeURIComponent(dbName)}/kg/graph`);
     currentData = await r.json();
+    buildSectionList();
     renderGraph();
   } catch(e) {
     console.error(e);
@@ -166,12 +186,95 @@ async function loadGraph(dbName) {
   document.getElementById("loading").style.display = "none";
 }
 
+// ── Section List ──
+function buildSectionList() {
+  const d = currentData;
+  if (!d || !d.sections) return;
+  const secEl = document.getElementById("secList");
+  secEl.innerHTML = "";
+
+  // Count nodes + edges per section
+  const secNodeCount = {};
+  const secEdgeCount = {};
+  d.sections.forEach(s => { secNodeCount[s]=0; secEdgeCount[s]=0; });
+  d.nodes.forEach(n => {
+    (n.sections||[]).forEach(s => { if (secNodeCount.hasOwnProperty(s)) secNodeCount[s]++; });
+  });
+  d.edges.forEach(e => {
+    (e.sections||[]).forEach(s => { if (secEdgeCount.hasOwnProperty(s)) secEdgeCount[s]++; });
+  });
+
+  activeSections = new Set(d.sections);
+  document.getElementById("secAllBtn").classList.add("all-on");
+  document.getElementById("secNoneBtn").classList.remove("all-on");
+
+  d.sections.forEach(sec => {
+    const div = document.createElement("div");
+    div.className = "sec-item";
+
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = true;
+    cb.onchange = () => {
+      if (cb.checked) activeSections.add(sec);
+      else activeSections.delete(sec);
+      updateSecButtons();
+      applyAllFilters();
+    };
+
+    const label = document.createElement("label");
+    label.textContent = sec;
+    label.title = sec;
+
+    const count = document.createElement("span");
+    count.className = "sec-count";
+    count.textContent = (secNodeCount[sec]||0)+(secEdgeCount[sec]||0);
+
+    div.appendChild(cb);
+    div.appendChild(label);
+    div.appendChild(count);
+    secEl.appendChild(div);
+  });
+}
+
+function toggleAllSections() {
+  const d = currentData;
+  if (!d || !d.sections) return;
+  const allOn = activeSections.size === d.sections.length;
+  const cbs = document.querySelectorAll("#secList input[type=checkbox]");
+  if (allOn) {
+    // Deselect all
+    cbs.forEach(cb => { cb.checked = false; });
+    activeSections = new Set();
+  } else {
+    // Select all
+    cbs.forEach(cb => { cb.checked = true; });
+    activeSections = new Set(d.sections);
+  }
+  updateSecButtons();
+  applyAllFilters();
+}
+
+function clearAllSections() {
+  document.querySelectorAll("#secList input[type=checkbox]").forEach(cb => { cb.checked = false; });
+  activeSections = new Set();
+  updateSecButtons();
+  applyAllFilters();
+}
+
+function updateSecButtons() {
+  const d = currentData;
+  const allOn = d && d.sections && activeSections.size === d.sections.length;
+  const allOff = activeSections.size === 0;
+  document.getElementById("secAllBtn").classList.toggle("all-on", allOn);
+  document.getElementById("secNoneBtn").classList.toggle("all-on", allOff);
+}
+
 // ── Render Graph ──
 function renderGraph() {
   const d = currentData;
   if (!d) return;
 
-  // Stats
   document.getElementById("stEnt").textContent = d.total_entities;
   document.getElementById("stRel").textContent = d.total_edges;
   document.getElementById("stComp").textContent = d.connected_components;
@@ -191,7 +294,7 @@ function renderGraph() {
     chip.onclick = () => {
       if (activeTypes.has(t)) { activeTypes.delete(t); chip.classList.remove("on"); }
       else { activeTypes.add(t); chip.classList.add("on"); }
-      applyFilters();
+      applyAllFilters();
     };
     filterEl.appendChild(chip);
   });
@@ -203,33 +306,15 @@ function renderGraph() {
     return `<span class="legend-item"><span class="dot" style="background:${c}"></span>${t}</span>`;
   }).join("");
 
-  // Component list
-  const compEl = document.getElementById("compList");
-  const sizes = d.component_sizes||[];
-  compEl.innerHTML = "";
-  if (sizes.length > 1) {
-    sizes.forEach((sz,i) => {
-      const div = document.createElement("div");
-      div.className = "comp";
-      div.innerHTML = `<span>Component ${i+1}</span><span class="size">${sz}</span>`;
-      div.onclick = () => {
-        document.querySelectorAll("#compList .comp").forEach(c=>c.classList.remove("selected"));
-        div.classList.add("selected");
-      };
-      compEl.appendChild(div);
-    });
-  }
-
-  // Build cytoscape elements
   buildCytoscape(d.nodes, d.edges);
 }
 
 function buildCytoscape(nodes, edges) {
   if (cy) cy.destroy();
 
-  // Filter nodes
-  const filteredIds = new Set(nodes.filter(n=>activeTypes.has(n.type)).map(n=>n.id));
-  const cyNodes = nodes.filter(n=>filteredIds.has(n.id)).map(n => ({
+  // Filter nodes by type + section
+  const typeFilteredIds = new Set(nodes.filter(n=>activeTypes.has(n.type)).map(n=>n.id));
+  const cyNodes = nodes.filter(n=>typeFilteredIds.has(n.id)).map(n => ({
     data: {
       id: n.id,
       label: n.id,
@@ -242,7 +327,7 @@ function buildCytoscape(nodes, edges) {
       qname: n.qname,
     }
   }));
-  const cyEdges = edges.filter(e=>filteredIds.has(e.source)&&filteredIds.has(e.target)).map(e => ({
+  const cyEdges = edges.filter(e=>typeFilteredIds.has(e.source)&&typeFilteredIds.has(e.target)).map(e => ({
     data: {
       id: `${e.source}→${e.target}::${e.label}`,
       source: e.source,
@@ -250,7 +335,8 @@ function buildCytoscape(nodes, edges) {
       label: e.label,
       type: e.type,
       cntype: e.cntype,
-      style: EDGE_STYLES[e.type]||"solid"
+      style: EDGE_STYLES[e.type]||"solid",
+      sections: e.sections||[],
     }
   }));
 
@@ -286,16 +372,39 @@ function buildCytoscape(nodes, edges) {
   });
 
   cy.on("layoutstop", () => {
-    document.querySelectorAll("#compList .comp").forEach(c=>c.classList.remove("selected"));
+    applySectionOpacity();
   });
 
-  // Click node → detail
   cy.on("tap", "node", evt => {
     const n = evt.target.data();
     showDetail(n);
   });
   cy.on("tap", evt => {
     if (evt.target === cy) showDetail(null);
+  });
+
+  // Apply section filter after layout
+  applySectionOpacity();
+}
+
+// ── Section-based opacity filter ──
+function applySectionOpacity() {
+  if (!cy || !currentData) return;
+  const allSections = currentData.sections || [];
+  const allSelected = activeSections.size === 0 || activeSections.size === allSections.length;
+
+  cy.nodes().forEach(n => {
+    const nodeSections = n.data("sections") || [];
+    const visible = allSelected || nodeSections.some(s => activeSections.has(s));
+    const baseOpacity = 0.85;
+    n.style("opacity", visible ? baseOpacity : 0.5);
+  });
+
+  cy.edges().forEach(e => {
+    const edgeSections = e.data("sections") || [];
+    const visible = allSelected || edgeSections.some(s => activeSections.has(s));
+    const baseOpacity = 0.4;
+    e.style("opacity", visible ? baseOpacity : 0.2);
   });
 }
 
@@ -307,7 +416,7 @@ function showDetail(nodeData) {
     return;
   }
   const aliasTags = (nodeData.aliases||[]).map(a=>`<span class="tag">${esc(a)}</span>`).join("")||'<span class="tag">none</span>';
-  const secs = (nodeData.sections||[]).slice(0,10).map(s=>`<li>${esc(s)}</li>`).join("")||'<li>unknown</li>';
+  const secs = (nodeData.sections||[]).slice(0,15).map(s=>`<li>${esc(s)}</li>`).join("")||'<li>unknown</li>';
   pane.innerHTML = `
     <h3>${esc(nodeData.id)}</h3>
     <div class="meta"><span style="color:${nodeData.color}">${nodeData.cntype}</span> <span>${nodeData.type}</span></div>
@@ -322,24 +431,49 @@ function showDetail(nodeData) {
 function getDb(){return document.getElementById("dbSelect").value}
 function esc(s){const el=document.createElement("div");el.textContent=s;return el.innerHTML}
 
-// ── Filters ──
-function applyFilters() {
+// ── Combined Filters ──
+function applyAllFilters() {
   if (!currentData) return;
   buildCytoscape(currentData.nodes, currentData.edges);
 }
+
 document.getElementById("searchInput").oninput = function() {
   const q = this.value.toLowerCase().trim();
   if (!cy) return;
   cy.nodes().forEach(n => {
     const match = !q || n.data("id").toLowerCase().includes(q) || n.data("label").toLowerCase().includes(q);
-    n.style("opacity", match ? 0.85 : 0.08);
-    n.style("width", match ? 24 : 12);
-    n.style("height", match ? 24 : 12);
+    const allSections = currentData.sections || [];
+    const allSecSelected = activeSections.size === 0 || activeSections.size === allSections.length;
+    const nodeSections = n.data("sections")||[];
+    const secMatch = allSecSelected || nodeSections.some(s => activeSections.has(s));
+    if (!match) {
+      n.style("opacity", 0.08);
+      n.style("width", 12);
+      n.style("height", 12);
+    } else if (!secMatch) {
+      n.style("opacity", 0.5);
+      n.style("width", 24);
+      n.style("height", 24);
+    } else {
+      n.style("opacity", 0.85);
+      n.style("width", 24);
+      n.style("height", 24);
+    }
   });
   cy.edges().forEach(e => {
     const s = parseFloat(e.source().style("opacity")) > 0.5;
     const t = parseFloat(e.target().style("opacity")) > 0.5;
-    e.style("opacity", (s&&t) ? 0.4 : 0.04);
+    const edgeSections = e.data("sections")||[];
+    const allSections = currentData.sections || [];
+    const allSecSelected = activeSections.size === 0 || activeSections.size === allSections.length;
+    const secMatch = allSecSelected || edgeSections.some(s => activeSections.has(s));
+    if (!(s&&t)) {
+      e.style("opacity", 0.04);
+    } else if (!secMatch) {
+      e.style("opacity", 0.2);
+    } else {
+      e.style("opacity", 0.4);
+    }
   });
 };
 

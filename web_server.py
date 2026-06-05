@@ -1816,9 +1816,12 @@ def create_app() -> FastAPI:
                     resolved_src = _resolve_entity(src) or src
                     resolved_tgt = _resolve_entity(tgt) or tgt
                     edges_seen.add(key)
+                    # Get relation source_sections from metadata
+                    rel_meta = mgr.get_entity_metadata(rel.qualified_name)
                     edges.append({
                         "source": resolved_src, "target": resolved_tgt,
                         "label": rlabel, "type": rtype, "cntype": rcntype,
+                        "sections": rel_meta.get("source_sections", []),
                     })
             else:
                 # Heuristic: parse ends from relation name
@@ -1828,10 +1831,12 @@ def create_app() -> FastAPI:
                     key = (src, tgt, rlabel)
                     if key not in edges_seen:
                         edges_seen.add(key)
+                        rel_meta = mgr.get_entity_metadata(rel.qualified_name)
                         edges.append({
                             "source": src, "target": tgt,
                             "label": rlabel, "type": rtype, "cntype": rcntype,
                             "heuristic": True,
+                            "sections": rel_meta.get("source_sections", []),
                         })
 
         # Detect isolated nodes (no edge involvement)
@@ -1865,6 +1870,15 @@ def create_app() -> FastAPI:
                             queue.append(nb)
                 components.append(comp)
 
+        # Collect all unique sections from nodes and edges
+        all_sections: set = set()
+        for n in nodes:
+            for s in n.get("sections", []) or []:
+                all_sections.add(s)
+        for e in edges:
+            for s in e.get("sections", []) or []:
+                all_sections.add(s)
+
         return {
             "database": name,
             "total_entities": len(nodes),
@@ -1873,6 +1887,7 @@ def create_app() -> FastAPI:
             "isolated_count": len(isolated),
             "connected_components": len(components),
             "component_sizes": sorted([len(c) for c in components], reverse=True),
+            "sections": sorted(all_sections),
             "nodes": nodes,
             "edges": edges,
         }

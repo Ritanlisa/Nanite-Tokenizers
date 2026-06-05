@@ -37,7 +37,7 @@ import config
 
 DB_NAME = "AIOPS_New"
 DOC_PATH = "/home/ritanlisa/文档/湖超-硬件维护手册20231225.doc"
-ROOT_MODEL = "gemma4:31b"
+ROOT_MODEL = "qwen3:8b"
 EXTRACT_MODEL = "qwen3:8b"
 
 RUN_TS = datetime.now().strftime("%Y%m%d_%H%M%S")

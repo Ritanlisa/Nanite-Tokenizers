@@ -1175,6 +1175,7 @@ class KGBuildAgent:
             source = str(r.get("source", "")).strip()
             target = str(r.get("target", "")).strip()
             desc = str(r.get("description", "")).strip()
+            rel_source_section = r.get("source_section", "")
 
             if not source or not target:
                 continue
@@ -1182,6 +1183,13 @@ class KGBuildAgent:
             # 解析端点名（可能已通过别名解析）
             src_qn = entity_qn_map.get(source, source)
             tgt_qn = entity_qn_map.get(target, target)
+
+            # 构建关系来源: 优先用关系自身的 source_section，否则用当前页面来源
+            rel_src_sections: list = []
+            if rel_source_section:
+                rel_src_sections = [rel_source_section]
+            if pages_list:
+                rel_src_sections.extend(pages_list)
 
             rel_result = await self._mcp_session.call_tool(
                 "sysml_add_relation", {
@@ -1193,6 +1201,7 @@ class KGBuildAgent:
                     "description": desc,
                     "role_source": "",
                     "role_target": "",
+                    "source_sections": rel_src_sections if rel_src_sections else None,
                 },
             )
             try:
@@ -1356,6 +1365,7 @@ class KGBuildAgent:
                             "source": act.get("source", ""),
                             "target": act.get("target", ""),
                             "description": act.get("description", ""),
+                            "source_sections": [sec_key] if sec_key else None,
                         })
                         rdata = json.loads(rel_res)
                         if rdata.get("ok"):
@@ -1615,6 +1625,7 @@ class KGBuildAgent:
                         "source": s_name,
                         "target": t_name,
                         "description": f"桥接关系: {s_name} ↔ {t_name} (同章: {', '.join(shared_sections[:2])})",
+                        "source_sections": shared_sections[:3],
                     }
                 )
                 rel_data = json.loads(rel_result)
