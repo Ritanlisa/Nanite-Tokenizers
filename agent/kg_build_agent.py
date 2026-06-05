@@ -1047,7 +1047,8 @@ class KGBuildAgent:
                 for item in items:
                     if not isinstance(item, dict):
                         continue
-                    if item.get("relation"):
+                    # 关系: 显式标记 relation=true 或有 source+target 字段
+                    if item.get("relation") or (item.get("source") and item.get("target")):
                         relations.append(item)
                     elif item.get("name"):
                         candidates.append(item)
@@ -1062,7 +1063,7 @@ class KGBuildAgent:
                     try:
                         item = json.loads(m2.group())
                         if isinstance(item, dict):
-                            if item.get("relation"):
+                            if item.get("relation") or (item.get("source") and item.get("target")):
                                 relations.append(item)
                             elif item.get("name"):
                                 candidates.append(item)
