@@ -19,6 +19,9 @@ from .sysml_model import (
     ConnectionUsage,
     InterfaceUsage,
     AllocationUsage,
+    ContainmentUsage,
+    CompositionUsage,
+    ReferenceUsage,
     ConnectionEnd,
     PartDef, PartUsage,
     AttributeDef, AttributeUsage,
@@ -51,6 +54,9 @@ RELATION_CLASS_MAP: Dict[str, type] = {
     "connection": ConnectionUsage,
     "interface": InterfaceUsage,
     "allocation": AllocationUsage,
+    "containment": ContainmentUsage,
+    "composition": CompositionUsage,
+    "reference": ReferenceUsage,
 }
 
 

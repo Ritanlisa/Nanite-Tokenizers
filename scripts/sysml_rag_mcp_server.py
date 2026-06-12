@@ -51,6 +51,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from sysml.sysml_model import (
     Package, SysMLElement, Namespace, Definition, Usage, Doc,
     ConnectionUsage, InterfaceUsage, AllocationUsage,
+    ContainmentUsage, CompositionUsage, ReferenceUsage,
     InterfaceDef, AllocationDef,
     PartDef, PartUsage, AttributeDef, AttributeUsage,
     PortDef, PortUsage, ItemDef, ItemUsage,
@@ -91,6 +92,8 @@ def _entity_type_name(entity: Any) -> str:
         CommandDef: "命令定义",
         InterfaceUsage: "接口使用", InterfaceDef: "接口定义",
         AllocationUsage: "分配使用", AllocationDef: "分配定义",
+        ContainmentUsage: "包含使用", CompositionUsage: "组合使用",
+        ReferenceUsage: "引用使用",
         ConnectionDef: "连接定义", ConnectionUsage: "连接使用",
         Package: "包",
     }
@@ -2224,7 +2227,7 @@ TOOL_DEFINITIONS = {
         "function": sysml_add_relation,
         "description": "创建关系（connection/interface/allocation），可选来源追踪",
         "parameters": {
-            "relation_type": {"type": "string", "description": "关系类型: connection, interface, allocation"},
+            "relation_type": {"type": "string", "description": "关系类型: connection, interface, allocation, containment, composition, reference"},
             "source": {"type": "string", "description": "源实体名称"},
             "target": {"type": "string", "description": "目标实体名称"},
             "name": {"type": "string", "description": "关系名称（可选）", "default": None},

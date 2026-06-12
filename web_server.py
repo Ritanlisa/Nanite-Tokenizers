@@ -1725,6 +1725,7 @@ def create_app() -> FastAPI:
             "AllocationDef": "#818cf8", "CommandDef": "#f472b6", "RequirementDef": "#94a3b8",
             "PartUsage": "#6bd1f5", "PortUsage": "#f5c26b", "AttributeUsage": "#a78bfa",
             "ConnectionUsage": "#f87171", "InterfaceUsage": "#fb923c", "AllocationUsage": "#818cf8",
+            "ContainmentUsage": "#34d399", "CompositionUsage": "#f59e0b", "ReferenceUsage": "#94a3b8",
         }
 
         entities = mgr.get_all_entities()
@@ -1797,54 +1798,61 @@ def create_app() -> FastAPI:
                         return (resolved_src, _resolve_entity(tgt))
             return None
 
-        # Build edge list from relations; only 1 directed edge per relation
-        edges_seen: set = set()
+        # Build edge list from relations; dedup by unordered pair, prefer Allocation>Connection>Interface
+        TYPE_EDGE_PRIORITY = {
+            "ContainmentUsage": 5, "CompositionUsage": 5, "ReferenceUsage": 4,
+            "AllocationUsage": 3, "AllocationDef": 3,
+            "ConnectionUsage": 2, "ConnectionDef": 2,
+            "InterfaceUsage": 1, "InterfaceDef": 1,
+        }
+        edges_seen: dict = {}  # (min_id, max_id) -> edge dict
         edges = []
         for rel in relations:
             ends = getattr(rel, "ends", None) or []
+            rlabel = getattr(rel, "name", "")
             rtype = type(rel).__name__
             rcntype = _entity_type_name(rel)
             rel_meta = mgr.get_entity_metadata(rel.qualified_name)
-            rdesc = rel_meta.get("description", "") or ""
 
             if len(ends) >= 2:
-                src = ends[0].ref
-                tgt = ends[1].ref
+                src, tgt = ends[0].ref, ends[1].ref
                 resolved_src = _resolve_entity(src) or src
                 resolved_tgt = _resolve_entity(tgt) or tgt
-                # Use description as primary label, fallback to name
-                label = rdesc[:60] if rdesc else getattr(rel, "name", "")
-                key = (resolved_src, resolved_tgt, label)
+                a, b = resolved_src, resolved_tgt
+                key = (min(a, b), max(a, b))
+                desc = (rel_meta.get("description") or "").strip() or rlabel
+                priority = TYPE_EDGE_PRIORITY.get(rtype, 0)
+
                 if key in edges_seen:
-                    continue
-                edges_seen.add(key)
-                edges.append({
-                    "source": resolved_src, "target": resolved_tgt,
-                    "label": label,
-                    "type": rtype, "cntype": rcntype,
-                    "sections": rel_meta.get("source_sections", []),
-                    "description": rdesc,
-                    "relation_name": getattr(rel, "name", ""),
-                })
+                    existing = edges_seen[key]
+                    ext_prio = existing[6]
+                    ext_desc = existing[5]
+                    if priority > ext_prio or (priority == ext_prio and len(desc) > len(ext_desc)):
+                        edges_seen[key] = (resolved_src, resolved_tgt, desc, rtype, rcntype,
+                                            rel_meta.get("source_sections", []) or [], priority)
+                else:
+                    edges_seen[key] = (resolved_src, resolved_tgt, desc, rtype, rcntype,
+                                        rel_meta.get("source_sections", []) or [], priority)
             else:
-                # Heuristic fallback
-                rlabel = getattr(rel, "name", "")
+                # Heuristic: parse ends from relation name
                 parsed = _parse_ends_from_name(rlabel)
                 if parsed:
-                    src, tgt = parsed
-                    label = rdesc[:60] if rdesc else rlabel
-                    key = (src, tgt, label)
-                    if key not in edges_seen:
-                        edges_seen.add(key)
-                        edges.append({
-                            "source": src, "target": tgt,
-                            "label": label,
-                            "type": rtype, "cntype": rcntype,
-                            "heuristic": True,
-                            "sections": rel_meta.get("source_sections", []),
-                            "description": rdesc,
-                            "relation_name": rlabel,
-                        })
+                    hsrc, htgt = parsed
+                    a, b = hsrc, htgt
+                    key = (min(a, b), max(a, b))
+                    desc = (rel_meta.get("description") or "").strip() or rlabel
+                    priority = TYPE_EDGE_PRIORITY.get(rtype, 0)
+                    if key not in edges_seen or priority > edges_seen[key][6]:
+                        edges_seen[key] = (hsrc, htgt, desc, rtype, rcntype,
+                                            rel_meta.get("source_sections", []) or [], priority)
+
+        for (src, tgt, label, rtype, cntype, sections, _prio) in edges_seen.values():
+            edges.append({
+                "source": src, "target": tgt,
+                "label": label, "type": rtype, "cntype": cntype,
+                "sections": sections,
+                "description": label,
+            })
 
         # Detect isolated nodes (no edge involvement)
         connected_ids: set = set()

@@ -105,9 +105,12 @@ EXTRACTION_CANDIDATES_PROMPT = """你是一个技术文档实体提取器。阅�
 - CommandDef: Shell命令、CLI操作、工具命令（如 yhst, smu_tranfer_cmd, ncid, lspci）
 
 ## 关系类型
-- Connection: 物理连接或数据流关系
-- Interface: 接口实现关系
-- Allocation: 功能/资源分配关系
+- Connection: 物理连接或数据流关系（A连接到B，双向）
+- Interface: 接口实现关系（A实现B的接口，单向）
+- Allocation: 功能/资源分配关系（将A分配给B，单向）
+- Containment: 包含关系（整体包含部分，层级分解）
+- Composition: 组合关系（强整体-部分，部分不能脱离整体）
+- Reference: 引用关系（弱交叉引用，A引用B）
 
 ## 示例
 输入文本: "系统提供1个FT计算柜（1024个处理器）和10个MT加速柜（共10240个加速器）"

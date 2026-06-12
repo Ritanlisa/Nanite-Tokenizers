@@ -386,6 +386,57 @@ class AllocationUsage(ConnectionUsage):  # 改为继承 ConnectionUsage
             return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
         return ConnectionUsage.to_text(self, indent)
 
+class ContainmentUsage(ConnectionUsage):
+    """包含关系: 整体包含部分 (hierarchical decomposition)"""
+    def usage_kind(self) -> str:
+        return "containment"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class CompositionUsage(ConnectionUsage):
+    """组合关系: 强整体-部分 (strong whole-part, 部分不能脱离整体)"""
+    def usage_kind(self) -> str:
+        return "composition"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class ReferenceUsage(ConnectionUsage):
+    """引用关系: 弱交叉引用 (weak cross-reference)"""
+    def usage_kind(self) -> str:
+        return "reference"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
 class CommandDef(Definition):
     """运维命令定义"""
     def __init__(self, name: Optional[str] = None, short_name: Optional[str] = None,

@@ -36,6 +36,9 @@ SYML_GRAMMAR = r"""
               | "connection" -> connection_usage
               | "interface" -> interface_usage
               | "allocation" -> allocation_usage
+              | "containment" -> containment_usage
+              | "composition" -> composition_usage
+              | "reference" -> reference_usage
               | "requirement" -> requirement_usage
     usage_body: "{" member* "}" | ";"
 
@@ -216,6 +219,15 @@ class SysMLTransformer(Transformer):
 
     def allocation_usage(self):
         return AllocationUsage()
+
+    def containment_usage(self):
+        return ContainmentUsage()
+
+    def composition_usage(self):
+        return CompositionUsage()
+
+    def reference_usage(self):
+        return ReferenceUsage()
 
     def requirement_usage(self):
         return RequirementUsage()
