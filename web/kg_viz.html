@@ -317,7 +317,8 @@ function runForceLayout(cy) {
         for (let i = 0; i < k; i++) v[i] -= mean;
       }
       for (let iter = 0; iter < maxIter; iter++) {
-        const next = LsymMultiply(v);
+        const Lv = LsymMultiply(v);
+        const next = v.map((vi, i) => vi - Lv[i] / 2);
         for (const ov of orthoVecs) {
           let dot = 0;
           for (let i = 0; i < k; i++) dot += next[i] * ov[i];
