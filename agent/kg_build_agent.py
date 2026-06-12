@@ -2197,7 +2197,7 @@ class KGBuildAgent:
         await self._mcp_session.call_tool("sysml_add_entity", {
             "entity_type": "PartDef", "name": root_name,
             "parent_package": "", "description": root_entity.get("description", ""),
-            "aliases": [], "source_sections": [doc_name],
+            "aliases": [], "source_sections": ["根实体"],
             "source_text": root_entity.get("description", ""),
             "properties": {}, "supertypes": [], "short_name": root_name,
         })
