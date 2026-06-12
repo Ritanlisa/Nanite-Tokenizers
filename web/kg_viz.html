@@ -219,7 +219,7 @@ function buildSectionList() {
       if (cb.checked) activeSections.add(sec);
       else activeSections.delete(sec);
       updateSecButtons();
-      applyAllFilters();
+      applySectionOpacity();
     };
 
     const label = document.createElement("label");
@@ -243,23 +243,21 @@ function toggleAllSections() {
   const allOn = activeSections.size === d.sections.length;
   const cbs = document.querySelectorAll("#secList input[type=checkbox]");
   if (allOn) {
-    // Deselect all
     cbs.forEach(cb => { cb.checked = false; });
     activeSections = new Set();
   } else {
-    // Select all
     cbs.forEach(cb => { cb.checked = true; });
     activeSections = new Set(d.sections);
   }
   updateSecButtons();
-  applyAllFilters();
+  applySectionOpacity();
 }
 
 function clearAllSections() {
   document.querySelectorAll("#secList input[type=checkbox]").forEach(cb => { cb.checked = false; });
   activeSections = new Set();
   updateSecButtons();
-  applyAllFilters();
+  applySectionOpacity();
 }
 
 function updateSecButtons() {

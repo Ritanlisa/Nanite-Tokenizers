@@ -330,13 +330,13 @@ class ConnectionUsage(Usage):
         if len(self.ends) == 2:
             e1, e2 = self.ends
             if not self.name and not self.short_name:
-                return f"{prefix}connect {e1.ref} to {e2.ref};"
+                return f"{prefix}connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
             # Named connection with ends: serialize ends in body block for round-trip safety
             name_part = self._name_part()
             spec = self.specialization_part()
             header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
             body_prefix = "    " * (indent + 1)
-            body_line = f"connect {e1.ref} to {e2.ref};"
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
             return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
         else:
             return super().to_text(indent)
@@ -362,7 +362,7 @@ class InterfaceUsage(ConnectionUsage):   # 改为继承 ConnectionUsage
             spec = self.specialization_part()
             header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
             body_prefix = "    " * (indent + 1)
-            body_line = f"connect {e1.ref} to {e2.ref};"
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
             return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
         return ConnectionUsage.to_text(self, indent)
 
@@ -382,7 +382,7 @@ class AllocationUsage(ConnectionUsage):  # 改为继承 ConnectionUsage
             spec = self.specialization_part()
             header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
             body_prefix = "    " * (indent + 1)
-            body_line = f"connect {e1.ref} to {e2.ref};"
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
             return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
         return ConnectionUsage.to_text(self, indent)
 

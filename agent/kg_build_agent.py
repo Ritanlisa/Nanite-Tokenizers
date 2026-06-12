@@ -2023,10 +2023,6 @@ class KGBuildAgent:
             await self._trigger_save()
             stats["phase_dedup_time_s"] = round(time.time() - t0, 1)
 
-            # ── 全局孤立实体连接: 所有无关系的实体连接到根实体 ──
-            logger.info("Recursive pipeline: connecting orphan entities globally...")
-            await self._connect_global_orphans(root_entity)
-
             # ── 图聚合 ──
             logger.info("Recursive pipeline: aggregating graph...")
             await self._aggregate_graph(doc_name)
@@ -2147,7 +2143,7 @@ class KGBuildAgent:
         sections: Dict[str, List], root_entity: Dict[str, Any],
         start_section_ids: List[str], doc_name: str,
     ) -> List[str]:
-        """Phase 1: 用 gemma4:31b 提取根小节中的全部实体和关系"""
+        """Phase 1: 单次LLM提取+强制连接根实体保证连通"""
         from langchain_core.messages import HumanMessage, SystemMessage
 
         all_new_entity_names: List[str] = []
@@ -2155,64 +2151,63 @@ class KGBuildAgent:
         root_type = root_entity.get("type", "PartDef")
         root_desc = root_entity.get("description", "")
 
+        if not root_name:
+            return all_new_entity_names
+
+        # 创建根实体
+        await self._mcp_session.call_tool("sysml_add_entity", {
+            "entity_type": root_type, "name": root_name,
+            "parent_package": "", "description": root_desc,
+            "aliases": [], "source_sections": [doc_name],
+            "source_text": root_desc, "properties": {}, "supertypes": [],
+            "short_name": root_name,
+        })
+        all_new_entity_names.append(root_name)
+
         for sid in start_section_ids:
             nodes = sections.get(sid, [])
-
-            # 如果 sections 里没有 (如个别 node_id)，尝试从 tree_state 直接查找
             if not nodes and sid in tree_state.nodes:
-                node = tree_state.nodes[sid]
-                nodes = [node]
+                nodes = [tree_state.nodes[sid]]
             if not nodes:
                 continue
 
             section_title = nodes[0].title[:60]
-            text_parts = [
-                f"## 页面{nd.page_start}: {nd.title}\n{nd.text}"
-                for nd in nodes
-            ]
+            text_parts = [f"## 页面{nd.page_start}: {nd.title}\n{nd.text}" for nd in nodes]
             merged_text = "\n\n".join(text_parts)
+            source_pages = [f"p{nd.page_start} {section_title}" for nd in nodes]
 
-            prompt = f"""你是SysML v2知识图谱专家。从文档小节中以根实体为起点，提取系统架构知识图谱。
+            prompt = f"""你是SysML v2知识图谱专家。从文档小节中以根实体"{root_name}"为起点，提取系统架构知识图谱。
 
-## 文档根实体
-- 名称: {root_name}
-- 类型: {root_type}
-- 描述: {root_desc}
-
-## 当前小节
-- 标题: {section_title}
+## 当前小节: {section_title}
 
 ## 实体类型
-PartDef(系统组件/模块/设备/机柜/服务器), AttributeDef(属性/参数/指标), PortDef(接口/端口), ItemDef(数据结构/信息流), RequirementDef(需求/约束), CommandDef(Shell命令/CLI操作), InterfaceDef, ConnectionDef
+PartDef(组件/模块/设备/机柜), AttributeDef(属性/参数), PortDef(接口/端口), ItemDef(数据结构), RequirementDef(需求/约束), CommandDef(CLI命令)
 
 ## 关系类型
 Connection(物理连接/数据流), Interface(接口实现), Allocation(功能/资源分配)
 
 ## 核心规则：每个实体必须至少有一条关系！
 - 组件实体 → 连接到根实体"{root_name}"或其他组件
-- 属性实体 → 连接到其宿主组件（通过 Allocation）
-- 命令实体 → 连接到其运行设备（通过 Allocation）
-- 接口/端口 → 连接到宿主设备（通过 Allocation）
-- 需求实体 → 连接到相关组件（通过 Allocation）
+- 属性/端口/命令 → 用 Allocation 连接到宿主组件
+- 无法确定关系 → 直接连接到"{root_name}"
 
 ## 小节内容
 {merged_text}
 
-## 输出格式 (仅JSON数组，无Markdown包裹)"""
+## 输出 (仅JSON数组)"""
             prompt += f"""
 [
   {{"type":"PartDef","name":"组件名","description":"简短描述","aliases":["别名"],"source_section":"{section_title}"}},
-  {{"type":"Allocation","source":"属性名","target":"其宿主组件名","description":"属性归属于组件","source_section":"{section_title}"}},
-  {{"type":"Connection","source":"源","target":"目标","description":"关系描述","source_section":"{section_title}"}}
+  {{"type":"Allocation","source":"属性","target":"宿主","description":"归属","source_section":"{section_title}"}},
+  {{"type":"Connection","source":"源","target":"目标","description":"描述","source_section":"{section_title}"}}
 ]
-无相关内容输出 []"""
+无内容输出 []"""
 
-            logger.debug("Phase 1: extracting root section %s via %s", sid, self.model)
             try:
                 t_call = time.time()
                 response = await asyncio.wait_for(
                     self.llm.ainvoke([
-                        SystemMessage(content="你是SysML v2知识图谱专家。仅输出JSON数组，无其他内容。"),
+                        SystemMessage(content="你是SysML v2知识图谱专家。仅输出JSON数组。"),
                         HumanMessage(content=prompt),
                     ]),
                     timeout=600,
@@ -2220,61 +2215,26 @@ Connection(物理连接/数据流), Interface(接口实现), Allocation(功能/�
                 raw = str(response.content) if hasattr(response, "content") else str(response)
                 logger.debug("Phase 1 LLM (root section %s, %.1fs): %s",
                               sid, time.time() - t_call, raw[:500])
-            except asyncio.TimeoutError:
-                logger.warning("Phase 1 timeout for root section %s", sid)
-                continue
-            except Exception as e:
-                logger.error("Phase 1 LLM error for section %s: %s", sid, e)
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning("Phase 1 error for section %s: %s", sid, e)
                 continue
 
             candidates, relations = self._parse_candidates(raw)
 
-            # 记录新实体名
-            for c in candidates:
-                name = c.get("name", "").strip()
-                if name:
-                    all_new_entity_names.append(name)
+            # 收集实体名
+            section_names = {c.get("name", "").strip() for c in candidates if c.get("name", "").strip()}
+            all_new_entity_names.extend(n for n in section_names if n)
 
-            # 通过 MCP 创建实体和关系
-            source_pages = [f"p{nd.page_start} {section_title}" for nd in nodes]
+            # 创建实体和关系
             section_key = section_title if section_title else f"Section {sid}"
-            result = await self._process_candidates(
+            await self._process_candidates(
                 candidates, relations, doc_name,
                 nodes[0].page_start, section_key,
                 source_pages=source_pages,
             )
 
-            # ── 后处理: 将本节无关系的实体连接到根实体 ──
-            if root_name:
-                # 获取本节创建的实体名
-                section_entity_names = {c.get("name", "").strip() for c in candidates if c.get("name", "").strip()}
-                # 获取已有关系的实体(从 relation source/target 中提取)
-                connected_entities = set()
-                for r in relations:
-                    s = r.get("source", "").strip()
-                    t = r.get("target", "").strip()
-                    if s:
-                        connected_entities.add(s)
-                    if t:
-                        connected_entities.add(t)
-                # 连接孤立实体到根实体
-                orphans = section_entity_names - connected_entities - {root_name}
-                for orphan in orphans:
-                    try:
-                        await self._mcp_session.call_tool("sysml_add_relation", {
-                            "relation_type": "allocation",
-                            "source": orphan,
-                            "target": root_name,
-                            "description": f"{orphan}是{root_name}的组成部分",
-                            "source_sections": source_pages,
-                        })
-                        logger.debug("  Phase1: auto-connected orphan '%s' → '%s'", orphan, root_name)
-                    except Exception:
-                        pass
-
             for nd in nodes:
                 tree_state.mark_processed(nd.node_id)
-
             await self._trigger_save()
 
         return all_new_entity_names
@@ -2332,49 +2292,6 @@ Connection(物理连接/数据流), Interface(接口实现), Allocation(功能/�
                                   entity_name, section_id, aliases[:3])
 
         return build_queue
-
-    async def _connect_global_orphans(self, root_entity: Dict[str, Any]) -> None:
-        """将所有无关系的实体连接到根实体，确保全图连通"""
-        root_name = root_entity.get("name", "")
-        if not root_name:
-            return
-
-        # 获取实体列表和关系列表(含ends)
-        entities_raw = await self._mcp_session.call_tool("sysml_list_entities", {"include_details": False})
-        relations_raw = await self._mcp_session.call_tool("sysml_list_relations", {"include_details": True})
-
-        try:
-            entities_data = json.loads(entities_raw)
-            relations_data = json.loads(relations_raw)
-        except json.JSONDecodeError:
-            return
-
-        # 收集有关系连接的实体名（从 ends[].ref 解析）
-        connected_names: set = {root_name}
-        for r in relations_data.get("relations", []) or []:
-            ends = r.get("ends", []) or []
-            for end in ends:
-                ref = end.get("ref", "") if isinstance(end, dict) else ""
-                if ref:
-                    connected_names.add(ref)
-
-        # 查找孤立实体并连接
-        orphan_count = 0
-        for e in entities_data.get("entities", []) or []:
-            name = e.get("name", "") if isinstance(e, dict) else ""
-            if name and name != root_name and name not in connected_names:
-                try:
-                    await self._mcp_session.call_tool("sysml_add_relation", {
-                        "relation_type": "allocation",
-                        "source": name,
-                        "target": root_name,
-                        "description": f"{name}是{root_name}的组成部分",
-                    })
-                    orphan_count += 1
-                    logger.debug("  Global orphan: '%s' → '%s'", name, root_name)
-                except Exception:
-                    pass
-        logger.info("Connected %d global orphans to root entity '%s'", orphan_count, root_name)
 
     async def _process_queued_section(
         self, nodes: List[DocTreeNode], entity_name: str,
@@ -2445,28 +2362,6 @@ Connection|Interface|Allocation
             nodes[0].page_start, section_key,
             source_pages=source_pages,
         )
-
-        # ── 后处理: 连接本节孤立实体到焦点实体 ──
-        if new_entity_names and entity_name:
-            connected = set()
-            for r in relations:
-                s = r.get("source", "").strip()
-                t = r.get("target", "").strip()
-                if s: connected.add(s)
-                if t: connected.add(t)
-            orphans = set(new_entity_names) - connected - {entity_name}
-            for orphan in orphans:
-                try:
-                    await self._mcp_session.call_tool("sysml_add_relation", {
-                        "relation_type": "allocation",
-                        "source": orphan,
-                        "target": entity_name,
-                        "description": f"{orphan}关联到{entity_name}",
-                        "source_sections": source_pages,
-                    })
-                    logger.debug("  Phase3: auto-connected orphan '%s' → '%s'", orphan, entity_name)
-                except Exception:
-                    pass
 
         return new_entity_names
 
