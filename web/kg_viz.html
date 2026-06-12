@@ -274,8 +274,10 @@ function buildCytoscape(nodes, edges) {
   cy.on("tap", evt => { if (evt.target === cy) { document.getElementById("detailPane").innerHTML = '<div class="empty">Click a node or edge to see details</div>'; }});
 }
 
-// ── BFS Tree + Layered Layout ──
-// Per-component: BFS spanning tree (rooted at highest-degree node), bottom-up layered positioning.
+// ── Radial Tree Layout ──
+// Leaf-count angular allocation: every subtree gets angular space proportional to its leaf count.
+// No overlap guaranteed: nodes at same depth are on the same ring, each with unique angle.
+// Min angular separation = 2π / totalLeaves radians, × radius = arc length.
 function runForceLayout(cy) {
   const nodes = cy.nodes(); const n = nodes.length;
   if (n < 2) { cy.fit(undefined, 50); return; }
@@ -298,15 +300,14 @@ function runForceLayout(cy) {
     comps.push(comp);
   }
 
-  const LEVEL_SPACING = 80;
-  const COL_SPACING = 50;
+  const LEVEL_SPACING = 120; // radius per depth level
   const positions = new Array(n);
 
   for (const comp of comps) {
     const k = comp.length;
     if (k === 0) continue;
     if (k === 1) { positions[comp[0]] = {x: 0, y: 0}; continue; }
-    if (k === 2) { positions[comp[0]] = {x: -COL_SPACING, y: 0}; positions[comp[1]] = {x: COL_SPACING, y: 0}; continue; }
+    if (k === 2) { positions[comp[0]] = {x: -LEVEL_SPACING, y: 0}; positions[comp[1]] = {x: LEVEL_SPACING, y: 0}; continue; }
 
     // Find root: highest degree
     let root = comp[0];
@@ -328,37 +329,39 @@ function runForceLayout(cy) {
       }
     }
 
-    // Step 1: Count leaves in each subtree (bottom-up)
+    // Count leaves per subtree (bottom-up)
     const leafCount = new Array(n).fill(0);
-    const byDepth = [];
-    for (let d = 0; ; d++) {
-      const level = [];
-      for (const i of comp) if (depth[i] === d) level.push(i);
-      if (level.length === 0) break;
-      byDepth.push(level);
-    }
-    for (let d = byDepth.length - 1; d >= 0; d--) {
+    const maxDepth = Math.max(...depth);
+    const byDepth = Array.from({length: maxDepth + 1}, () => []);
+    for (const i of comp) byDepth[depth[i]].push(i);
+    for (let d = maxDepth; d >= 0; d--) {
       for (const u of byDepth[d]) {
         if (children[u].length === 0) { leafCount[u] = 1; }
         else { let sum = 0; for (const v of children[u]) sum += leafCount[v]; leafCount[u] = sum; }
       }
     }
 
-    // Step 2: Assign column positions (top-down, unique per node)
-    const col = new Array(n).fill(0);
-    function assignPositions(u, startCol) {
-      col[u] = startCol;
-      let curCol = startCol;
+    // Radial layout: assign angles based on leaf count
+    const angleStart = new Array(n).fill(0);
+    const angleEnd = new Array(n).fill(0);
+    const totalLeaves = leafCount[root];
+
+    function assignAngles(u, startAngle, endAngle) {
+      angleStart[u] = startAngle;
+      angleEnd[u] = endAngle;
+      const midAngle = (startAngle + endAngle) / 2;
+      const r = depth[u] * LEVEL_SPACING + LEVEL_SPACING / 2;
+      positions[u] = { x: r * Math.cos(midAngle), y: r * Math.sin(midAngle) };
+      if (children[u].length === 0) return;
+      let cur = startAngle;
       for (const v of children[u]) {
-        assignPositions(v, curCol);
-        curCol += leafCount[v];
+        const fraction = leafCount[v] / leafCount[u];
+        const childEnd = cur + (endAngle - startAngle) * fraction;
+        assignAngles(v, cur, childEnd);
+        cur = childEnd;
       }
     }
-    assignPositions(root, 0);
-
-    // Shift to center root
-    const rootShift = col[root];
-    for (const i of comp) positions[i] = { x: (col[i] - rootShift) * COL_SPACING, y: depth[i] * LEVEL_SPACING };
+    assignAngles(root, 0, 2 * Math.PI);
   }
 
   // Center and scale
