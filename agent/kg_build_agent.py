@@ -2148,7 +2148,7 @@ class KGBuildAgent:
 
         all_new_entity_names: List[str] = []
         root_name = root_entity.get("name", "")
-        root_type = root_entity.get("type", "PartDef")
+        root_type = "PartDef"  # 强制根实体为 PartDef，确保出现在实体列表中
         root_desc = root_entity.get("description", "")
 
         if not root_name:
