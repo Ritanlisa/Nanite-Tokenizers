@@ -2223,6 +2223,27 @@ class KGBuildAgent:
                 source_pages=source_pages,
             )
 
+            # ── Auto-connect root-section entities to root entity ──
+            if root_name:
+                section_names = {c.get("name", "").strip() for c in candidates if c.get("name", "").strip()}
+                connected = set()
+                for r in relations:
+                    s = r.get("source", "").strip()
+                    t = r.get("target", "").strip()
+                    if s:
+                        connected.add(s)
+                    if t:
+                        connected.add(t)
+                for name in sorted(section_names):
+                    if name and name not in connected and name != root_name:
+                        await self._mcp_session.call_tool("sysml_add_relation", {
+                            "relation_type": "allocation",
+                            "source": name,
+                            "target": root_name,
+                            "description": f"{name}是{root_name}的组成部分",
+                            "source_sections": source_pages,
+                        })
+
             for nd in nodes:
                 tree_state.mark_processed(nd.node_id)
             await self._trigger_save()
@@ -2336,6 +2357,26 @@ class KGBuildAgent:
             nodes[0].page_start, section_key,
             source_pages=source_pages,
         )
+
+        # ── Auto-connect new entities to focus entity (structural integrity) ──
+        if new_entity_names and entity_name:
+            connected = set()
+            for r in relations:
+                s = r.get("source", "").strip()
+                t = r.get("target", "").strip()
+                if s:
+                    connected.add(s)
+                if t:
+                    connected.add(t)
+            for name in new_entity_names:
+                if name and name not in connected and name != entity_name:
+                    await self._mcp_session.call_tool("sysml_add_relation", {
+                        "relation_type": "allocation",
+                        "source": name,
+                        "target": entity_name,
+                        "description": f"{name}关联到{entity_name}",
+                        "source_sections": source_pages,
+                    })
 
         return new_entity_names
 

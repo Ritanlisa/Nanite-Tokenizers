@@ -229,171 +229,189 @@ function buildCytoscape(nodes, edges) {
     layout:{name:"random"},
     minZoom:0.02, maxZoom:3
   });
+  window.__cy = cy;
   cy.on("layoutstop", () => { runForceLayout(cy); applySectionOpacity(); });
   cy.on("tap", "node", evt => showNodeDetail(evt.target.data()));
   cy.on("tap", "edge", evt => showEdgeDetail(evt.target.data()));
   cy.on("tap", evt => { if (evt.target === cy) { document.getElementById("detailPane").innerHTML = '<div class="empty">Click a node or edge to see details</div>'; }});
 }
 
-// ── Deterministic Spectral Layout ──
-// Per-component spectral embedding with direct scaling (no min-max stretch).
+// ── Kamada-Kawai Stress Majorization Layout ──
+// Per-component KK stress majorization with BFS distances as ideal spring lengths.
 function runForceLayout(cy) {
-  const nodes = cy.nodes(); const n = nodes.length; if (n < 2) return;
+  const nodes = cy.nodes();
+  const n = nodes.length;
+  if (n < 2) {
+    cy.fit(undefined, 50);
+    return;
+  }
   const W = cy.width() || 1200, H = cy.height() || 900;
 
-  // Build edge list with global node indices
-  const edgeList = cy.edges().map(e => ({
-    s: nodes.indexOf(e.source()), t: nodes.indexOf(e.target())
-  })).filter(e => e.s >= 0 && e.t >= 0);
+  // ── Build adjacency list (global indices) ──
+  const adj = Array.from({ length: n }, () => []);
+  cy.edges().forEach(e => {
+    const s = nodes.indexOf(e.source()), t = nodes.indexOf(e.target());
+    if (s >= 0 && t >= 0 && s !== t) { adj[s].push(t); adj[t].push(s); }
+  });
 
   // ── Step 1: Find connected components (BFS) ──
   const visited = new Array(n).fill(false);
   const comps = [];
   for (let i = 0; i < n; i++) {
     if (visited[i]) continue;
-    const comp = []; const q = [i]; visited[i] = true;
+    const comp = [], q = [i];
+    visited[i] = true;
     while (q.length) {
       const u = q.shift(); comp.push(u);
-      for (const e of edgeList) {
-        const v = e.s === u ? e.t : e.t === u ? e.s : -1;
-        if (v >= 0 && !visited[v]) { visited[v] = true; q.push(v); }
+      for (const v of adj[u]) {
+        if (!visited[v]) { visited[v] = true; q.push(v); }
       }
     }
     comps.push(comp);
   }
 
-  // ── Step 2: spectralXY per component (preserves eigenvector spacing) ──
-  function spectralXY_component(nodeIDs, edgeList, compW, compH) {
-    const k = nodeIDs.length;
-    if (k === 1) return [{ x: compW / 2, y: compH / 2 }];
-    if (k === 2) {
-      const r = Math.min(compW, compH) * 0.3;
-      return [{ x: compW / 2 - r, y: compH / 2 }, { x: compW / 2 + r, y: compH / 2 }];
-    }
+  // Global positions array
+  const positions = new Array(n);
+  const IDEAL_SCALE = 60; // pixels per unit graph distance
 
-    // Map global indices → local [0..k-1]
+  // ── Step 2: KK stress majorization per component ──
+  for (const comp of comps) {
+    const k = comp.length;
+    if (k === 0) continue;
+
+    // 2a. BFS all-pairs graph distances within component
     const localIdx = {};
-    for (let i = 0; i < k; i++) localIdx[nodeIDs[i]] = i;
+    for (let li = 0; li < k; li++) localIdx[comp[li]] = li;
 
-    // Build local degree array and edges
-    const deg = new Array(k).fill(0);
-    const localEdges = [];
-    for (const e of edgeList) {
-      const li = localIdx[e.s], lj = localIdx[e.t];
-      if (li !== undefined && lj !== undefined) {
-        deg[li]++; deg[lj]++;
-        localEdges.push({ s: li, t: lj });
-      }
-    }
-
-    // Symmetric normalized Laplacian multiply (L_sym * vec)
-    const sd = i => Math.sqrt(Math.max(deg[i], 1e-6));
-    function LsymMultiply(vec) {
-      const out = new Array(k).fill(0);
-      for (const e of localEdges) {
-        const w = 1.0 / Math.max(sd(e.s) * sd(e.t), 1e-10);
-        out[e.s] += vec[e.s] / Math.max(deg[e.s], 1) - vec[e.t] * w;
-        out[e.t] += vec[e.t] / Math.max(deg[e.t], 1) - vec[e.s] * w;
-      }
-      for (let i = 0; i < k; i++) {
-        if (deg[i] === 0) out[i] = vec[i];
-      }
-      return out;
-    }
-
-    // Power iteration for eigenvector, orthogonal to given list
-    function powerIter(orthoVecs, maxIter) {
-      let v = [];
-      for (let i = 0; i < k; i++) v.push(i % 2 === 0 ? 1 : -1);
-      for (const ov of orthoVecs) {
-        let dot = 0;
-        for (let i = 0; i < k; i++) dot += v[i] * ov[i];
-        for (let i = 0; i < k; i++) v[i] -= dot * ov[i];
-      }
-      if (orthoVecs.length === 0) {
-        let mean = 0;
-        for (let i = 0; i < k; i++) mean += v[i];
-        mean /= k;
-        for (let i = 0; i < k; i++) v[i] -= mean;
-      }
-      for (let iter = 0; iter < maxIter; iter++) {
-        const Lv = LsymMultiply(v);
-        const next = v.map((vi, i) => vi - Lv[i] / 2);
-        for (const ov of orthoVecs) {
-          let dot = 0;
-          for (let i = 0; i < k; i++) dot += next[i] * ov[i];
-          for (let i = 0; i < k; i++) next[i] -= dot * ov[i];
+    const d = Array.from({ length: k }, () => new Array(k).fill(Infinity));
+    for (let li = 0; li < k; li++) {
+      d[li][li] = 0;
+      const q = [li];
+      while (q.length) {
+        const ui = q.shift();
+        for (const v of adj[comp[ui]]) {
+          const vi = localIdx[v];
+          if (vi !== undefined && d[li][vi] === Infinity) {
+            d[li][vi] = d[li][ui] + 1;
+            q.push(vi);
+          }
         }
-        {
-          let mean = 0;
-          for (let i = 0; i < k; i++) mean += next[i];
-          mean /= k;
-          for (let i = 0; i < k; i++) next[i] -= mean;
-        }
-        let norm = 0;
-        for (let i = 0; i < k; i++) norm += next[i] * next[i];
-        norm = Math.sqrt(norm);
-        if (norm < 1e-10) break;
-        for (let i = 0; i < k; i++) v[i] = next[i] / norm;
       }
-      return v;
     }
 
-    // 2nd and 3rd eigenvectors (Fiedler + next)
-const v2 = powerIter([], 5000);
-const v3 = powerIter([v2], 5000);
+    // 2b. Spring weights w_ij = 1 / (d_ij * d_ij)
+    const w = Array.from({ length: k }, () => new Array(k).fill(0));
+    for (let i = 0; i < k; i++)
+      for (let j = 0; j < k; j++)
+        if (i !== j && d[i][j] < Infinity)
+          w[i][j] = 1 / (d[i][j] * d[i][j]);
 
-    // Direct scaling — preserves eigenvector spacing (NO min-max stretch)
-    const scale = Math.min(compW, compH) / Math.sqrt(k) * 0.8;
-    const cx = compW / 2, cy = compH / 2;
-    const xy = [];
+    // 2c. Initialize positions: circle + small random perturbation
+    const localPos = [];
+    const localRadius = Math.min(W, H) / Math.sqrt(Math.max(comps.length, 1)) * 0.3;
     for (let i = 0; i < k; i++) {
-      xy.push({ x: cx + v2[i] * scale, y: cy + v3[i] * scale });
+      const angle = (2 * Math.PI * i) / k;
+      const r = localRadius * (0.9 + 0.2 * Math.random());
+      localPos[i] = {
+        x: r * Math.cos(angle) + (Math.random() - 0.5) * 8,
+        y: r * Math.sin(angle) + (Math.random() - 0.5) * 8
+      };
     }
-    return xy;
+
+    // 2d. Node degrees for iteration order (high-degree nodes first)
+    const deg = comp.map(gi => adj[gi].length);
+    const sortedIdx = Array.from({ length: k }, (_, i) => i)
+      .sort((a, b) => deg[b] - deg[a]);
+
+    // 2e. Stress majorization iterations
+    for (let iter = 0; iter < 100; iter++) {
+      // Move each node toward weighted center of its spring neighbors
+      for (const i of sortedIdx) {
+        let sumW = 0, cx = 0, cy = 0;
+        for (let j = 0; j < k; j++) {
+          if (j === i) continue;
+          sumW += w[i][j];
+          cx += w[i][j] * localPos[j].x;
+          cy += w[i][j] * localPos[j].y;
+        }
+        if (sumW > 1e-10) {
+          cx /= sumW;
+          cy /= sumW;
+          // Step size proportional to average graph distance (L_ij = IDEAL_SCALE * d_ij)
+          let avgDist = 0, cnt = 0;
+          for (let j = 0; j < k; j++) {
+            if (j !== i && d[i][j] < Infinity) { avgDist += d[i][j]; cnt++; }
+          }
+          avgDist = cnt > 0 ? avgDist / cnt : 1;
+          const step = 0.3 * avgDist * IDEAL_SCALE;
+          const dx = cx - localPos[i].x, dy = cy - localPos[i].y;
+          const mag = Math.sqrt(dx * dx + dy * dy) || 1;
+          localPos[i].x += (dx / mag) * Math.min(step, mag);
+          localPos[i].y += (dy / mag) * Math.min(step, mag);
+        }
+      }
+
+      // Collision resolution: push apart nodes closer than 20px
+      for (let i = 0; i < k; i++) {
+        for (let j = i + 1; j < k; j++) {
+          const dx = localPos[j].x - localPos[i].x;
+          const dy = localPos[j].y - localPos[i].y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (dist < 20 && dist > 1e-6) {
+            const push = (20 - dist) / 2;
+            localPos[i].x -= (dx / dist) * push;
+            localPos[i].y -= (dy / dist) * push;
+            localPos[j].x += (dx / dist) * push;
+            localPos[j].y += (dy / dist) * push;
+          }
+        }
+      }
+    }
+
+    // Store positions into global array (still at local origin 0,0)
+    for (let li = 0; li < k; li++) {
+      positions[comp[li]] = { x: localPos[li].x, y: localPos[li].y };
+    }
   }
 
-  // ── Step 3: Arrange components on canvas (strip-packing) ──
+  // ── Step 3: Arrange components on canvas (grid packing) ──
   comps.sort((a, b) => b.length - a.length);
-  const compXY = [];
-  let offsetX = 0, offsetY = 0, rowH = 0;
-  const totalN = comps.reduce((a, c) => a + c.length, 0);
+  let offX = 20, offY = 20, rowH = 0;
+  const PAD = 60;
   for (const comp of comps) {
-    const frac = comp.length / totalN;
-    const compW = Math.sqrt(frac) * W * 1.5;
-    const compH = Math.sqrt(frac) * H * 1.5;
-    const xy = spectralXY_component(comp, edgeList, compW, compH);
-    for (let i = 0; i < comp.length; i++) {
-      xy[i].x += offsetX;
-      xy[i].y += offsetY;
+    if (comp.length === 0) continue;
+    // Compute bounding box of component positions
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const gi of comp) {
+      const p = positions[gi];
+      if (!p) continue;
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
     }
-    compXY.push({ comp, xy });
-    offsetX += compW;
-    if (offsetX > W * 1.2) { offsetX = 0; offsetY += rowH; rowH = 0; }
+    if (minX === Infinity) continue;
+    const compW = maxX - minX, compH = maxY - minY;
+
+    // Wrap to next row if exceeds canvas width
+    if (offX > 20 && offX + compW > W) { offX = 20; offY += rowH + PAD; rowH = 0; }
+
+    // Shift component to grid cell
+    for (const gi of comp) {
+      const p = positions[gi];
+      if (p) { p.x = p.x - minX + offX; p.y = p.y - minY + offY; }
+    }
+    offX += compW + PAD;
     rowH = Math.max(rowH, compH);
   }
 
   // ── Step 4: Apply to Cytoscape ──
-  const finalXY = new Array(n);
-  for (const { comp, xy } of compXY) {
-    for (let i = 0; i < comp.length; i++) {
-      finalXY[comp[i]] = xy[i];
+  for (let i = 0; i < n; i++) {
+    if (positions[i]) {
+      nodes[i].position({ x: positions[i].x, y: positions[i].y });
     }
   }
-  nodes.forEach((node, i) => { node.position({ x: finalXY[i].x, y: finalXY[i].y }); });
-
-  // Visual depth by component index (larger components = larger nodes)
-  nodes.forEach((node, i) => {
-    let compIdx = -1;
-    for (let ci = 0; ci < comps.length; ci++) {
-      if (comps[ci].includes(i)) { compIdx = ci; break; }
-    }
-    const depth = compIdx >= 0 ? compIdx / Math.max(comps.length, 1) : 0.5;
-    node.style("width", 18 + depth * 10);
-    node.style("height", 18 + depth * 10);
-  });
 
   cy.fit(undefined, 50);
+  window.__cy = cy;
 }
 
 // ── Section opacity ──
