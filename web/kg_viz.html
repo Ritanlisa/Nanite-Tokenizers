@@ -235,128 +235,171 @@ function buildCytoscape(nodes, edges) {
   cy.on("tap", evt => { if (evt.target === cy) { document.getElementById("detailPane").innerHTML = '<div class="empty">Click a node or edge to see details</div>'; }});
 }
 
-// ── Custom Force-Directed Layout ──
+// ── Deterministic Spectral Layout ──
+// Laplacian eigenmap for XY + crossing graph coloring for Z-layering
 function runForceLayout(cy) {
   const nodes = cy.nodes(); const n = nodes.length; if (n < 2) return;
   const W = cy.width() || 1200, H = cy.height() || 900;
-  const cx = W/2, cy_h = H/2;
 
-  // Build edge list + adjacency
-  const edgeList = cy.edges().map(e => { return {s: nodes.indexOf(e.source()), t: nodes.indexOf(e.target())}; }).filter(e => e.s >= 0 && e.t >= 0);
-  const adj = Array.from({length:n}, () => new Set());
-  edgeList.forEach(e => { adj[e.s].add(e.t); adj[e.t].add(e.s); });
-  const isAdj = (u,v) => adj[u].has(v);
+  // Build edge list with node indices
+  const edgeList = cy.edges().map(e => ({
+    s: nodes.indexOf(e.source()), t: nodes.indexOf(e.target())
+  })).filter(e => e.s >= 0 && e.t >= 0);
+  const E = edgeList.length;
 
-  // Segment intersection test
-  function segmentsIntersect(a1, a2, b1, b2) {
-    function ccw(p,q,r){return (q.x-p.x)*(r.y-p.y)-(q.y-p.y)*(r.x-p.x);}
-    const o1=ccw(a1,a2,b1),o2=ccw(a1,a2,b2),o3=ccw(b1,b2,a1),o4=ccw(b1,b2,a2);
-    if (o1*o2<0 && o3*o4<0) return true;
-    return false;
+  // ── Step 1: Laplacian Eigenmap for XY coordinates ──
+  function spectralXY(n, edges, W, H) {
+    // Build degree array
+    const deg = new Array(n).fill(0);
+    for (const e of edges) { deg[e.s]++; deg[e.t]++; }
+
+    // Symmetric normalized Laplacian matrix-vector multiply: L_sym * vec
+    // L_sym[i][i] = 1, L_sym[i][j] = -1/sqrt(deg[i]*deg[j]) for edge (i,j)
+    const sd = i => Math.sqrt(Math.max(deg[i], 1e-6));
+    function LsymMultiply(vec) {
+      const out = new Array(n).fill(0);
+      for (const e of edges) {
+        const w = 1.0 / Math.max(sd(e.s) * sd(e.t), 1e-10);
+        out[e.s] += vec[e.s] / Math.max(deg[e.s], 1) - vec[e.t] * w;
+        out[e.t] += vec[e.t] / Math.max(deg[e.t], 1) - vec[e.s] * w;
+      }
+      for (let i = 0; i < n; i++) {
+        if (deg[i] === 0) out[i] = vec[i]; // isolated: no Laplacian force
+      }
+      return out;
+    }
+
+    // Power iteration: find eigenvector, orthogonal to given list
+    function powerIter(orthoVecs, maxIter) {
+      // Seed deterministically: alternating +1/-1 pattern
+      let v = [];
+      for (let i = 0; i < n; i++) v.push(i % 2 === 0 ? 1 : -1);
+      // Orthogonalize against each vector in orthoVecs
+      for (const ov of orthoVecs) {
+        let dot = 0;
+        for (let i = 0; i < n; i++) dot += v[i] * ov[i];
+        for (let i = 0; i < n; i++) v[i] -= dot * ov[i];
+      }
+      // Gram-Schmidt against constant vector (if not already in orthoVecs)
+      if (orthoVecs.length === 0) {
+        let mean = 0;
+        for (let i = 0; i < n; i++) mean += v[i];
+        mean /= n;
+        for (let i = 0; i < n; i++) v[i] -= mean;
+      }
+      for (let iter = 0; iter < maxIter; iter++) {
+        const next = LsymMultiply(v);
+        // Re-orthogonalize against all orthoVecs
+        for (const ov of orthoVecs) {
+          let dot = 0;
+          for (let i = 0; i < n; i++) dot += next[i] * ov[i];
+          for (let i = 0; i < n; i++) next[i] -= dot * ov[i];
+        }
+        // Also against constant vector
+        {
+          let mean = 0;
+          for (let i = 0; i < n; i++) mean += next[i];
+          mean /= n;
+          for (let i = 0; i < n; i++) next[i] -= mean;
+        }
+        // Normalize
+        let norm = 0;
+        for (let i = 0; i < n; i++) norm += next[i] * next[i];
+        norm = Math.sqrt(norm);
+        if (norm < 1e-10) break;
+        for (let i = 0; i < n; i++) v[i] = next[i] / norm;
+      }
+      return v;
+    }
+
+    // Eigenvector for 2nd smallest eigenvalue (Fiedler vector)
+    const v2 = powerIter([], 200);
+    // Eigenvector for 3rd smallest eigenvalue
+    const v3 = powerIter([v2], 200);
+
+    // Map to [0, W] x [0, H]
+    let min2 = Infinity, max2 = -Infinity, min3 = Infinity, max3 = -Infinity;
+    for (let i = 0; i < n; i++) {
+      if (v2[i] < min2) min2 = v2[i]; if (v2[i] > max2) max2 = v2[i];
+    }
+    for (let i = 0; i < n; i++) {
+      if (v3[i] < min3) min3 = v3[i]; if (v3[i] > max3) max3 = v3[i];
+    }
+    const r2 = max2 - min2, r3 = max3 - min3;
+    const xy = [];
+    for (let i = 0; i < n; i++) {
+      const x = r2 > 1e-10 ? ((v2[i] - min2) / r2) * (W - 80) + 40 : W / 2;
+      const y = r3 > 1e-10 ? ((v3[i] - min3) / r3) * (H - 80) + 40 : H / 2;
+      xy.push({x, y});
+    }
+    return xy;
   }
-  // Distance from point p to segment (a,b)
-  function distToSeg(p,a,b){const dx=b.x-a.x,dy=b.y-a.y;const t=Math.max(0,Math.min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/(dx*dx+dy*dy||1)));const rx=a.x+t*dx,ry=a.y+t*dy;return Math.sqrt((p.x-rx)**2+(p.y-ry)**2);}
 
-  // Initialize: use a circle for large n, random for small
-  const pos = [];
+  // ── Step 2: Crossing Graph Coloring for Z-layering ──
+  function checkCross(a1, a2, b1, b2) {
+    function ccw(p, q, r) { return (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x); }
+    const o1 = ccw(a1, a2, b1), o2 = ccw(a1, a2, b2);
+    const o3 = ccw(b1, b2, a1), o4 = ccw(b1, b2, a2);
+    return o1 * o2 < 0 && o3 * o4 < 0;
+  }
+
+  const xy = spectralXY(n, edgeList, W, H);
+
+  // Build crossing graph among edges
+  const crossAdj = Array.from({length: E}, () => []);
+  for (let i = 0; i < E; i++) {
+    for (let j = i + 1; j < E; j++) {
+      const ea = edgeList[i], eb = edgeList[j];
+      if (ea.s === eb.s || ea.s === eb.t || ea.t === eb.s || ea.t === eb.t) continue;
+      const a1 = xy[ea.s], a2 = xy[ea.t], b1 = xy[eb.s], b2 = xy[eb.t];
+      if (checkCross(a1, a2, b1, b2)) {
+        crossAdj[i].push(j); crossAdj[j].push(i);
+      }
+    }
+  }
+
+  // Welsh-Powell: greedy coloring by descending degree
+  const order = Array.from({length: E}, (_, i) => i)
+    .sort((a, b) => crossAdj[b].length - crossAdj[a].length);
+  const color = new Array(E).fill(-1);
+  let maxColor = 0;
+  for (const ei of order) {
+    const used = new Set();
+    for (const nb of crossAdj[ei]) { if (color[nb] >= 0) used.add(color[nb]); }
+    let c = 0; while (used.has(c)) c++;
+    color[ei] = c;
+    if (c > maxColor) maxColor = c;
+  }
+
+  // Assign Z = color * layerHeight; average over incident edges per node
+  const layerH = 3;
+  const z = new Array(n).fill(0);
+  const zCount = new Array(n).fill(0);
+  for (let i = 0; i < E; i++) {
+    z[edgeList[i].s] += color[i] * layerH;
+    z[edgeList[i].t] += color[i] * layerH;
+    zCount[edgeList[i].s]++;
+    zCount[edgeList[i].t]++;
+  }
   for (let i = 0; i < n; i++) {
-    const angle = (2 * Math.PI * i) / n + (Math.random()-0.5)*0.3;
-    const r = Math.min(W,H)*0.35 * (0.5 + 0.5*Math.random());
-    pos.push({ x: cx + r*Math.cos(angle), y: cy_h + r*Math.sin(angle) });
+    z[i] = zCount[i] > 0 ? z[i] / zCount[i] : 0;
   }
 
-  const IDEAL_LEN = Math.min(W,H) / Math.sqrt(n) * 1.8;
-  const MIN_DIST = IDEAL_LEN * 0.7;
-  const REP_RADIUS = IDEAL_LEN * 3;
-  let step = IDEAL_LEN * 0.3, temp = 2.0;
-  const T = Math.max(300, n * 2);
-  const ATTR_STR = 0.12, REP_STR = 80, CROSS_STR = 5;
+  // ── Step 3: Apply to Cytoscape ──
+  nodes.forEach((node, i) => { node.position({x: xy[i].x, y: xy[i].y}); });
 
-  for (let iter = 0; iter < T; iter++) {
-    // (a) Hard collision projection
-    for (let u = 0; u < n; u++) {
-      for (let v = u + 1; v < n; v++) {
-        const dx = pos[v].x - pos[u].x, dy = pos[v].y - pos[u].y;
-        let d = Math.sqrt(dx*dx+dy*dy);
-        if (d < MIN_DIST && d > 0.001) {
-          const overlap = MIN_DIST - d;
-          const nx = dx/d, ny = dy/d;
-          pos[u].x -= nx * overlap * 0.5; pos[u].y -= ny * overlap * 0.5;
-          pos[v].x += nx * overlap * 0.5; pos[v].y += ny * overlap * 0.5;
-        }
-      }
-    }
-    // (b) Compute forces
-    const F = Array.from({length:n}, () => ({x:0,y:0}));
-
-    // Edge spring attraction (target: IDEAL_LEN)
-    edgeList.forEach(e => {
-      const dx = pos[e.t].x - pos[e.s].x, dy = pos[e.t].y - pos[e.s].y;
-      const d = Math.max(Math.sqrt(dx*dx+dy*dy), 0.01);
-      const force = ATTR_STR * (d - IDEAL_LEN);
-      const fx = force * (dx/d), fy = force * (dy/d);
-      F[e.s].x += fx; F[e.s].y += fy;
-      F[e.t].x -= fx; F[e.t].y -= fy;
-    });
-
-    // Edge crossing penalty (non-adjacent edge pairs)
-    if (iter % 3 === 0 && edgeList.length < 2000) {
-      for (let i = 0; i < edgeList.length; i++) {
-        for (let j = i + 1; j < edgeList.length; j++) {
-          const ea = edgeList[i], eb = edgeList[j];
-          const as = ea.s, at = ea.t, bs = eb.s, bt = eb.t;
-          if (as === bs || as === bt || at === bs || at === bt) continue;
-          const a1 = pos[as], a2 = pos[at], b1 = pos[bs], b2 = pos[bt];
-          if (segmentsIntersect(a1, a2, b1, b2)) {
-            // Push endpoints apart perpendicular to crossing
-            const mx = (a1.x + a2.x + b1.x + b2.x) / 4;
-            const my = (a1.y + a2.y + b1.y + b2.y) / 4;
-            for (const p of [as, at, bs, bt]) {
-              const dx = pos[p].x - mx, dy = pos[p].y - my;
-              const dd = Math.max(0.01, Math.sqrt(dx*dx+dy*dy));
-              const f = CROSS_STR * temp;
-              F[p].x += f * (dx/dd); F[p].y += f * (dy/dd);
-            }
-          }
-        }
-      }
-    }
-
-    // Vertex repulsion (global)
-    for (let u = 0; u < n; u++) {
-      for (let v = u + 1; v < n; v++) {
-        const dx = pos[v].x - pos[u].x, dy = pos[v].y - pos[u].y;
-        const d = Math.max(Math.sqrt(dx*dx+dy*dy), 0.01);
-        if (d < REP_RADIUS) {
-          const force = REP_STR / (d * d);
-          const fx = force*(dx/d), fy = force*(dy/d);
-          F[u].x -= fx; F[u].y -= fy;
-          F[v].x += fx; F[v].y += fy;
-        }
-      }
-    }
-    // Center gravity
-    for (let i = 0; i < n; i++) {
-      F[i].x += (cx - pos[i].x) * 0.001;
-      F[i].y += (cy_h - pos[i].y) * 0.001;
-    }
-
-    // (c) Update positions
-    for (let i = 0; i < n; i++) {
-      const flen = Math.sqrt(F[i].x*F[i].x + F[i].y*F[i].y);
-      if (flen > 50) { F[i].x *= 50/flen; F[i].y *= 50/flen; }
-      pos[i].x += step * F[i].x;
-      pos[i].y += step * F[i].y;
-      pos[i].x = Math.max(10, Math.min(W-10, pos[i].x));
-      pos[i].y = Math.max(10, Math.min(H-10, pos[i].y));
-    }
-    // (d) Anneal
-    temp *= 0.985;
-    step *= 0.995;
+  // Visual depth: higher Z = slightly smaller node (perspective cue)
+  let maxZ = -Infinity, minZ = Infinity;
+  for (let i = 0; i < n; i++) {
+    if (z[i] > maxZ) maxZ = z[i]; if (z[i] < minZ) minZ = z[i];
   }
+  const zRange = Math.max(maxZ - minZ, 1);
+  nodes.forEach((node, i) => {
+    const depth = 0.5 + 0.3 * (z[i] - minZ) / zRange;
+    node.style("width", 20 + depth * 8);
+    node.style("height", 20 + depth * 8);
+  });
 
-  // Apply final positions
-  nodes.forEach((node, i) => { node.position({x: pos[i].x, y: pos[i].y}); });
   cy.fit(undefined, 35);
 }
 
