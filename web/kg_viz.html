@@ -277,166 +277,180 @@ function buildCytoscape(nodes, edges) {
 function runForceLayout(cy) {
   const nodes = cy.nodes();
   const n = nodes.length;
-  if (n < 2) {
-    cy.fit(undefined, 50);
-    return;
-  }
+  if (n < 2) { cy.fit(undefined, 50); return; }
   const W = cy.width() || 1200, H = cy.height() || 900;
 
-  // ── Build adjacency list (global indices) ──
+  // Build adjacency + edge set
   const adj = Array.from({ length: n }, () => []);
+  const edgeSet = new Set();
   cy.edges().forEach(e => {
     const s = nodes.indexOf(e.source()), t = nodes.indexOf(e.target());
-    if (s >= 0 && t >= 0 && s !== t) { adj[s].push(t); adj[t].push(s); }
+    if (s >= 0 && t >= 0 && s !== t) {
+      adj[s].push(t); adj[t].push(s);
+      edgeSet.add(Math.min(s, t) + ',' + Math.max(s, t));
+    }
   });
 
-  // ── Step 1: Find connected components (BFS) ──
+  // Find connected components (BFS)
   const visited = new Array(n).fill(false);
   const comps = [];
   for (let i = 0; i < n; i++) {
     if (visited[i]) continue;
-    const comp = [], q = [i];
-    visited[i] = true;
+    const comp = [], q = [i]; visited[i] = true;
     while (q.length) {
       const u = q.shift(); comp.push(u);
-      for (const v of adj[u]) {
-        if (!visited[v]) { visited[v] = true; q.push(v); }
-      }
+      for (const v of adj[u]) if (!visited[v]) { visited[v] = true; q.push(v); }
     }
     comps.push(comp);
   }
 
-  // Global positions array
+  const LEVEL_SPACING = 80;
   const positions = new Array(n);
-  const IDEAL_SCALE = 60; // pixels per unit graph distance
+  // per-component: descendants of tree node (child indices within comp)
+  const compChildren = new Map(); // key: global node idx, value: [global child idx]
 
-  // ── Step 2: KK stress majorization per component ──
   for (const comp of comps) {
     const k = comp.length;
     if (k === 0) continue;
 
-    // 2a. BFS all-pairs graph distances within component
-    const localIdx = {};
-    for (let li = 0; li < k; li++) localIdx[comp[li]] = li;
+    // ── Step 1: Prim's MST ──
+    // pick highest-degree node as root
+    let root = comp[0];
+    for (const i of comp) if (adj[i].length > adj[root].length) root = i;
 
-    const d = Array.from({ length: k }, () => new Array(k).fill(Infinity));
-    for (let li = 0; li < k; li++) {
-      d[li][li] = 0;
-      const q = [li];
-      while (q.length) {
-        const ui = q.shift();
-        for (const v of adj[comp[ui]]) {
-          const vi = localIdx[v];
-          if (vi !== undefined && d[li][vi] === Infinity) {
-            d[li][vi] = d[li][ui] + 1;
-            q.push(vi);
+    const inTree = new Set(); inTree.add(root);
+    const mstEdges = []; // [{parent, child}]
+    const remaining = new Set(comp); remaining.delete(root);
+    while (remaining.size > 0) {
+      let best = null;
+      for (const u of inTree) {
+        for (const v of adj[u]) {
+          if (!inTree.has(v) && remaining.has(v)) { best = { parent: u, child: v }; break; }
+        }
+        if (best) break;
+      }
+      if (!best) break; // disconnected remnant (should not happen)
+      inTree.add(best.child);
+      remaining.delete(best.child);
+      mstEdges.push(best);
+    }
+
+    // Build tree children map (global indices)
+    for (const e of mstEdges) {
+      if (!compChildren.has(e.parent)) compChildren.set(e.parent, []);
+      compChildren.get(e.parent).push(e.child);
+    }
+
+    // Build MST edge set for fast lookup
+    const mstEdgeSet = new Set();
+    for (const e of mstEdges) mstEdgeSet.add(Math.min(e.parent, e.child) + ',' + Math.max(e.parent, e.child));
+
+    // ── Step 2: Radial tree layout ──
+    function layoutSubtree(u, x, y, angleStart, angleEnd, level) {
+      positions[u] = { x, y };
+      const ch = compChildren.get(u) || [];
+      if (ch.length === 0) return;
+      const r = LEVEL_SPACING * (level + 1);
+      const angleRange = angleEnd - angleStart;
+      const perChild = angleRange / ch.length;
+      for (let ci = 0; ci < ch.length; ci++) {
+        const mid = angleStart + perChild * (ci + 0.5);
+        const cx = x + r * Math.cos(mid);
+        const cy = y + r * Math.sin(mid);
+        layoutSubtree(ch[ci], cx, cy, angleStart + perChild * ci, angleStart + perChild * (ci + 1), level + 1);
+      }
+    }
+    layoutSubtree(root, 0, 0, -Math.PI, Math.PI, 0);
+
+    // ── Step 3: Rotate subtrees to minimize non-tree edge distances ──
+    // collect non-MST edges within component (global index pairs)
+    const nonTreeEdges = [];
+    for (const u of comp) {
+      for (const v of adj[u]) {
+        if (u >= v) continue;
+        const key = u + ',' + v;
+        if (edgeSet.has(key) && !mstEdgeSet.has(key)) {
+          nonTreeEdges.push({ u, v });
+        }
+      }
+    }
+    if (nonTreeEdges.length === 0) continue;
+
+    // subtree set: all descendants of node within this component
+    function subtreeSet(node) {
+      const s = new Set(); s.add(node);
+      const stack = [node];
+      while (stack.length) {
+        const cur = stack.pop();
+        for (const ch of (compChildren.get(cur) || [])) { s.add(ch); stack.push(ch); }
+      }
+      return s;
+    }
+
+    for (let pass = 0; pass < 3; pass++) {
+      for (const e of mstEdges) {
+        const parent = e.parent;
+        const ch = compChildren.get(parent) || [];
+        if (ch.length <= 1) continue;
+        const subtree = subtreeSet(parent);
+        // rotate entire subtree around parent's position
+        const px = positions[parent].x, py = positions[parent].y;
+        let bestAngle = 0, bestDist = Infinity;
+        for (const da of [-30, -15, 0, 15, 30]) {
+          const rad = da * Math.PI / 180;
+          const cosA = Math.cos(rad), sinA = Math.sin(rad);
+          let totalDist = 0;
+          for (const { u, v } of nonTreeEdges) {
+            // apply rotation if node is in this parent's subtree
+            const pu = positions[u], pv = positions[v];
+            let ux = pu.x, uy = pu.y, vx = pv.x, vy = pv.y;
+            if (subtree.has(u)) {
+              const dx = pu.x - px, dy = pu.y - py;
+              ux = px + dx * cosA - dy * sinA;
+              uy = py + dx * sinA + dy * cosA;
+            }
+            if (subtree.has(v)) {
+              const dx = pv.x - px, dy = pv.y - py;
+              vx = px + dx * cosA - dy * sinA;
+              vy = py + dx * sinA + dy * cosA;
+            }
+            const edx = ux - vx, edy = uy - vy;
+            totalDist += Math.sqrt(edx * edx + edy * edy);
+          }
+          if (totalDist < bestDist) { bestDist = totalDist; bestAngle = rad; }
+        }
+        // Apply best rotation to subtree nodes (skip root)
+        if (bestAngle !== 0) {
+          const cosA = Math.cos(bestAngle), sinA = Math.sin(bestAngle);
+          for (const node of subtree) {
+            if (node === parent) continue;
+            const p = positions[node];
+            const dx = p.x - px, dy = p.y - py;
+            p.x = px + dx * cosA - dy * sinA;
+            p.y = py + dx * sinA + dy * cosA;
           }
         }
       }
     }
-
-    // 2b. Spring weights w_ij = 1 / (d_ij * d_ij)
-    const w = Array.from({ length: k }, () => new Array(k).fill(0));
-    for (let i = 0; i < k; i++)
-      for (let j = 0; j < k; j++)
-        if (i !== j && d[i][j] < Infinity)
-          w[i][j] = 1 / (d[i][j] * d[i][j]);
-
-    // 2c. Initialize positions: circle + small random perturbation
-    const localPos = [];
-    const localRadius = Math.min(W, H) / Math.sqrt(Math.max(comps.length, 1)) * 0.3;
-    for (let i = 0; i < k; i++) {
-      const angle = (2 * Math.PI * i) / k;
-      const r = localRadius * (0.9 + 0.2 * Math.random());
-      localPos[i] = {
-        x: r * Math.cos(angle) + (Math.random() - 0.5) * 8,
-        y: r * Math.sin(angle) + (Math.random() - 0.5) * 8
-      };
-    }
-
-    // 2d. Node degrees for iteration order (high-degree nodes first)
-    const deg = comp.map(gi => adj[gi].length);
-    const sortedIdx = Array.from({ length: k }, (_, i) => i)
-      .sort((a, b) => deg[b] - deg[a]);
-
-    // 2e. Stress majorization iterations
-    for (let iter = 0; iter < 100; iter++) {
-      // Move each node toward weighted center of its spring neighbors
-      for (const i of sortedIdx) {
-        let sumW = 0, nx = 0, ny = 0;
-        for (let j = 0; j < k; j++) {
-          if (j === i) continue;
-          const L = IDEAL_SCALE * d[i][j];  // ideal spring length
-          const dx = localPos[i].x - localPos[j].x;
-          const dy = localPos[i].y - localPos[j].y;
-          const dist = Math.sqrt(dx * dx + dy * dy) || 1e-6;
-          // desired position for i relative to j:
-          // p_j + (p_i - p_j) * L / dist = p_j + (dx,dy) * L / dist
-          const desiredX = localPos[j].x + dx * L / dist;
-          const desiredY = localPos[j].y + dy * L / dist;
-          const wij = w[i][j];
-          nx += wij * desiredX;
-          ny += wij * desiredY;
-          sumW += wij;
-        }
-        if (sumW > 1e-10) {
-          localPos[i].x = nx / sumW;
-          localPos[i].y = ny / sumW;
-        }
-      }
-
-      // Collision resolution: push apart nodes closer than 20px
-      for (let i = 0; i < k; i++) {
-        for (let j = i + 1; j < k; j++) {
-          const dx = localPos[j].x - localPos[i].x;
-          const dy = localPos[j].y - localPos[i].y;
-          const dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist < 20 && dist > 1e-6) {
-            const push = (20 - dist) / 2;
-            localPos[i].x -= (dx / dist) * push;
-            localPos[i].y -= (dy / dist) * push;
-            localPos[j].x += (dx / dist) * push;
-            localPos[j].y += (dy / dist) * push;
-          }
-        }
-      }
-    }
-
-    // Store positions into global array (still at local origin 0,0)
-    for (let li = 0; li < k; li++) {
-      positions[comp[li]] = { x: localPos[li].x, y: localPos[li].y };
-    }
   }
 
-  // ── Step 3: Center the graph on canvas ──
-  // Simply center the largest component's positions on the canvas
-  comps.sort((a, b) => b.length - a.length);
-  if (comps.length > 0) {
-    const mainComp = comps[0];
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const gi of mainComp) {
-      const p = positions[gi];
-      if (!p) continue;
-      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
-      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
-    }
-    const mainW = maxX - minX || 1, mainH = maxY - minY || 1;
-    const scale = Math.min((W - 100) / mainW, (H - 100) / mainH, 1.5);
-    // Center and scale all components
-    for (const comp of comps) {
-      for (const gi of comp) {
-        const p = positions[gi];
-        if (!p) continue;
-        p.x = (p.x - (minX + maxX) / 2) * scale + W / 2;
-        p.y = (p.y - (minY + maxY) / 2) * scale + H / 2;
-      }
-    }
-  }
-
-  // ── Step 4: Apply to Cytoscape ──
+  // ── Center and scale to canvas ──
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (let i = 0; i < n; i++) {
-    if (positions[i]) {
-      nodes[i].position({ x: positions[i].x, y: positions[i].y });
+    const p = positions[i]; if (!p) continue;
+    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+  }
+  const gw = maxX - minX || 1, gh = maxY - minY || 1;
+  const scale = Math.min((W - 100) / gw, (H - 100) / gh, 2);
+  const cx = (minX + maxX) / 2, cy_center = (minY + maxY) / 2;
+  for (let i = 0; i < n; i++) {
+    const p = positions[i];
+    if (p) {
+      nodes[i].position({
+        x: (p.x - cx) * scale + W / 2,
+        y: (p.y - cy_center) * scale + H / 2
+      });
     }
   }
 
