@@ -1726,6 +1726,11 @@ def create_app() -> FastAPI:
             "PartUsage": "#6bd1f5", "PortUsage": "#f5c26b", "AttributeUsage": "#a78bfa",
             "ConnectionUsage": "#f87171", "InterfaceUsage": "#fb923c", "AllocationUsage": "#818cf8",
             "ContainmentUsage": "#34d399", "CompositionUsage": "#f59e0b", "ReferenceUsage": "#94a3b8",
+            "GeneralizationUsage": "#06b6d4", "DependencyUsage": "#8b5cf6", "AbstractionUsage": "#ec4899",
+            "RealizationUsage": "#10b981", "DeriveUsage": "#f97316", "TraceUsage": "#6366f1",
+            "DeriveReqtUsage": "#14b8a6", "RefineUsage": "#d946ef", "SatisfyUsage": "#22c55e",
+            "VerifyUsage": "#eab308", "CopyUsage": "#64748b", "UseCaseAssociationUsage": "#0ea5e9",
+            "UseCaseIncludeUsage": "#84cc16", "UseCaseExtendUsage": "#ef4444",
         }
 
         entities = mgr.get_all_entities()
@@ -1800,6 +1805,11 @@ def create_app() -> FastAPI:
 
         # Build edge list from relations; dedup by unordered pair, prefer Allocation>Connection>Interface
         TYPE_EDGE_PRIORITY = {
+            "GeneralizationUsage": 3, "DependencyUsage": 3, "AbstractionUsage": 2,
+            "RealizationUsage": 3, "DeriveUsage": 2, "TraceUsage": 2,
+            "DeriveReqtUsage": 2, "RefineUsage": 3, "SatisfyUsage": 3,
+            "VerifyUsage": 3, "CopyUsage": 1,
+            "UseCaseAssociationUsage": 2, "UseCaseIncludeUsage": 2, "UseCaseExtendUsage": 2,
             "ContainmentUsage": 5, "CompositionUsage": 5, "ReferenceUsage": 4,
             "AllocationUsage": 3, "AllocationDef": 3,
             "ConnectionUsage": 2, "ConnectionDef": 2,

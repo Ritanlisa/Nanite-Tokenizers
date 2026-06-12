@@ -105,12 +105,26 @@ EXTRACTION_CANDIDATES_PROMPT = """你是一个技术文档实体提取器。阅�
 - CommandDef: Shell命令、CLI操作、工具命令（如 yhst, smu_tranfer_cmd, ncid, lspci）
 
 ## 关系类型
-- Connection: 物理连接或数据流关系（A连接到B，双向）
-- Interface: 接口实现关系（A实现B的接口，单向）
-- Allocation: 功能/资源分配关系（将A分配给B，单向）
-- Containment: 包含关系（整体包含部分，层级分解）
-- Composition: 组合关系（强整体-部分，部分不能脱离整体）
-- Reference: 引用关系（弱交叉引用，A引用B）
+- Connection: 物理连接或数据流关系（双向）
+- Interface: 接口实现关系（单向）
+- Allocation: 功能/资源分配关系（单向）
+- Containment: 包含关系（层级分解）
+- Composition: 组合关系（强整体-部分）
+- Reference: 引用关系（弱交叉引用）
+- Generalization: 泛化关系（继承）
+- Dependency: 依赖关系
+- Abstraction: 抽象关系
+- Realization: 实现关系
+- Derive: 派生关系
+- Trace: 跟踪关系（追溯）
+- DeriveReqt: 派生需求关系
+- Refine: 细化关系
+- Satisfy: 满足关系
+- Verify: 验证关系
+- Copy: 复制关系
+- UseCaseAssociation: 用例关联
+- UseCaseInclude: 用例包含
+- UseCaseExtend: 用例扩展
 
 ## 示例
 输入文本: "系统提供1个FT计算柜（1024个处理器）和10个MT加速柜（共10240个加速器）"
@@ -143,7 +157,7 @@ ENRICHMENT_JSON_PROMPT = """你是SysML v2知识图谱专家。审查已有KG实
 ## 输出格式
 输出一个JSON数组，每个元素是一个富化操作：
 
-关系操作: {"action":"add_relation","type":"allocation|connection|interface|containment|composition|reference","source":"实体A","target":"实体B","description":"关系描述"}
+关系操作: {"action":"add_relation","type":"allocation|connection|interface|containment|composition|reference|generalization|dependency|abstraction|realization|derive|trace|derivereqt|refine|satisfy|verify|copy|usecaseassociation|usecaseinclude|usecaseextend","source":"实体A","target":"实体B","description":"关系描述"}
 别名操作: {"action":"add_alias","entity":"实体名","alias":"别名"}
 更新操作: {"action":"update_entity","entity":"实体名","append_description":"补充描述"}
 
@@ -1625,15 +1639,30 @@ class KGBuildAgent:
 实体B: {t_name}
 共同出现的章节: {', '.join(shared_sections[:3])}
 
-关系类型:
-- allocation: A是B的一部分, B包含A, A属于B系统
+请将以下两实体关系归类为以下类型之一:
+- allocation: A是B的一部分, B包含A
 - connection: A和B之间有物理连接或数据流
-- containment: A物理容纳B, B在A内部
-- composition: A由B组成, B是A的构成元素
-- reference: A引用B, A依赖B的定义或属性
-- None: 两者无直接关系
+- interface: A实现B的接口
+- containment: A包含B（层级分解）
+- composition: A由B组成（强整体-部分）
+- reference: A引用B（弱交叉引用）
+- generalization: A继承B
+- dependency: A依赖B
+- abstraction: A抽象B
+- realization: A实现B
+- derive: A派生自B
+- trace: A追溯到B
+- derivereqt: 需求A派生自B
+- refine: A细化B
+- satisfy: A满足B
+- verify: A验证B
+- copy: A复制B
+- usecaseassociation: 用例关联
+- usecaseinclude: 用例包含
+- usecaseextend: 用例扩展
+- none: 两者无直接关系
 
-请只回答一个词: allocation, connection, containment, composition, reference, 或 None"""
+请只回答一个词: allocation, connection, interface, containment, composition, reference, generalization, dependency, abstraction, realization, derive, trace, derivereqt, refine, satisfy, verify, copy, usecaseassociation, usecaseinclude, usecaseextend, 或 none"""
                 try:
                     t_call = time.time()
                     async with httpx.AsyncClient(timeout=120) as client:

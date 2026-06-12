@@ -437,6 +437,230 @@ class ReferenceUsage(ConnectionUsage):
             return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
         return ConnectionUsage.to_text(self, indent)
 
+class GeneralizationUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "generalization"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class DependencyUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "dependency"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class AbstractionUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "abstraction"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class RealizationUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "realization"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class DeriveUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "derive"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class TraceUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "trace"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class DeriveReqtUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "derivereqt"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class RefineUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "refine"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class SatisfyUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "satisfy"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class VerifyUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "verify"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class CopyUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "copy"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class UseCaseAssociationUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "usecaseassociation"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class UseCaseIncludeUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "usecaseinclude"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
+class UseCaseExtendUsage(ConnectionUsage):
+    def usage_kind(self) -> str:
+        return "usecaseextend"
+
+    def to_text(self, indent: int = 0) -> str:
+        prefix = "    " * indent
+        if len(self.ends) == 2 and (self.name or self.short_name):
+            e1, e2 = self.ends
+            name_part = self._name_part()
+            spec = self.specialization_part()
+            header = f"{prefix}{self.usage_kind()} {name_part}{spec}"
+            body_prefix = "    " * (indent + 1)
+            body_line = f"connect {SysMLElement._quote(e1.ref)} to {SysMLElement._quote(e2.ref)};"
+            return f"{header} {{\n{body_prefix}{body_line}\n{prefix}}}"
+        return ConnectionUsage.to_text(self, indent)
+
 class CommandDef(Definition):
     """运维命令定义"""
     def __init__(self, name: Optional[str] = None, short_name: Optional[str] = None,

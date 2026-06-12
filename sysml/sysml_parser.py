@@ -39,6 +39,20 @@ SYML_GRAMMAR = r"""
               | "containment" -> containment_usage
               | "composition" -> composition_usage
               | "reference" -> reference_usage
+              | "generalization" -> generalization_usage
+              | "dependency" -> dependency_usage
+              | "abstraction" -> abstraction_usage
+              | "realization" -> realization_usage
+              | "derive" -> derive_usage
+              | "trace" -> trace_usage
+              | "derivereqt" -> derivereqt_usage
+              | "refine" -> refine_usage
+              | "satisfy" -> satisfy_usage
+              | "verify" -> verify_usage
+              | "copy" -> copy_usage
+              | "usecaseassociation" -> usecaseassociation_usage
+              | "usecaseinclude" -> usecaseinclude_usage
+              | "usecaseextend" -> usecaseextend_usage
               | "requirement" -> requirement_usage
     usage_body: "{" member* "}" | ";"
 
@@ -228,6 +242,21 @@ class SysMLTransformer(Transformer):
 
     def reference_usage(self):
         return ReferenceUsage()
+
+    def generalization_usage(self): return GeneralizationUsage()
+    def dependency_usage(self): return DependencyUsage()
+    def abstraction_usage(self): return AbstractionUsage()
+    def realization_usage(self): return RealizationUsage()
+    def derive_usage(self): return DeriveUsage()
+    def trace_usage(self): return TraceUsage()
+    def derivereqt_usage(self): return DeriveReqtUsage()
+    def refine_usage(self): return RefineUsage()
+    def satisfy_usage(self): return SatisfyUsage()
+    def verify_usage(self): return VerifyUsage()
+    def copy_usage(self): return CopyUsage()
+    def usecaseassociation_usage(self): return UseCaseAssociationUsage()
+    def usecaseinclude_usage(self): return UseCaseIncludeUsage()
+    def usecaseextend_usage(self): return UseCaseExtendUsage()
 
     def requirement_usage(self):
         return RequirementUsage()

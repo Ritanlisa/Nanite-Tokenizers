@@ -111,10 +111,15 @@ const TYPE_COLORS = {
   AllocationDef:"#818cf8",CommandDef:"#f472b6",RequirementDef:"#94a3b8",
   PartUsage:"#6bd1f5",PortUsage:"#f5c26b",AttributeUsage:"#a78bfa",
   ConnectionUsage:"#f87171",InterfaceUsage:"#fb923c",AllocationUsage:"#818cf8",
-  ContainmentUsage:"#34d399",CompositionUsage:"#f59e0b",ReferenceUsage:"#94a3b8"
+  ContainmentUsage:"#34d399",CompositionUsage:"#f59e0b",ReferenceUsage:"#94a3b8",
+  GeneralizationUsage:"#06b6d4",DependencyUsage:"#8b5cf6",AbstractionUsage:"#ec4899",
+  RealizationUsage:"#10b981",DeriveUsage:"#f97316",TraceUsage:"#6366f1",
+  DeriveReqtUsage:"#14b8a6",RefineUsage:"#d946ef",SatisfyUsage:"#22c55e",
+  VerifyUsage:"#eab308",CopyUsage:"#64748b",UseCaseAssociationUsage:"#0ea5e9",
+  UseCaseIncludeUsage:"#84cc16",UseCaseExtendUsage:"#ef4444"
 };
 // Directional types: Allocation,Interface,Containment,Composition get arrows; Connection,Reference no arrows
-const DIRECTIONAL = new Set(["AllocationUsage","AllocationDef","InterfaceUsage","InterfaceDef","ContainmentUsage","CompositionUsage"]);
+const DIRECTIONAL = new Set(["AllocationUsage","AllocationDef","InterfaceUsage","InterfaceDef","ContainmentUsage","CompositionUsage","GeneralizationUsage","DependencyUsage","AbstractionUsage","RealizationUsage","DeriveUsage","TraceUsage","DeriveReqtUsage","RefineUsage","SatisfyUsage","VerifyUsage","CopyUsage","UseCaseAssociationUsage","UseCaseIncludeUsage","UseCaseExtendUsage"]);
 
 async function loadDatabases() {
   try {
@@ -220,10 +225,38 @@ function buildCytoscape(nodes, edges) {
       {selector:"edge[type='ContainmentUsage'],edge[type='ContainmentDef']",style:{"line-color":"#34d399"}},
       {selector:"edge[type='CompositionUsage'],edge[type='CompositionDef']",style:{"line-color":"#f59e0b"}},
       {selector:"edge[type='ReferenceUsage'],edge[type='ReferenceDef']",style:{"line-color":"#94a3b8"}},
+      {selector:"edge[type='GeneralizationUsage']",style:{"line-color":"#06b6d4"}},
+      {selector:"edge[type='DependencyUsage']",style:{"line-color":"#8b5cf6"}},
+      {selector:"edge[type='AbstractionUsage']",style:{"line-color":"#ec4899"}},
+      {selector:"edge[type='RealizationUsage']",style:{"line-color":"#10b981"}},
+      {selector:"edge[type='DeriveUsage']",style:{"line-color":"#f97316"}},
+      {selector:"edge[type='TraceUsage']",style:{"line-color":"#6366f1"}},
+      {selector:"edge[type='DeriveReqtUsage']",style:{"line-color":"#14b8a6"}},
+      {selector:"edge[type='RefineUsage']",style:{"line-color":"#d946ef"}},
+      {selector:"edge[type='SatisfyUsage']",style:{"line-color":"#22c55e"}},
+      {selector:"edge[type='VerifyUsage']",style:{"line-color":"#eab308"}},
+      {selector:"edge[type='CopyUsage']",style:{"line-color":"#64748b"}},
+      {selector:"edge[type='UseCaseAssociationUsage']",style:{"line-color":"#0ea5e9"}},
+      {selector:"edge[type='UseCaseIncludeUsage']",style:{"line-color":"#84cc16"}},
+      {selector:"edge[type='UseCaseExtendUsage']",style:{"line-color":"#ef4444"}},
       {selector:"edge[directional][type='InterfaceUsage'],edge[directional][type='InterfaceDef']",style:{"target-arrow-color":"#fb923c"}},
       {selector:"edge[directional][type='AllocationUsage'],edge[directional][type='AllocationDef']",style:{"target-arrow-color":"#818cf8"}},
       {selector:"edge[directional][type='ContainmentUsage'],edge[directional][type='ContainmentDef']",style:{"target-arrow-color":"#34d399"}},
       {selector:"edge[directional][type='CompositionUsage'],edge[directional][type='CompositionDef']",style:{"target-arrow-color":"#f59e0b"}},
+      {selector:"edge[directional][type='GeneralizationUsage']",style:{"target-arrow-color":"#06b6d4"}},
+      {selector:"edge[directional][type='DependencyUsage']",style:{"target-arrow-color":"#8b5cf6"}},
+      {selector:"edge[directional][type='AbstractionUsage']",style:{"target-arrow-color":"#ec4899"}},
+      {selector:"edge[directional][type='RealizationUsage']",style:{"target-arrow-color":"#10b981"}},
+      {selector:"edge[directional][type='DeriveUsage']",style:{"target-arrow-color":"#f97316"}},
+      {selector:"edge[directional][type='TraceUsage']",style:{"target-arrow-color":"#6366f1"}},
+      {selector:"edge[directional][type='DeriveReqtUsage']",style:{"target-arrow-color":"#14b8a6"}},
+      {selector:"edge[directional][type='RefineUsage']",style:{"target-arrow-color":"#d946ef"}},
+      {selector:"edge[directional][type='SatisfyUsage']",style:{"target-arrow-color":"#22c55e"}},
+      {selector:"edge[directional][type='VerifyUsage']",style:{"target-arrow-color":"#eab308"}},
+      {selector:"edge[directional][type='CopyUsage']",style:{"target-arrow-color":"#64748b"}},
+      {selector:"edge[directional][type='UseCaseAssociationUsage']",style:{"target-arrow-color":"#0ea5e9"}},
+      {selector:"edge[directional][type='UseCaseIncludeUsage']",style:{"target-arrow-color":"#84cc16"}},
+      {selector:"edge[directional][type='UseCaseExtendUsage']",style:{"target-arrow-color":"#ef4444"}},
       {selector:"edge.hover",style:{"opacity":0.8,"width":2.5}}
     ],
     layout:{name:"random"},
