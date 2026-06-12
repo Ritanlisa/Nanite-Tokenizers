@@ -238,31 +238,46 @@ function buildCytoscape(nodes, edges) {
 // ── Custom Force-Directed Layout ──
 function runForceLayout(cy) {
   const nodes = cy.nodes(); const n = nodes.length; if (n < 2) return;
-  const W = cy.width() || 1000, H = cy.height() || 800;
-  const cx = W/2, cy_h = H/2, spread = Math.min(W,H) * 0.4;
+  const W = cy.width() || 1200, H = cy.height() || 900;
+  const cx = W/2, cy_h = H/2;
 
-  // Initialize random positions
+  // Build edge list + adjacency
+  const edgeList = cy.edges().map(e => { return {s: nodes.indexOf(e.source()), t: nodes.indexOf(e.target())}; }).filter(e => e.s >= 0 && e.t >= 0);
+  const adj = Array.from({length:n}, () => new Set());
+  edgeList.forEach(e => { adj[e.s].add(e.t); adj[e.t].add(e.s); });
+  const isAdj = (u,v) => adj[u].has(v);
+
+  // Segment intersection test
+  function segmentsIntersect(a1, a2, b1, b2) {
+    function ccw(p,q,r){return (q.x-p.x)*(r.y-p.y)-(q.y-p.y)*(r.x-p.x);}
+    const o1=ccw(a1,a2,b1),o2=ccw(a1,a2,b2),o3=ccw(b1,b2,a1),o4=ccw(b1,b2,a2);
+    if (o1*o2<0 && o3*o4<0) return true;
+    return false;
+  }
+  // Distance from point p to segment (a,b)
+  function distToSeg(p,a,b){const dx=b.x-a.x,dy=b.y-a.y;const t=Math.max(0,Math.min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/(dx*dx+dy*dy||1)));const rx=a.x+t*dx,ry=a.y+t*dy;return Math.sqrt((p.x-rx)**2+(p.y-ry)**2);}
+
+  // Initialize: use a circle for large n, random for small
   const pos = [];
   for (let i = 0; i < n; i++) {
-    const angle = (2 * Math.PI * i) / n + (Math.random() - 0.5) * 0.5;
-    const r = spread * (0.3 + 0.7 * Math.random());
-    pos.push({ x: cx + r * Math.cos(angle), y: cy_h + r * Math.sin(angle) });
+    const angle = (2 * Math.PI * i) / n + (Math.random()-0.5)*0.3;
+    const r = Math.min(W,H)*0.35 * (0.5 + 0.5*Math.random());
+    pos.push({ x: cx + r*Math.cos(angle), y: cy_h + r*Math.sin(angle) });
   }
-  // Build edge list + adjacency
-  const edges = cy.edges().map(e => { const s = nodes.indexOf(e.source()), t = nodes.indexOf(e.target()); return {s,t}; }).filter(e => e.s >= 0 && e.t >= 0);
-  const adj = Array.from({length:n}, () => []);
-  edges.forEach(e => { adj[e.s].push(e.t); adj[e.t].push(e.s); });
 
-  const MIN_DIST = 40, REP_RADIUS = 300, ATT_STR = 0.3, REP_STR = 1200;
-  let temp = 1.0, step = 3.0;
-  const T = 300;
+  const IDEAL_LEN = Math.min(W,H) / Math.sqrt(n) * 1.8;
+  const MIN_DIST = IDEAL_LEN * 0.7;
+  const REP_RADIUS = IDEAL_LEN * 3;
+  let step = IDEAL_LEN * 0.3, temp = 2.0;
+  const T = Math.max(300, n * 2);
+  const ATTR_STR = 0.12, REP_STR = 80, CROSS_STR = 5;
 
   for (let iter = 0; iter < T; iter++) {
-    // (a) collision projection
+    // (a) Hard collision projection
     for (let u = 0; u < n; u++) {
       for (let v = u + 1; v < n; v++) {
         const dx = pos[v].x - pos[u].x, dy = pos[v].y - pos[u].y;
-        let d = Math.sqrt(dx*dx + dy*dy);
+        let d = Math.sqrt(dx*dx+dy*dy);
         if (d < MIN_DIST && d > 0.001) {
           const overlap = MIN_DIST - d;
           const nx = dx/d, ny = dy/d;
@@ -271,43 +286,78 @@ function runForceLayout(cy) {
         }
       }
     }
-    // (b) forces
+    // (b) Compute forces
     const F = Array.from({length:n}, () => ({x:0,y:0}));
-    // edge attraction
-    edges.forEach(e => {
+
+    // Edge spring attraction (target: IDEAL_LEN)
+    edgeList.forEach(e => {
       const dx = pos[e.t].x - pos[e.s].x, dy = pos[e.t].y - pos[e.s].y;
       const d = Math.max(Math.sqrt(dx*dx+dy*dy), 0.01);
-      const fx = ATT_STR * d * (dx/d), fy = ATT_STR * d * (dy/d);
+      const force = ATTR_STR * (d - IDEAL_LEN);
+      const fx = force * (dx/d), fy = force * (dy/d);
       F[e.s].x += fx; F[e.s].y += fy;
       F[e.t].x -= fx; F[e.t].y -= fy;
     });
-    // vertex repulsion
+
+    // Edge crossing penalty (non-adjacent edge pairs)
+    if (iter % 3 === 0 && edgeList.length < 2000) {
+      for (let i = 0; i < edgeList.length; i++) {
+        for (let j = i + 1; j < edgeList.length; j++) {
+          const ea = edgeList[i], eb = edgeList[j];
+          const as = ea.s, at = ea.t, bs = eb.s, bt = eb.t;
+          if (as === bs || as === bt || at === bs || at === bt) continue;
+          const a1 = pos[as], a2 = pos[at], b1 = pos[bs], b2 = pos[bt];
+          if (segmentsIntersect(a1, a2, b1, b2)) {
+            // Push endpoints apart perpendicular to crossing
+            const mx = (a1.x + a2.x + b1.x + b2.x) / 4;
+            const my = (a1.y + a2.y + b1.y + b2.y) / 4;
+            for (const p of [as, at, bs, bt]) {
+              const dx = pos[p].x - mx, dy = pos[p].y - my;
+              const dd = Math.max(0.01, Math.sqrt(dx*dx+dy*dy));
+              const f = CROSS_STR * temp;
+              F[p].x += f * (dx/dd); F[p].y += f * (dy/dd);
+            }
+          }
+        }
+      }
+    }
+
+    // Vertex repulsion (global)
     for (let u = 0; u < n; u++) {
       for (let v = u + 1; v < n; v++) {
         const dx = pos[v].x - pos[u].x, dy = pos[v].y - pos[u].y;
         const d = Math.max(Math.sqrt(dx*dx+dy*dy), 0.01);
         if (d < REP_RADIUS) {
           const force = REP_STR / (d * d);
-          const fx = force * (dx/d), fy = force * (dy/d);
+          const fx = force*(dx/d), fy = force*(dy/d);
           F[u].x -= fx; F[u].y -= fy;
           F[v].x += fx; F[v].y += fy;
         }
       }
     }
-    // (c) update
+    // Center gravity
+    for (let i = 0; i < n; i++) {
+      F[i].x += (cx - pos[i].x) * 0.001;
+      F[i].y += (cy_h - pos[i].y) * 0.001;
+    }
+
+    // (c) Update positions
     for (let i = 0; i < n; i++) {
       const flen = Math.sqrt(F[i].x*F[i].x + F[i].y*F[i].y);
-      if (flen > 100) { F[i].x *= 100/flen; F[i].y *= 100/flen; }
-      pos[i].x += step * F[i].x; pos[i].y += step * F[i].y;
-      pos[i].x = Math.max(20, Math.min(W-20, pos[i].x));
-      pos[i].y = Math.max(20, Math.min(H-20, pos[i].y));
+      if (flen > 50) { F[i].x *= 50/flen; F[i].y *= 50/flen; }
+      pos[i].x += step * F[i].x;
+      pos[i].y += step * F[i].y;
+      pos[i].x = Math.max(10, Math.min(W-10, pos[i].x));
+      pos[i].y = Math.max(10, Math.min(H-10, pos[i].y));
     }
-    // (d) anneal
-    temp *= 0.97; step *= 0.99;
+    // (d) Anneal
+    temp *= 0.985;
+    step *= 0.995;
   }
+
   // Apply final positions
   nodes.forEach((node, i) => { node.position({x: pos[i].x, y: pos[i].y}); });
-  cy.fit(undefined, 40);
+  cy.fit(undefined, 35);
 }
 
 // ── Section opacity ──
