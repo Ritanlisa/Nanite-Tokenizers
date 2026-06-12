@@ -396,10 +396,10 @@ function runForceLayout(cy) {
     minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
   }
   const scale = Math.min((W - 100) / Math.max(maxX - minX, 1), (H - 100) / Math.max(maxY - minY, 1), 1.5);
-  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const centerX = (minX + maxX) / 2, centerY = (minY + maxY) / 2;
   nodes.forEach((node, i) => {
     const p = positions[i];
-    if (p) node.position({ x: (p.x - cx) * scale + W / 2, y: (p.y - cy) * scale + H / 2 });
+    if (p) node.position({ x: (p.x - centerX) * scale + W / 2, y: (p.y - centerY) * scale + H / 2 });
   });
   cy.fit(undefined, 50);
   window.__cy = cy;
