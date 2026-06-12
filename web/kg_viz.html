@@ -358,25 +358,23 @@ function runForceLayout(cy) {
         }
       }
       // Position siblings with H_GAP spacing
-      if (d < maxDepth) {
-        for (let i = 0; i < level.length;) {
-          let j = i;
-          const siblings = [];
-          // Group by parent
-          const p = parent[level[i]];
-          if (p >= 0) {
-            while (j < level.length && parent[level[j]] === p) { siblings.push(level[j]); j++; }
-          } else {
-            siblings.push(level[i]); j = i + 1;
-          }
-          // Position siblings
-          let curX = -(siblings.length - 1) * H_GAP / 2;
-          for (const u of siblings) {
-            finalX[u] = curX;
-            curX += H_GAP;
-          }
-          i = j;
+      for (let i = 0; i < level.length;) {
+        let j = i;
+        const siblings = [];
+        // Group by parent
+        const p = parent[level[i]];
+        if (p >= 0) {
+          while (j < level.length && parent[level[j]] === p) { siblings.push(level[j]); j++; }
+        } else {
+          siblings.push(level[i]); j = i + 1;
         }
+        // Position siblings
+        let curX = -(siblings.length - 1) * H_GAP / 2;
+        for (const u of siblings) {
+          finalX[u] = curX;
+          curX += H_GAP;
+        }
+        i = j;
       }
     }
     // Root fix: center at 0
