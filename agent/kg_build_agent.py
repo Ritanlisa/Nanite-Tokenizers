@@ -143,7 +143,7 @@ ENRICHMENT_JSON_PROMPT = """你是SysML v2知识图谱专家。审查已有KG实
 ## 输出格式
 输出一个JSON数组，每个元素是一个富化操作：
 
-关系操作: {"action":"add_relation","type":"allocation|connection|interface","source":"实体A","target":"实体B","description":"关系描述"}
+关系操作: {"action":"add_relation","type":"allocation|connection|interface|containment|composition|reference","source":"实体A","target":"实体B","description":"关系描述"}
 别名操作: {"action":"add_alias","entity":"实体名","alias":"别名"}
 更新操作: {"action":"update_entity","entity":"实体名","append_description":"补充描述"}
 
@@ -1628,9 +1628,12 @@ class KGBuildAgent:
 关系类型:
 - allocation: A是B的一部分, B包含A, A属于B系统
 - connection: A和B之间有物理连接或数据流
+- containment: A物理容纳B, B在A内部
+- composition: A由B组成, B是A的构成元素
+- reference: A引用B, A依赖B的定义或属性
 - None: 两者无直接关系
 
-请只回答一个词: allocation, connection, 或 None"""
+请只回答一个词: allocation, connection, containment, composition, reference, 或 None"""
                 try:
                     t_call = time.time()
                     async with httpx.AsyncClient(timeout=120) as client:
@@ -1665,7 +1668,7 @@ class KGBuildAgent:
             if not answer or answer in ("none", "无", ""):
                 continue
 
-            rel_type = "allocation" if "allocation" in answer else "connection"
+            rel_type = answer  # answer is already the canonical type: allocation|connection|containment|composition|reference
             try:
                 rel_result = await self._mcp_session.call_tool(
                     "sysml_add_relation", {
