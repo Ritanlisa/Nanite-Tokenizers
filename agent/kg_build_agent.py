@@ -1263,7 +1263,7 @@ class KGBuildAgent:
                     "description": desc,
                     "role_source": "",
                     "role_target": "",
-                    "source_sections": rel_src_sections if rel_src_sections else None,
+                    "source_sections": rel_src_sections if rel_src_sections else (pages_list if pages_list else ["未知"]),
                 },
             )
             try:
@@ -1427,7 +1427,7 @@ class KGBuildAgent:
                             "source": act.get("source", ""),
                             "target": act.get("target", ""),
                             "description": act.get("description", ""),
-                            "source_sections": [sec_key] if sec_key else None,
+                            "source_sections": [sec_key] if sec_key else ["富化"],
                         })
                         rdata = json.loads(rel_res)
                         if rdata.get("ok"):
