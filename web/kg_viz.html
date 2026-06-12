@@ -330,11 +330,13 @@ function buildCytoscape(nodes, edges) {
       id: `${e.source}→${e.target}::${e.label}`,
       source: e.source,
       target: e.target,
-      label: e.label,
+      label: e.label || e.type,
       type: e.type,
       cntype: e.cntype,
       style: EDGE_STYLES[e.type]||"solid",
       sections: e.sections||[],
+      description: e.description||"",
+      relation_name: e.relation_name||"",
     }
   }));
 
@@ -376,6 +378,10 @@ function buildCytoscape(nodes, edges) {
   cy.on("tap", "node", evt => {
     const n = evt.target.data();
     showDetail(n);
+  });
+  cy.on("tap", "edge", evt => {
+    const e = evt.target.data();
+    showEdgeDetail(e);
   });
   cy.on("tap", evt => {
     if (evt.target === cy) showDetail(null);
@@ -423,6 +429,22 @@ function showDetail(nodeData) {
     <div class="section"><h4>Source Sections (${(nodeData.sections||[]).length})</h4><div class="list"><ul style="margin:0;padding-left:16px">${secs}</ul></div></div>
     <div class="section"><h4>Qualified Name</h4><div class="tag">${esc(nodeData.qname)}</div></div>
     <a href="/api/rag/dbs/${getDb()}/kg/entity/${encodeURIComponent(nodeData.id)}" target="_blank">View JSON →</a>
+  `;
+}
+
+function showEdgeDetail(edgeData) {
+  const pane = document.getElementById("detailPane");
+  if (!edgeData) return;
+  const secs = (edgeData.sections||[]).slice(0,15).map(s=>`<li>${esc(s)}</li>`).join("")||'<li>unknown</li>';
+  const edgeColor = (EDGE_STYLES[edgeData.type]||"solid") === "solid" ? "#f87171" : 
+                     (EDGE_STYLES[edgeData.type]||"solid") === "dashed" ? "#fb923c" : "#818cf8";
+  pane.innerHTML = `
+    <h3>${esc(edgeData.source)} → ${esc(edgeData.target)}</h3>
+    <div class="meta"><span style="color:${edgeColor}">${edgeData.cntype}</span> <span>${edgeData.type}</span></div>
+    ${edgeData.description?`<div style="font-size:12px;color:var(--muted);line-height:1.5">${esc(edgeData.description)}</div>`:""}
+    ${edgeData.relation_name?`<div class="section"><h4>Relation Name</h4><div class="tag">${esc(edgeData.relation_name)}</div></div>`:""}
+    <div class="section"><h4>Source Sections (${(edgeData.sections||[]).length})</h4><div class="list"><ul style="margin:0;padding-left:16px">${secs}</ul></div></div>
+    <div class="section"><h4>Label</h4><div class="tag">${esc(edgeData.label||"")}</div></div>
   `;
 }
 

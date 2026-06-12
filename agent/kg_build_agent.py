@@ -1547,7 +1547,7 @@ class KGBuildAgent:
         if self._mcp_session is None:
             return
 
-        max_rounds = 20
+        max_rounds = 100
         for round_idx in range(max_rounds):
             comps_result = await self._mcp_session.call_tool("sysml_connected_components", {})
             try:
@@ -2023,6 +2023,12 @@ class KGBuildAgent:
             await self._trigger_save()
             stats["phase_dedup_time_s"] = round(time.time() - t0, 1)
 
+            # ── 富化: 同章节实体间添加关系 ──
+            logger.info("Recursive pipeline: enriching same-section relations...")
+            enrich_errors: List[Dict] = []
+            await self._enrich_entities(doc_name, set(), enrich_errors)
+            await self._trigger_save()
+
             # ── 图聚合 ──
             logger.info("Recursive pipeline: aggregating graph...")
             await self._aggregate_graph(doc_name)
@@ -2143,24 +2149,22 @@ class KGBuildAgent:
         sections: Dict[str, List], root_entity: Dict[str, Any],
         start_section_ids: List[str], doc_name: str,
     ) -> List[str]:
-        """Phase 1: 单次LLM提取+强制连接根实体保证连通"""
+        """Phase 1: 使用与已验证管线相同的 EXTRACTION_CANDIDATES_PROMPT"""
         from langchain_core.messages import HumanMessage, SystemMessage
 
         all_new_entity_names: List[str] = []
         root_name = root_entity.get("name", "")
-        root_type = "PartDef"  # 强制根实体为 PartDef，确保出现在实体列表中
-        root_desc = root_entity.get("description", "")
 
         if not root_name:
             return all_new_entity_names
 
         # 创建根实体
         await self._mcp_session.call_tool("sysml_add_entity", {
-            "entity_type": root_type, "name": root_name,
-            "parent_package": "", "description": root_desc,
+            "entity_type": "PartDef", "name": root_name,
+            "parent_package": "", "description": root_entity.get("description", ""),
             "aliases": [], "source_sections": [doc_name],
-            "source_text": root_desc, "properties": {}, "supertypes": [],
-            "short_name": root_name,
+            "source_text": root_entity.get("description", ""),
+            "properties": {}, "supertypes": [], "short_name": root_name,
         })
         all_new_entity_names.append(root_name)
 
@@ -2176,38 +2180,21 @@ class KGBuildAgent:
             merged_text = "\n\n".join(text_parts)
             source_pages = [f"p{nd.page_start} {section_title}" for nd in nodes]
 
-            prompt = f"""你是SysML v2知识图谱专家。从文档小节中以根实体"{root_name}"为起点，提取系统架构知识图谱。
+            # 使用已验证的 EXTRACTION_CANDIDATES_PROMPT 格式
+            prompt = f"""页面标题: {section_title}
 
-## 当前小节: {section_title}
-
-## 实体类型
-PartDef(组件/模块/设备/机柜), AttributeDef(属性/参数), PortDef(接口/端口), ItemDef(数据结构), RequirementDef(需求/约束), CommandDef(CLI命令)
-
-## 关系类型
-Connection(物理连接/数据流), Interface(接口实现), Allocation(功能/资源分配)
-
-## 核心规则：每个实体必须至少有一条关系！
-- 组件实体 → 连接到根实体"{root_name}"或其他组件
-- 属性/端口/命令 → 用 Allocation 连接到宿主组件
-- 无法确定关系 → 直接连接到"{root_name}"
-
-## 小节内容
+文本内容:
+---BEGIN---
 {merged_text}
+---END---
 
-## 输出 (仅JSON数组)"""
-            prompt += f"""
-[
-  {{"type":"PartDef","name":"组件名","description":"简短描述","aliases":["别名"],"source_section":"{section_title}"}},
-  {{"type":"Allocation","source":"属性","target":"宿主","description":"归属","source_section":"{section_title}"}},
-  {{"type":"Connection","source":"源","target":"目标","description":"描述","source_section":"{section_title}"}}
-]
-无内容输出 []"""
+请输出JSON数组。无系统架构内容则输出 []"""
 
             try:
                 t_call = time.time()
                 response = await asyncio.wait_for(
-                    self.llm.ainvoke([
-                        SystemMessage(content="你是SysML v2知识图谱专家。仅输出JSON数组。"),
+                    self.light_llm.ainvoke([
+                        SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
                         HumanMessage(content=prompt),
                     ]),
                     timeout=600,
@@ -2221,11 +2208,11 @@ Connection(物理连接/数据流), Interface(接口实现), Allocation(功能/�
 
             candidates, relations = self._parse_candidates(raw)
 
-            # 收集实体名
-            section_names = {c.get("name", "").strip() for c in candidates if c.get("name", "").strip()}
-            all_new_entity_names.extend(n for n in section_names if n)
+            for c in candidates:
+                name = c.get("name", "").strip()
+                if name:
+                    all_new_entity_names.append(name)
 
-            # 创建实体和关系
             section_key = section_title if section_title else f"Section {sid}"
             await self._process_candidates(
                 candidates, relations, doc_name,
@@ -2307,36 +2294,20 @@ Connection(物理连接/数据流), Interface(接口实现), Allocation(功能/�
         ]
         merged_text = "\n\n".join(text_parts)
 
-        prompt = f"""你是SysML v2知识图谱专家。从文档小节中提取与焦点实体相关的新知识。
+        prompt = f"""页面标题: {section_title} (焦点实体: {entity_name})
 
-## 焦点实体
-- 名称: {entity_name}
-
-## 当前小节
-- 标题: {section_title}
-
-## 实体类型
-PartDef|AttributeDef|PortDef|ItemDef|RequirementDef|CommandDef|InterfaceDef|ConnectionDef
-
-## 关系类型
-Connection|Interface|Allocation
-
-## 小节内容
+文本内容:
+---BEGIN---
 {merged_text}
+---END---
 
-## 输出格式 (仅JSON数组)"""
-        prompt += f"""
-[
-  {{"type":"PartDef","name":"实体名","description":"简短描述","aliases":["别名"],"source_section":"{section_title}"}},
-  {{"type":"Connection","source":"源","target":"目标","description":"关系描述","source_section":"{section_title}"}}
-]
-无相关内容输出 []"""
+请输出JSON数组。无系统架构内容则输出 []"""
 
         try:
             t_call = time.time()
             response = await asyncio.wait_for(
                 self.light_llm.ainvoke([
-                    SystemMessage(content="你是SysML v2知识图谱专家。仅输出JSON数组，无其他内容。"),
+                    SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
                     HumanMessage(content=prompt),
                 ]),
                 timeout=180,

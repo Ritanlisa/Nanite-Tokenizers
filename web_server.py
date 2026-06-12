@@ -1797,46 +1797,53 @@ def create_app() -> FastAPI:
                         return (resolved_src, _resolve_entity(tgt))
             return None
 
-        # Build edge list from relations; deduplicate by (source, target, label)
+        # Build edge list from relations; only 1 directed edge per relation
         edges_seen: set = set()
         edges = []
         for rel in relations:
             ends = getattr(rel, "ends", None) or []
-            rlabel = getattr(rel, "name", "")
             rtype = type(rel).__name__
             rcntype = _entity_type_name(rel)
+            rel_meta = mgr.get_entity_metadata(rel.qualified_name)
+            rdesc = rel_meta.get("description", "") or ""
 
-            # Use textual ends if present; otherwise heuristic from name
             if len(ends) >= 2:
-                end_pairs = [(ends[i].ref, ends[j].ref) for i in range(len(ends)) for j in range(len(ends)) if i != j]
-                for src, tgt in end_pairs:
-                    key = (src, tgt, rlabel)
-                    if key in edges_seen:
-                        continue
-                    resolved_src = _resolve_entity(src) or src
-                    resolved_tgt = _resolve_entity(tgt) or tgt
-                    edges_seen.add(key)
-                    # Get relation source_sections from metadata
-                    rel_meta = mgr.get_entity_metadata(rel.qualified_name)
-                    edges.append({
-                        "source": resolved_src, "target": resolved_tgt,
-                        "label": rlabel, "type": rtype, "cntype": rcntype,
-                        "sections": rel_meta.get("source_sections", []),
-                    })
+                src = ends[0].ref
+                tgt = ends[1].ref
+                resolved_src = _resolve_entity(src) or src
+                resolved_tgt = _resolve_entity(tgt) or tgt
+                # Use description as primary label, fallback to name
+                label = rdesc[:60] if rdesc else getattr(rel, "name", "")
+                key = (resolved_src, resolved_tgt, label)
+                if key in edges_seen:
+                    continue
+                edges_seen.add(key)
+                edges.append({
+                    "source": resolved_src, "target": resolved_tgt,
+                    "label": label,
+                    "type": rtype, "cntype": rcntype,
+                    "sections": rel_meta.get("source_sections", []),
+                    "description": rdesc,
+                    "relation_name": getattr(rel, "name", ""),
+                })
             else:
-                # Heuristic: parse ends from relation name
+                # Heuristic fallback
+                rlabel = getattr(rel, "name", "")
                 parsed = _parse_ends_from_name(rlabel)
                 if parsed:
                     src, tgt = parsed
-                    key = (src, tgt, rlabel)
+                    label = rdesc[:60] if rdesc else rlabel
+                    key = (src, tgt, label)
                     if key not in edges_seen:
                         edges_seen.add(key)
-                        rel_meta = mgr.get_entity_metadata(rel.qualified_name)
                         edges.append({
                             "source": src, "target": tgt,
-                            "label": rlabel, "type": rtype, "cntype": rcntype,
+                            "label": label,
+                            "type": rtype, "cntype": rcntype,
                             "heuristic": True,
                             "sections": rel_meta.get("source_sections", []),
+                            "description": rdesc,
+                            "relation_name": rlabel,
                         })
 
         # Detect isolated nodes (no edge involvement)
