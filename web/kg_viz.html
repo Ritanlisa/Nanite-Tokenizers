@@ -340,8 +340,8 @@ function runForceLayout(cy) {
     }
 
     // 2nd and 3rd eigenvectors (Fiedler + next)
-    const v2 = powerIter([], 200);
-    const v3 = powerIter([v2], 200);
+const v2 = powerIter([], 5000);
+const v3 = powerIter([v2], 5000);
 
     // Direct scaling — preserves eigenvector spacing (NO min-max stretch)
     const scale = Math.min(compW, compH) / Math.sqrt(k) * 0.8;
