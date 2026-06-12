@@ -363,27 +363,25 @@ function runForceLayout(cy) {
     for (let iter = 0; iter < 100; iter++) {
       // Move each node toward weighted center of its spring neighbors
       for (const i of sortedIdx) {
-        let sumW = 0, cx = 0, cy = 0;
+        let sumW = 0, nx = 0, ny = 0;
         for (let j = 0; j < k; j++) {
           if (j === i) continue;
-          sumW += w[i][j];
-          cx += w[i][j] * localPos[j].x;
-          cy += w[i][j] * localPos[j].y;
+          const L = IDEAL_SCALE * d[i][j];  // ideal spring length
+          const dx = localPos[i].x - localPos[j].x;
+          const dy = localPos[i].y - localPos[j].y;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1e-6;
+          // desired position for i relative to j:
+          // p_j + (p_i - p_j) * L / dist = p_j + (dx,dy) * L / dist
+          const desiredX = localPos[j].x + dx * L / dist;
+          const desiredY = localPos[j].y + dy * L / dist;
+          const wij = w[i][j];
+          nx += wij * desiredX;
+          ny += wij * desiredY;
+          sumW += wij;
         }
         if (sumW > 1e-10) {
-          cx /= sumW;
-          cy /= sumW;
-          // Step size proportional to average graph distance (L_ij = IDEAL_SCALE * d_ij)
-          let avgDist = 0, cnt = 0;
-          for (let j = 0; j < k; j++) {
-            if (j !== i && d[i][j] < Infinity) { avgDist += d[i][j]; cnt++; }
-          }
-          avgDist = cnt > 0 ? avgDist / cnt : 1;
-          const step = 0.3 * avgDist * IDEAL_SCALE;
-          const dx = cx - localPos[i].x, dy = cy - localPos[i].y;
-          const mag = Math.sqrt(dx * dx + dy * dy) || 1;
-          localPos[i].x += (dx / mag) * Math.min(step, mag);
-          localPos[i].y += (dy / mag) * Math.min(step, mag);
+          localPos[i].x = nx / sumW;
+          localPos[i].y = ny / sumW;
         }
       }
 
@@ -410,33 +408,29 @@ function runForceLayout(cy) {
     }
   }
 
-  // ── Step 3: Arrange components on canvas (grid packing) ──
+  // ── Step 3: Center the graph on canvas ──
+  // Simply center the largest component's positions on the canvas
   comps.sort((a, b) => b.length - a.length);
-  let offX = 20, offY = 20, rowH = 0;
-  const PAD = 60;
-  for (const comp of comps) {
-    if (comp.length === 0) continue;
-    // Compute bounding box of component positions
+  if (comps.length > 0) {
+    const mainComp = comps[0];
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const gi of comp) {
+    for (const gi of mainComp) {
       const p = positions[gi];
       if (!p) continue;
-      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-      maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
     }
-    if (minX === Infinity) continue;
-    const compW = maxX - minX, compH = maxY - minY;
-
-    // Wrap to next row if exceeds canvas width
-    if (offX > 20 && offX + compW > W) { offX = 20; offY += rowH + PAD; rowH = 0; }
-
-    // Shift component to grid cell
-    for (const gi of comp) {
-      const p = positions[gi];
-      if (p) { p.x = p.x - minX + offX; p.y = p.y - minY + offY; }
+    const mainW = maxX - minX || 1, mainH = maxY - minY || 1;
+    const scale = Math.min((W - 100) / mainW, (H - 100) / mainH, 1.5);
+    // Center and scale all components
+    for (const comp of comps) {
+      for (const gi of comp) {
+        const p = positions[gi];
+        if (!p) continue;
+        p.x = (p.x - (minX + maxX) / 2) * scale + W / 2;
+        p.y = (p.y - (minY + maxY) / 2) * scale + H / 2;
+      }
     }
-    offX += compW + PAD;
-    rowH = Math.max(rowH, compH);
   }
 
   // ── Step 4: Apply to Cytoscape ──
