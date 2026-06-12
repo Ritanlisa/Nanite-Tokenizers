@@ -288,7 +288,7 @@ function runForceLayout(cy) {
     if (s >= 0 && t >= 0 && s !== t) { adj[s].push(t); adj[t].push(s); }
   });
 
-  // Find components via BFS
+  // Find components
   const visited = new Array(n).fill(false);
   const comps = [];
   for (let i = 0; i < n; i++) {
@@ -298,92 +298,67 @@ function runForceLayout(cy) {
     comps.push(comp);
   }
 
-  const LEVEL_SPACING = 100;
-  const H_GAP = 50;  // minimum horizontal gap between sibling leaves
+  const LEVEL_SPACING = 80;
+  const COL_SPACING = 50;
   const positions = new Array(n);
 
   for (const comp of comps) {
     const k = comp.length;
     if (k === 0) continue;
     if (k === 1) { positions[comp[0]] = {x: 0, y: 0}; continue; }
-    if (k === 2) { positions[comp[0]] = {x: -H_GAP, y: 0}; positions[comp[1]] = {x: H_GAP, y: 0}; continue; }
+    if (k === 2) { positions[comp[0]] = {x: -COL_SPACING, y: 0}; positions[comp[1]] = {x: COL_SPACING, y: 0}; continue; }
 
-    // Find root: highest degree node in component
+    // Find root: highest degree
     let root = comp[0];
     for (const i of comp) if (adj[i].length > adj[root].length) root = i;
 
-    // BFS tree: each node's parent is first BFS neighbor
+    // BFS tree
     const parent = new Array(n).fill(-1);
     const children = Array.from({length: n}, () => []);
     const depth = new Array(n).fill(0);
     const bfsVisited = new Set(); bfsVisited.add(root);
     const q = [root];
-    const order = []; // BFS order (top to bottom)
     while (q.length) {
-      const u = q.shift(); order.push(u);
+      const u = q.shift();
       for (const v of adj[u]) {
         if (!bfsVisited.has(v)) {
-          bfsVisited.add(v);
-          parent[v] = u;
-          children[u].push(v);
-          depth[v] = depth[u] + 1;
-          q.push(v);
+          bfsVisited.add(v); parent[v] = u; children[u].push(v);
+          depth[v] = depth[u] + 1; q.push(v);
         }
       }
     }
 
-    // Collect nodes by depth (bottom-up)
-    const maxDepth = Math.max(...depth);
-    const nodesByDepth = Array.from({length: maxDepth + 1}, () => []);
-    for (const i of comp) nodesByDepth[depth[i]].push(i);
-
-    // Bottom-up layout: position leaves first, then internal nodes
-    const prelimX = new Array(n).fill(0);
-    const finalX = new Array(n).fill(0);
-
-    for (let d = maxDepth; d >= 0; d--) {
-      const level = nodesByDepth[d];
-      for (const u of level) {
-        if (children[u].length === 0) {
-          // Leaf: will be positioned among siblings
-          prelimX[u] = 0;
-        } else if (children[u].length === 1) {
-          // One child: center on child
-          prelimX[u] = finalX[children[u][0]];
-        } else {
-          // Multiple children: center between first and last
-          const first = finalX[children[u][0]];
-          const last = finalX[children[u][children[u].length - 1]];
-          prelimX[u] = (first + last) / 2;
-        }
-      }
-      // Position siblings with H_GAP spacing
-      for (let i = 0; i < level.length;) {
-        let j = i;
-        const siblings = [];
-        // Group by parent
-        const p = parent[level[i]];
-        if (p >= 0) {
-          while (j < level.length && parent[level[j]] === p) { siblings.push(level[j]); j++; }
-        } else {
-          siblings.push(level[i]); j = i + 1;
-        }
-        // Position siblings
-        let curX = -(siblings.length - 1) * H_GAP / 2;
-        for (const u of siblings) {
-          finalX[u] = curX;
-          curX += H_GAP;
-        }
-        i = j;
+    // Step 1: Count leaves in each subtree (bottom-up)
+    const leafCount = new Array(n).fill(0);
+    const byDepth = [];
+    for (let d = 0; ; d++) {
+      const level = [];
+      for (const i of comp) if (depth[i] === d) level.push(i);
+      if (level.length === 0) break;
+      byDepth.push(level);
+    }
+    for (let d = byDepth.length - 1; d >= 0; d--) {
+      for (const u of byDepth[d]) {
+        if (children[u].length === 0) { leafCount[u] = 1; }
+        else { let sum = 0; for (const v of children[u]) sum += leafCount[v]; leafCount[u] = sum; }
       }
     }
-    // Root fix: center at 0
-    const rootShift = finalX[root];
-    for (const i of comp) finalX[i] -= rootShift;
 
-    for (const i of comp) {
-      positions[i] = { x: finalX[i], y: depth[i] * LEVEL_SPACING };
+    // Step 2: Assign column positions (top-down, unique per node)
+    const col = new Array(n).fill(0);
+    function assignPositions(u, startCol) {
+      col[u] = startCol;
+      let curCol = startCol;
+      for (const v of children[u]) {
+        assignPositions(v, curCol);
+        curCol += leafCount[v];
+      }
     }
+    assignPositions(root, 0);
+
+    // Shift to center root
+    const rootShift = col[root];
+    for (const i of comp) positions[i] = { x: (col[i] - rootShift) * COL_SPACING, y: depth[i] * LEVEL_SPACING };
   }
 
   // Center and scale
