@@ -1864,36 +1864,51 @@ def create_app() -> FastAPI:
                 "description": label,
             })
 
-        # Detect isolated nodes (no edge involvement)
-        connected_ids: set = set()
-        for e in edges:
-            connected_ids.add(e["source"])
-            connected_ids.add(e["target"])
-        isolated = [n for n in nodes if n["id"] not in connected_ids]
-
-        # Connected component analysis via BFS
-        adj: dict[str, set] = {n["id"]: set() for n in nodes}
-        for e in edges:
-            s, t = e["source"], e["target"]
-            if s in adj:
-                adj[s].add(t)
-            if t in adj:
-                adj[t].add(s)
+        # ── Component analysis from RAW relations (before edge dedup) ──
+        # Build adjacency using raw endpoint names directly (no entity resolution)
+        raw_adj: dict[str, set] = {}
+        # First, add all entity IDs as nodes
+        for n in nodes:
+            raw_adj[n["id"]] = set()
+        for rel in relations:
+            ends = getattr(rel, "ends", None) or []
+            if len(ends) >= 2:
+                s, t = ends[0].ref, ends[1].ref
+                raw_adj.setdefault(s, set()).add(t)
+                raw_adj.setdefault(t, set()).add(s)
+                # Also try resolved versions
+                rs = _resolve_entity(s) or s
+                rt = _resolve_entity(t) or t
+                if rs in raw_adj and rt in raw_adj:
+                    raw_adj[rs].add(rt)
+                    raw_adj[rt].add(rs)
+        # Also from heuristic relations
+        for rel in relations:
+            ends = getattr(rel, "ends", None) or []
+            if len(ends) < 2:
+                rlabel = getattr(rel, "name", "")
+                parsed = _parse_ends_from_name(rlabel)
+                if parsed:
+                    h_src, h_tgt = parsed
+                    raw_adj.setdefault(h_src, set()).add(h_tgt)
+                    raw_adj.setdefault(h_tgt, set()).add(h_src)
+        # BFS
         visited: set = set()
         components = []
-        for nid in adj:
+        for nid in raw_adj:
             if nid not in visited:
-                queue = [nid]
-                visited.add(nid)
-                comp: list = []
+                queue = [nid]; visited.add(nid); comp: list = []
                 while queue:
-                    cur = queue.pop(0)
-                    comp.append(cur)
-                    for nb in adj.get(cur, set()):
-                        if nb not in visited:
-                            visited.add(nb)
-                            queue.append(nb)
+                    cur = queue.pop(0); comp.append(cur)
+                    for nb in raw_adj.get(cur, set()):
+                        if nb not in visited: visited.add(nb); queue.append(nb)
                 components.append(comp)
+        # Isolated nodes
+        all_connected = set()
+        for nid in raw_adj:
+            if raw_adj[nid]: all_connected.add(nid)
+            for nb in raw_adj.get(nid, set()): all_connected.add(nb)
+        isolated = [n for n in nodes if n["id"] not in all_connected]
 
         # Collect all unique sections from nodes and edges
         all_sections: set = set()

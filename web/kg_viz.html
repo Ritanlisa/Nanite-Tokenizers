@@ -91,11 +91,7 @@ body{margin:0;font-family:"Space Grotesk",system-ui,sans-serif;color:var(--text)
     <div class="loading" id="loading"><div class="spinner"></div></div>
     <div id="cy"></div>
     <div class="legend" id="legend"></div>
-    <div class="canvas-legend">
-      <div class="el"><span class="eline solid" style="background:#f87171;height:2px"></span> Connection</div>
-      <div class="el"><span class="eline solid" style="background:#fb923c;height:2px"></span> Interface</div>
-      <div class="el"><span class="eline solid" style="background:#818cf8;height:2px"></span> Allocation</div>
-    </div>
+    <div class="canvas-legend"></div>
   </div>
   <div class="detail" id="detailPane"><div class="empty">Click a node or edge to see details</div></div>
 </div>
@@ -201,6 +197,13 @@ function renderGraph() {
   });
   const legendEl = document.getElementById("legend");
   legendEl.innerHTML = [...typeSet].sort().map(t => `<span class="legend-item"><span class="dot" style="background:${TYPE_COLORS[t]||"#666"}"></span>${t}</span>`).join("");
+  // Dynamic edge type legend
+  const edgeTypeSet = new Set(d.edges.map(e=>e.type));
+  const canvasLegend = document.querySelector('.canvas-legend');
+  canvasLegend.innerHTML = [...edgeTypeSet].sort().map(t => {
+    const c = TYPE_COLORS[t] || '#666';
+    return `<div class="el"><span class="eline solid" style="background:${c};height:2px"></span> ${t}</div>`;
+  }).join('');
   buildCytoscape(d.nodes, d.edges);
 }
 
