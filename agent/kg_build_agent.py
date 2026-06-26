@@ -1249,6 +1249,271 @@ class KGBuildAgent:
 
         return {"entities": created_entities, "relations": created_relations}
 
+    async def _process_candidates_batch(
+        self, candidates: list, relations: list,
+        doc_name: str, page: int, section_title: str,
+        source_pages: Optional[list] = None,
+    ) -> dict:
+        """Batch version: uses sysml_batch for 3-batch processing (search→write→relations).
+
+        Reduces stdio round-trips from 12-18 per section to 3 (plus up to 2 for
+        endpoint auto-creation). Semantically identical to _process_candidates.
+        """
+        created_entities = 0
+        created_relations = 0
+        entity_qn_map: dict = {}
+        pages_list = source_pages or [section_title or f"p{page}"]
+
+        # ═══════════════════════════════════════════════════════════
+        # Batch 1: Search all entities at once
+        # ═══════════════════════════════════════════════════════════
+        search_ops = []
+        search_indices: List[int] = []  # search_op_idx → candidate_idx
+
+        for i, c in enumerate(candidates):
+            name = str(c.get("name", "")).strip()
+            if not name:
+                continue
+            search_ops.append({
+                "tool": "sysml_search_entity",
+                "arguments": {"query": name, "regex_pattern": "", "threshold": 0.7},
+            })
+            search_indices.append(i)
+
+        if search_ops:
+            search_result_raw = await self._mcp_session.call_tool(
+                "sysml_batch",
+                {"operations": search_ops, "continue_on_error": True},
+            )
+            search_result = json.loads(search_result_raw)
+        else:
+            search_result = {"results": []}
+
+        # ═══════════════════════════════════════════════════════════
+        # Batch 2: Create/update entities + add aliases
+        # ═══════════════════════════════════════════════════════════
+        write_ops = []
+        create_op_positions: Dict[int, str] = {}  # op_idx → entity name (new entities only)
+
+        for si, ci in enumerate(search_indices):
+            c = candidates[ci]
+            name = str(c.get("name", "")).strip()
+            if not name:
+                continue
+            etype = str(c.get("type", "PartDef")).strip()
+            desc = str(c.get("description", "")).strip()
+            aliases = c.get("aliases", []) or []
+
+            # Find this entity's search result
+            sr = (search_result.get("results", [])[si]
+                  if si < len(search_result.get("results", [])) else None)
+
+            if sr and sr.get("ok"):
+                rd = sr.get("result", {})
+                if rd.get("total_matches", 0) > 0:
+                    # Entity EXISTS → update + aliases
+                    match = rd["matches"][0]
+                    existing_qn = match.get("qualified_name", name)
+                    entity_qn_map[name] = existing_qn
+                    logger.debug(
+                        "  Phase1b batch: entity EXISTS '%s' (qn=%s, matched=%.2f)",
+                        name, existing_qn, match.get("confidence", 0),
+                    )
+                    write_ops.append({
+                        "tool": "sysml_update_entity",
+                        "arguments": {
+                            "qualified_name": existing_qn,
+                            "append_source_sections": pages_list,
+                        },
+                    })
+                    for alias in aliases:
+                        write_ops.append({
+                            "tool": "sysml_add_alias",
+                            "arguments": {
+                                "qualified_name": existing_qn,
+                                "alias": alias,
+                            },
+                        })
+                    continue
+
+            # Entity does NOT exist → create
+            op_idx = len(write_ops)
+            write_ops.append({
+                "tool": "sysml_add_entity",
+                "arguments": {
+                    "entity_type": etype,
+                    "name": name,
+                    "parent_package": "",
+                    "description": desc,
+                    "aliases": aliases,
+                    "source_sections": pages_list,
+                    "source_text": desc,
+                    "properties": {},
+                    "supertypes": [],
+                    "short_name": name,
+                },
+            })
+            create_op_positions[op_idx] = name
+
+        if write_ops:
+            write_result_raw = await self._mcp_session.call_tool(
+                "sysml_batch",
+                {"operations": write_ops, "continue_on_error": True},
+            )
+            write_result = json.loads(write_result_raw)
+
+            # Harvest entity_qn_map from create results
+            for wr in write_result.get("results", []):
+                idx = wr.get("index", -1)
+                if idx in create_op_positions and wr.get("ok"):
+                    inner = wr.get("result", {})
+                    if inner.get("ok", True):
+                        ename = create_op_positions[idx]
+                        entity_qn_map[ename] = inner.get("qualified_name", ename)
+                        created_entities += 1
+                        logger.debug(
+                            "  Phase1b batch: entity NEW '%s' (qn=%s)",
+                            ename, inner.get("qualified_name", ename),
+                        )
+
+        # ═══════════════════════════════════════════════════════════
+        # Batch 3: Create all relations (with endpoint auto-creation)
+        # ═══════════════════════════════════════════════════════════
+
+        # ── 3a: Search for missing endpoints ──
+        endpoint_search_ops = []
+        endpoint_search_names: List[str] = []
+
+        for r in relations:
+            source = str(r.get("source", "")).strip()
+            target = str(r.get("target", "")).strip()
+            for en in (source, target):
+                if en and en not in entity_qn_map and en not in endpoint_search_names:
+                    endpoint_search_ops.append({
+                        "tool": "sysml_search_entity",
+                        "arguments": {"query": en, "threshold": 0.5},
+                    })
+                    endpoint_search_names.append(en)
+
+        if endpoint_search_ops:
+            ep_result_raw = await self._mcp_session.call_tool(
+                "sysml_batch",
+                {"operations": endpoint_search_ops, "continue_on_error": True},
+            )
+            ep_result = json.loads(ep_result_raw)
+            for ei, er in enumerate(ep_result.get("results", [])):
+                if ei >= len(endpoint_search_names):
+                    continue
+                ename = endpoint_search_names[ei]
+                if er.get("ok"):
+                    rd = er.get("result", {})
+                    if rd.get("total_matches", 0) > 0:
+                        existing_qn = rd["matches"][0].get("qualified_name", ename)
+                        entity_qn_map[ename] = existing_qn
+
+        # ── 3b: Auto-create still-missing endpoints ──
+        auto_create_ops = []
+        auto_create_op_names: Dict[int, str] = {}
+
+        for r in relations:
+            source = str(r.get("source", "")).strip()
+            target = str(r.get("target", "")).strip()
+            desc = str(r.get("description", "")).strip()
+            for en in (source, target):
+                if en and en not in entity_qn_map:
+                    op_idx = len(auto_create_ops)
+                    auto_create_ops.append({
+                        "tool": "sysml_add_entity",
+                        "arguments": {
+                            "entity_type": "PartDef",
+                            "name": en,
+                            "parent_package": "",
+                            "description": f"关系端点: {desc}",
+                            "aliases": [],
+                            "source_sections": pages_list,
+                            "source_text": desc,
+                            "properties": {},
+                            "supertypes": [],
+                            "short_name": en,
+                        },
+                    })
+                    auto_create_op_names[op_idx] = en
+                    # Mark as "in progress" to avoid duplicate creates
+                    # (actual QN updated after batch)
+                    entity_qn_map[en] = en
+
+        if auto_create_ops:
+            ac_result_raw = await self._mcp_session.call_tool(
+                "sysml_batch",
+                {"operations": auto_create_ops, "continue_on_error": True},
+            )
+            ac_result = json.loads(ac_result_raw)
+            for acr in ac_result.get("results", []):
+                idx = acr.get("index", -1)
+                if idx in auto_create_op_names and acr.get("ok"):
+                    inner = acr.get("result", {})
+                    if inner.get("ok", True):
+                        ename = auto_create_op_names[idx]
+                        qn = inner.get("qualified_name", ename)
+                        entity_qn_map[ename] = qn
+                        created_entities += 1
+                        logger.debug(
+                            "  Phase1b batch: auto-created entity '%s' (qn=%s) for relation",
+                            ename, qn,
+                        )
+
+        # ── 3c: Create all relations ──
+        rel_ops = []
+        for r in relations:
+            rtype = str(r.get("type", "Connection")).strip()
+            source = str(r.get("source", "")).strip()
+            target = str(r.get("target", "")).strip()
+            desc = str(r.get("description", "")).strip()
+            rel_source_section = r.get("source_section", "")
+
+            if not source or not target:
+                continue
+
+            # Build relation source sections
+            rel_src_sections: list = []
+            if rel_source_section:
+                rel_src_sections = [rel_source_section]
+            if pages_list:
+                rel_src_sections.extend(pages_list)
+
+            src_qn = entity_qn_map.get(source, source)
+            tgt_qn = entity_qn_map.get(target, target)
+
+            rel_ops.append({
+                "tool": "sysml_add_relation",
+                "arguments": {
+                    "relation_type": rtype.lower(),
+                    "source": src_qn,
+                    "target": tgt_qn,
+                    "name": f"{source}_{target}_{rtype}",
+                    "parent_package": "",
+                    "description": desc,
+                    "role_source": "",
+                    "role_target": "",
+                    "source_sections": (
+                        rel_src_sections if rel_src_sections
+                        else (pages_list if pages_list else ["未知"])
+                    ),
+                },
+            })
+
+        if rel_ops:
+            rel_result_raw = await self._mcp_session.call_tool(
+                "sysml_batch",
+                {"operations": rel_ops, "continue_on_error": True},
+            )
+            rel_result = json.loads(rel_result_raw)
+            for rr in rel_result.get("results", []):
+                if rr.get("ok"):
+                    created_relations += 1
+
+        return {"entities": created_entities, "relations": created_relations}
+
     # ── Phase 3: Enrichment ──────────────────────────────────
 
     async def _enrich_entities(
@@ -2297,7 +2562,7 @@ class KGBuildAgent:
 
             section_title = nodes[0].title[:60]
             section_key = section_title if section_title else f"Section {sid}"
-            await self._process_candidates(
+            await self._process_candidates_batch(
                 candidates, relations, doc_name,
                 nodes[0].page_start, section_key,
                 source_pages=source_pages,
@@ -2451,7 +2716,7 @@ class KGBuildAgent:
         # 创建实体和关系
         source_pages = [f"p{nd.page_start} {section_title}" for nd in nodes]
         section_key = section_title if section_title else f"Section {section_id}"
-        result = await self._process_candidates(
+        result = await self._process_candidates_batch(
             candidates, relations, doc_name,
             nodes[0].page_start, section_key,
             source_pages=source_pages,
