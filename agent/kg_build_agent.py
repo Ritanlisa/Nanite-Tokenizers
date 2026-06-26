@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 import sys
 import time
 import traceback
@@ -88,6 +89,11 @@ UNIFIED_EXTRACTION_SYSTEM_PROMPT = """你是技术文档知识提取专家。请
 
 # ── Fast Extraction Prompt (qwen3:8b — JSON output, no tool calls) ──
 
+# 原示例 (preserved for reference):
+# 输入文本: "系统提供1个FT计算柜（1024个处理器）和10个MT加速柜（共10240个加速器）"
+# 输出: [{"type":"PartDef","name":"FT计算柜",...}, {"type":"PartDef","name":"MT加速柜",...}, {"type":"AttributeDef","name":"处理器数量",...}]
+# 输入文本: "通过 smu_tranfer_cmd 转发命令，yhst 查看加电信息"
+# 输出: [{"type":"CommandDef","name":"smu_tranfer_cmd",...}, {"type":"CommandDef","name":"yhst",...}, {"relation":true,"type":"Connection",...}]
 EXTRACTION_CANDIDATES_PROMPT = """你是一个技术文档实体提取器。阅读给定的文档页面文本，输出其中描述的系统架构实体和关系。
 
 ## 输出格式
@@ -125,27 +131,6 @@ EXTRACTION_CANDIDATES_PROMPT = """你是一个技术文档实体提取器。阅�
 - UseCaseAssociation: 用例关联
 - UseCaseInclude: 用例包含
 - UseCaseExtend: 用例扩展
-
-## 示例
-输入文本: "系统提供1个FT计算柜（1024个处理器）和10个MT加速柜（共10240个加速器）"
-输出:
-```json
-[
-  {"type":"PartDef","name":"FT计算柜","description":"1024个处理器","aliases":["FT柜","计算柜"]},
-  {"type":"PartDef","name":"MT加速柜","description":"10个加速柜共10240个加速器","aliases":["MT柜","加速柜"]},
-  {"type":"AttributeDef","name":"处理器数量","description":"FT计算柜包含1024个处理器","aliases":["CPU数量"]}
-]
-```
-
-输入文本: "通过 smu_tranfer_cmd 转发命令，yhst 查看加电信息"
-输出:
-```json
-[
-  {"type":"CommandDef","name":"smu_tranfer_cmd","description":"通过SMU向指定CMU转发命令","aliases":["SMU命令","smu转发"]},
-  {"type":"CommandDef","name":"yhst","description":"查看所有结点加电信息","aliases":["加电查询","yhst命令"]},
-  {"relation":true,"type":"Connection","source":"smu_tranfer_cmd","target":"yhst","description":"通过smu_tranfer_cmd转发yhst命令"}
-]
-```
 
 输入文本无任何系统架构内容时输出: []"""
 
@@ -554,6 +539,7 @@ class KGBuildAgent:
         self._save_lock = asyncio.Lock()
         self._save_desired = False
         self._save_task: Optional[asyncio.Task] = None
+        self._fts_index: Optional[sqlite3.Connection] = None
 
     @staticmethod
     def _get_config(key: str, default: Any = None) -> Any:
@@ -571,6 +557,7 @@ class KGBuildAgent:
                 base_url=config.settings.OPENAI_API_URL,
                 timeout=self.timeout,
                 streaming=True,
+                model_kwargs={"keep_alive": str(self._get_config("KG_KEEP_ALIVE", "3600s"))},
                 max_tokens=max_tokens,
             )
         return self._llm
@@ -588,6 +575,7 @@ class KGBuildAgent:
                 base_url=config.settings.OPENAI_API_URL,
                 timeout=600,
                 streaming=False,
+                model_kwargs={"keep_alive": str(self._get_config("KG_KEEP_ALIVE", "3600s"))},
                 max_tokens=max_tokens,
             )
         return self._light_llm
@@ -698,24 +686,8 @@ class KGBuildAgent:
                 self._save_build_state(doc_name, "phase3", stats=stats, errors=errors)
                 logger.debug("=== Phase 2 DONE (%.1fs) ===", stats["phase2_time_s"])
 
-            # ── Phase 3: 并行 JSON 富化 ──
-            run_phase3 = phase in ("", "phase1", "phase2", "phase3")
-            if run_phase3:
-                pre_enrich_summary = await self._summary()
-                stats["pre_enrich_entities"] = pre_enrich_summary.get("total_entities", 0)
-                stats["pre_enrich_relations"] = pre_enrich_summary.get("total_relations", 0)
-                pre_orphan_count = await self._count_orphan_entities()
-                stats["pre_enrich_orphans"] = pre_orphan_count
-                logger.info("Pre-enrichment: %d entities, %d relations, %d orphans",
-                             stats["pre_enrich_entities"], stats["pre_enrich_relations"],
-                             pre_orphan_count)
-
-                processed_sections = set(build.get("processed_sections", []))
-                stats, errors_ph3 = await self._run_phase3(doc_name, processed_sections, stats)
-                errors.extend(errors_ph3)
-                self._save_build_state(doc_name, "phase4", stats=stats, errors=errors)
-            else:
-                logger.info("Phase 3 already done (resuming from phase: %s)", phase)
+            # ── Phase 3: 跳过（BFS 级联已在 Phase 1/3 中完整创建关系网）──
+            logger.info("Phase 3 (enrichment) skipped — BFS cascade covers all relations")
 
             # ── Phase 4: 图聚合 ──
             run_phase4 = phase in ("", "phase1", "phase2", "phase3", "phase4")
@@ -1929,6 +1901,8 @@ class KGBuildAgent:
 
             # 构建 sections 映射 (parent_id → [nodes])
             sections = self._build_section_map(tree_state)
+            # Build inverted index for Phase 2 propagation (>500 sections only)
+            self._fts_index = self._build_inverted_index(sections)
 
             # ── Phase 0: 根实体识别 ──
             root_entity = build.get("root_entity")
@@ -1957,6 +1931,8 @@ class KGBuildAgent:
                     processed_sections=list(processed_sections),
                     stats=stats)
                 logger.info("Phase 1 done: %d entities discovered", len(new_entity_names))
+                # Unload extraction model during Phase 2 propagation (no LLM calls)
+                await self._unload_light_model()
             else:
                 logger.info("Phase 1 already done: %d processed sections", len(processed_sections))
                 new_entity_names = []  # will be rebuilt from Phase 2 search
@@ -1997,9 +1973,31 @@ class KGBuildAgent:
                             stats=stats)
                         logger.info("Phase 2: queue size=%d after propagation", len(build_queue))
 
+                    # If propagation didn't fill the queue, process remaining sections
+                    # with root entity as fallback — ensures complete document coverage
                     if not build_queue:
-                        logger.info("Recursive pipeline: queue empty, build complete")
-                        break
+                        remaining = [
+                            sid for sid in sections
+                            if sid not in processed_sections and sid not in ("__root__",)
+                        ]
+                        if remaining:
+                            root_name = root_entity.get("name", doc_name) if root_entity else doc_name
+                            # Sort by section size (larger sections first = more content)
+                            remaining.sort(
+                                key=lambda sid: len(sections.get(sid, [])), reverse=True
+                            )
+                            batch_size = min(5, len(remaining))
+                            for sid in remaining[:batch_size]:
+                                build_queue.append((root_name, sid))
+                            logger.info(
+                                "Phase 2: enqueued %d remaining sections (root entity fallback, %d/%d sections done)",
+                                batch_size,
+                                len(processed_sections),
+                                len(sections) - 1,
+                            )
+                        else:
+                            logger.info("Recursive pipeline: queue empty, build complete")
+                            break
                     continue
 
                 # Phase 3: 处理队列
@@ -2029,6 +2027,10 @@ class KGBuildAgent:
                             section_nodes, entity_name, section_id, doc_name
                         )
                         new_entity_names.extend(new_ents)
+                        for ent in new_ents:
+                            pair = (ent, section_id)
+                            if pair not in processed_pairs:
+                                section_entity_queue.append(ent)
                         if not section_entity_queue:
                             for nd in section_nodes:
                                 tree_state.mark_processed(nd.node_id)
@@ -2041,7 +2043,7 @@ class KGBuildAgent:
 
                 processed_pairs.add(pair)
 
-                if iteration % 10 == 0:
+                if iteration % 50 == 0:  # Save every 50 iterations (was 10); max lost progress ~50 rounds on crash
                     await self._trigger_save()
                     self._save_recursive_state(doc_name, phase or "recursive_phase3",
                         root_entity=root_entity, start_sections=start_sections,
@@ -2057,12 +2059,6 @@ class KGBuildAgent:
             await self._deduplicate_entities()
             await self._trigger_save()
             stats["phase_dedup_time_s"] = round(time.time() - t0, 1)
-
-            # ── 富化: 同章节实体间添加关系 ──
-            logger.info("Recursive pipeline: enriching same-section relations...")
-            enrich_errors: List[Dict] = []
-            await self._enrich_entities(doc_name, set(), enrich_errors)
-            await self._trigger_save()
 
             # ── 图聚合 ──
             logger.info("Recursive pipeline: aggregating graph...")
@@ -2100,15 +2096,46 @@ class KGBuildAgent:
             raise
 
     def _build_section_map(self, tree_state: DocumentTreeState) -> Dict[str, List[DocTreeNode]]:
-        """构建 parent_id → [nodes] 映射（按小节分组）"""
+        """构建 node_id → [node] 映射 — 每个叶节点独立为一段"""
         sections: Dict[str, List[DocTreeNode]] = {}
         for nid in tree_state._all_page_ids:
             if nid not in tree_state.nodes:
                 continue
             node = tree_state.nodes[nid]
-            parent_id = node.parent_id or "__root__"
-            sections.setdefault(parent_id, []).append(node)
+            sections[nid] = [node]
         return sections
+
+    def _build_inverted_index(self, sections: dict) -> Optional[sqlite3.Connection]:
+        """Build SQLite FTS5 inverted index for Phase 2 propagation. Only enabled for >500 sections."""
+        if len(sections) <= 500:
+            return None
+        try:
+            conn = sqlite3.connect(":memory:")
+            conn.execute("CREATE VIRTUAL TABLE section_text_fts USING fts5(section_id UNINDEXED, text, tokenize='unicode61')")
+            for section_id, nodes in sections.items():
+                for nd in nodes:
+                    if nd.text.strip():
+                        conn.execute("INSERT INTO section_text_fts(section_id, text) VALUES (?, ?)",
+                                     (section_id, nd.text))
+            return conn
+        except Exception:
+            return None
+
+    async def _fts_find_sections(self, entity_name: str, aliases: list) -> set:
+        """Query FTS5 index for sections containing entity name or aliases."""
+        if self._fts_index is None:
+            return set()
+        terms = [f'"{name}"' for name in [entity_name] + list(aliases) if name and len(name) >= 2]
+        if not terms:
+            return set()
+        query = " OR ".join(terms)
+        try:
+            cursor = self._fts_index.execute(
+                "SELECT DISTINCT section_id FROM section_text_fts WHERE text MATCH ?", (query,)
+            )
+            return {row[0] for row in cursor.fetchall()}
+        except Exception:
+            return set()
 
     async def _identify_root(
         self, rag_doc, tree_state: DocumentTreeState,
@@ -2203,20 +2230,29 @@ class KGBuildAgent:
         })
         all_new_entity_names.append(root_name)
 
+        # ── Phase 1a: 并行 LLM 调用 ──
+        batch_concurrency = self._get_config("BATCH_CONCURRENCY", 5)
+        sem = asyncio.Semaphore(batch_concurrency)
+
+        section_data: List[Dict] = []
         for sid in start_section_ids:
             nodes = sections.get(sid, [])
             if not nodes and sid in tree_state.nodes:
                 nodes = [tree_state.nodes[sid]]
             if not nodes:
                 continue
+            section_data.append({"sid": sid, "nodes": nodes})
 
-            section_title = nodes[0].title[:60]
-            text_parts = [f"## 页面{nd.page_start}: {nd.title}\n{nd.text}" for nd in nodes]
-            merged_text = "\n\n".join(text_parts)
-            source_pages = [f"p{nd.page_start} {section_title}" for nd in nodes]
+        async def _extract_section(data: dict) -> Any:
+            async with sem:
+                nodes = data["nodes"]
+                sid = data["sid"]
+                section_title = nodes[0].title[:60]
+                text_parts = [f"## 页面{nd.page_start}: {nd.title}\n{nd.text}" for nd in nodes]
+                merged_text = "\n\n".join(text_parts)
+                source_pages = [f"p{nd.page_start} {section_title}" for nd in nodes]
 
-            # 使用已验证的 EXTRACTION_CANDIDATES_PROMPT 格式
-            prompt = f"""页面标题: {section_title}
+                prompt = f"""页面标题: {section_title}
 
 文本内容:
 ---BEGIN---
@@ -2225,29 +2261,41 @@ class KGBuildAgent:
 
 请输出JSON数组。无系统架构内容则输出 []"""
 
-            try:
                 t_call = time.time()
-                response = await asyncio.wait_for(
-                    self.light_llm.ainvoke([
-                        SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
-                        HumanMessage(content=prompt),
-                    ]),
-                    timeout=600,
-                )
-                raw = str(response.content) if hasattr(response, "content") else str(response)
-                logger.debug("Phase 1 LLM (root section %s, %.1fs): %s",
-                              sid, time.time() - t_call, raw[:500])
-            except (asyncio.TimeoutError, Exception) as e:
-                logger.warning("Phase 1 error for section %s: %s", sid, e)
-                continue
+                try:
+                    response = await asyncio.wait_for(
+                        self.light_llm.ainvoke([
+                            SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
+                            HumanMessage(content=prompt),
+                        ]),
+                        timeout=600,
+                    )
+                    raw = str(response.content) if hasattr(response, "content") else str(response)
+                    logger.debug("Phase 1 LLM (root section %s, %.1fs): %s",
+                                  sid, time.time() - t_call, raw[:500])
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.warning("Phase 1 error for section %s: %s", sid, e)
+                    return (sid, nodes, [], [], source_pages, None)
 
-            candidates, relations = self._parse_candidates(raw)
+                candidates, relations = self._parse_candidates(raw)
+                return (sid, nodes, candidates, relations, source_pages, None)
+
+        tasks = [_extract_section(sd) for sd in section_data]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # ── Phase 1b: 顺序 MCP 处理 ──
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error("Phase 1a root section error: %s", result)
+                continue
+            sid, nodes, candidates, relations, source_pages, _ = result
 
             for c in candidates:
                 name = c.get("name", "").strip()
                 if name:
                     all_new_entity_names.append(name)
 
+            section_title = nodes[0].title[:60]
             section_key = section_title if section_title else f"Section {sid}"
             await self._process_candidates(
                 candidates, relations, doc_name,
@@ -2302,6 +2350,25 @@ class KGBuildAgent:
                 aliases = detail.get("aliases", []) or []
             except Exception:
                 pass
+
+            # Fast path: use FTS5 index if available
+            if self._fts_index is not None:
+                matching = await self._fts_find_sections(entity_name, aliases)
+                for section_id in matching:
+                    if section_id not in sections:
+                        continue
+                    if section_id in processed_sections:
+                        continue
+                    pair = (entity_name, section_id)
+                    if pair in processed_pairs:
+                        continue
+                    # Anti-duplicate: check queue
+                    already = any(qe == entity_name and qs == section_id for qe, qs in build_queue)
+                    if already:
+                        continue
+                    build_queue.append((entity_name, section_id))
+                    logger.debug("  Phase 2 (FTS): entity=%s found in section=%s", entity_name, section_id)
+                continue  # Skip substring scan when FTS index used
 
             for section_id, nodes in sections.items():
                 if section_id in processed_sections:

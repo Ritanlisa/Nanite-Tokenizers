@@ -2116,6 +2116,36 @@ def sysml_retrieve(name: str, k: int = 2) -> Dict[str, Any]:
 # MCP 服务器入口
 # ══════════════════════════════════════════════════════════════
 
+
+def sysml_batch(
+    operations: list,
+    continue_on_error: bool = True,
+) -> dict:
+    """批量执行多个 MCP 操作"""
+    results = []
+    errors = []
+    for i, op in enumerate(operations):
+        tool = op.get("tool", "")
+        args = op.get("arguments", {})
+        try:
+            result_text = _run_tool(tool, args)
+            result_data = json.loads(result_text)
+            results.append({"index": i, "tool": tool, "ok": True, "result": result_data})
+        except Exception as exc:
+            entry = {"index": i, "tool": tool, "ok": False, "error": str(exc)}
+            errors.append(entry)
+            results.append(entry)
+            if not continue_on_error:
+                break
+    return {
+        "ok": len(errors) == 0,
+        "total": len(operations),
+        "succeeded": len(results) - len(errors),
+        "failed": len(errors),
+        "results": results,
+    }
+
+
 # 工具元数据（供 MCP/LangChain 使用）
 TOOL_DEFINITIONS = {
     # ── 核心检索 ──
@@ -2444,6 +2474,30 @@ TOOL_DEFINITIONS = {
         "parameters": {
             "entity_name": {"type": "string", "description": "实体名称 (如 compute_module)"},
             "display_name": {"type": "string", "description": "中文显示名 (如 计算模块)"},
+        },
+    },
+    # ── 批量操作 ──
+    "sysml_batch": {
+        "function": sysml_batch,
+        "description": "批量执行多个 MCP 操作，减少 stdio 往返。全部有序执行，部分失败不阻断后续。",
+        "parameters": {
+            "operations": {
+                "type": "array",
+                "description": "操作列表，每项包含 tool 和 arguments",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "tool": {"type": "string", "description": "工具名称"},
+                        "arguments": {"type": "object", "description": "工具参数"},
+                    },
+                    "required": ["tool", "arguments"],
+                },
+            },
+            "continue_on_error": {
+                "type": "boolean",
+                "description": "部分操作失败时是否继续（默认 true）",
+                "default": True,
+            },
         },
     },
 }
