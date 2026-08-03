@@ -286,11 +286,27 @@ class SysMLManager:
         try:
             with open(tmp_path, 'w', encoding='utf-8') as f:
                 f.write(text)
+            # Export relations by parsing connect statements from to_text()
+            rels_list = []
+            import re as _re
+            for r in self.get_all_relations():
+                txt = r.to_text() if hasattr(r, 'to_text') else str(r)
+                m = _re.search(r"connect\s+'((?:[^']|'')*?)'\s+to\s+'((?:[^']|'')*?)'\s*;", txt)
+                if not m:
+                    m = _re.search(r"connect\s+([A-Za-z_][A-Za-z_0-9]*)\s+to\s+([A-Za-z_][A-Za-z_0-9]*)\s*;", txt)
+                if m:
+                    rels_list.append({
+                        "source": m.group(1).strip(),
+                        "target": m.group(2).strip(),
+                        "type": type(r).__name__,
+                        "name": r.name,
+                    })
             with open(tmp_meta, 'w', encoding='utf-8') as f:
                 json.dump({
                     "entities": self._entity_metadata,
+                    "relations": rels_list,
                     "aliases": self._alias_registry.to_dict(),
-                    "version": 2,
+                    "version": 3,
                 }, f, ensure_ascii=False, indent=2)
             tmp_path.replace(file_path)
             tmp_meta.replace(meta_path)

@@ -8,14 +8,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shlex
 import sys
-from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 
 import httpx
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+# Embedded mode - no subprocess needed
 
 import config
 from exceptions import MCPConnectionError, MCPFatalError, MCPTimeoutError
@@ -29,59 +26,49 @@ class MCPSession:
 
     def __init__(
         self,
-        server_command: str,
+        server_command: str = "",
         server_name: str = "",
         max_restart: Optional[int] = None,
         retry_delay: Optional[float] = None,
         timeout: Optional[int] = None,
     ):
-        parts = shlex.split(server_command.strip())
-        if parts and parts[0] in {"python", "python3"}:
-            parts[0] = sys.executable
-        command = parts[0]
-        args = parts[1:] if len(parts) > 1 else []
-        self._server_params = StdioServerParameters(command=command, args=args)
-        self._server_name = server_name or command
+        self._server_name = server_name or "sysml-rag"
         self._max_restart = max_restart if max_restart is not None else config.settings.MCP_MAX_RESTART
         self._retry_delay = retry_delay if retry_delay is not None else config.settings.MCP_RETRY_DELAY
         self._timeout = timeout or config.settings.MCP_TIMEOUT
         self._initialized = False
         self._restart_count = 0
-        self._session: Optional[ClientSession] = None
-        self._exit_stack: Optional[AsyncExitStack] = None
+        self._session = None
         self._lock = asyncio.Lock()
         self._tool_cache: Optional[List[Dict[str, Any]]] = None
+        
+        # Import and initialize embedded server
+        from scripts.sysml_rag_mcp_server import (
+            TOOL_DEFINITIONS, _run_tool, _get_manager,
+            sysml_model_summary,
+        )
+        self._tool_defs = TOOL_DEFINITIONS
+        self._run_tool = _run_tool
+        self._summary_fn = sysml_model_summary
+        _get_manager()  # ensure manager is initialized
 
     async def initialize(self) -> Dict[str, Any]:
         async with self._lock:
             if self._initialized:
                 return self._server_info
-            self._exit_stack = AsyncExitStack()
             try:
-                stdio_transport = await self._exit_stack.enter_async_context(
-                    stdio_client(self._server_params)
-                )
-                read, write = stdio_transport
-                self._session = await self._exit_stack.enter_async_context(
-                    ClientSession(read, write)
-                )
-                init_result = await self._session.initialize()
-                server_info = getattr(init_result, "serverInfo", None)
                 self._server_info = {
-                    "name": getattr(server_info, "name", self._server_name),
-                    "version": getattr(server_info, "version", ""),
-                    "protocolVersion": getattr(init_result, "protocolVersion", ""),
+                    "name": self._server_name,
+                    "version": "embedded",
+                    "protocolVersion": "2024-11-05",
                 }
                 self._initialized = True
                 self._restart_count = 0
-                logger.info("MCP session [%s] connected", self._server_name)
+                logger.info("Embedded MCP server [%s] ready", self._server_name)
                 return self._server_info
             except Exception as exc:
-                logger.error("MCP session [%s] init failed: %s", self._server_name, exc)
-                if self._exit_stack is not None:
-                    await self._exit_stack.aclose()
                 raise MCPConnectionError(
-                    f"MCP session [{self._server_name}] init failed: {exc}"
+                    f"Embedded MCP init failed: {exc}"
                 ) from exc
 
     async def list_tools(self) -> List[Dict[str, Any]]:
@@ -89,43 +76,39 @@ class MCPSession:
             return self._tool_cache
         if not self._initialized:
             await self.initialize()
-        if self._session is None:
-            raise MCPConnectionError(f"MCP session [{self._server_name}] not initialized")
-        try:
-            result = await self._session.list_tools()
-            tools = getattr(result, "tools", [])
-            schemas = []
-            for t in tools:
-                schemas.append({
-                    "name": getattr(t, "name", ""),
-                    "description": getattr(t, "description", ""),
-                    "inputSchema": getattr(t, "inputSchema", {}),
-                })
-            self._tool_cache = schemas
-            return schemas
-        except (ConnectionError, BrokenPipeError, OSError) as exc:
-            raise self._handle_connection_error(exc, "list_tools")
+        schemas = []
+        for name, defn in self._tool_defs.items():
+            properties = {}
+            required = []
+            for k, v in defn["parameters"].items():
+                entry = {"type": v["type"], "description": v.get("description", "")}
+                if "default" in v:
+                    entry["default"] = v["default"]
+                else:
+                    required.append(k)
+                if v.get("items"):
+                    entry["items"] = v["items"]
+                properties[k] = entry
+            schemas.append({
+                "name": name,
+                "description": defn["description"],
+                "inputSchema": {"type": "object", "properties": properties, "required": required},
+            })
+        self._tool_cache = schemas
+        return schemas
 
     async def call_tool(self, name: str, arguments: Dict[str, Any]) -> str:
         if not self._initialized:
             await self.initialize()
-        if self._session is None:
-            raise MCPConnectionError(f"MCP session [{self._server_name}] not initialized")
         try:
             result = await asyncio.wait_for(
-                self._session.call_tool(name, arguments),
+                asyncio.to_thread(self._run_tool, name, arguments),
                 timeout=self._timeout,
             )
-            content = getattr(result, "content", [])
-            if isinstance(content, list) and content:
-                for item in content:
-                    text = getattr(item, "text", None)
-                    if text:
-                        return text
-            return str(content)
+            return result
         except asyncio.TimeoutError:
-            raise MCPTimeoutError(f"MCP call [{self._server_name}] timed out: {name}")
-        except (ConnectionError, BrokenPipeError, OSError) as exc:
+            raise MCPTimeoutError(f"Embedded MCP call timed out: {name}")
+        except Exception as exc:
             raise self._handle_connection_error(exc, name)
 
     def _handle_connection_error(self, exc: Exception, method: str) -> Exception:
@@ -143,7 +126,7 @@ class MCPSession:
 
     async def close(self) -> None:
         self._tool_cache = None
-        if self._exit_stack is not None:
+        if False:
             try:
                 await self._exit_stack.aclose()
             except (RuntimeError, Exception) as exc:

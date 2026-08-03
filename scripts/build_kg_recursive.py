@@ -30,13 +30,14 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import config
+from gephi_streamer import GephiStreamer
 
 # ═══════════════════════════════════════════════════════════════
 # Configuration
 # ═══════════════════════════════════════════════════════════════
 
-DB_NAME = "AIOPS_New"
-DOC_PATH = "/home/ritanlisa/文档/湖超-硬件维护手册20231225.doc"
+DB_NAME = "Intel_Manual_v2"
+DOC_PATH = "/home/hjq/Nanite-Tokenizers-lite/Intel® 64 和 IA-32 架构软件开发者手册合集.pdf"
 ROOT_MODEL = "qwen3:8b"
 EXTRACT_MODEL = "qwen3:8b"
 
@@ -99,6 +100,13 @@ for lib in ["openai", "httpx", "httpcore", "chromadb", "sentence_transformers",
     logging.getLogger(lib).setLevel(logging.ERROR)
 
 logger = logging.getLogger("kg_build")
+# ── Gephi Streaming ──
+gephi = GephiStreamer()
+gephi.connect()
+if gephi.connected:
+    logger.info("Gephi streaming connected")
+else:
+    logger.info("Gephi not available (streaming disabled)")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -127,6 +135,10 @@ async def _logged_call_tool(session, tool_name: str, arguments: dict) -> str:
                          arguments.get("entity_type", "?"), arguments.get("name", "?"),
                          result_parsed.get("qualified_name", "?") if result_parsed else "?",
                          arguments.get("source_sections", []), ok, elapsed)
+            if ok and gephi.connected:
+                qn = result_parsed.get("qualified_name", "") if result_parsed else ""
+                if qn:
+                    gephi.sync_entity(qn, entity_type=arguments.get("entity_type", "PartDef"))
         elif tool_name == "sysml_update_entity":
             logger.info("MCP UPDATE | qn=%s | append_source=%s | %.2fs",
                          arguments.get("qualified_name", "?"),
@@ -137,6 +149,12 @@ async def _logged_call_tool(session, tool_name: str, arguments: dict) -> str:
                          arguments.get("source", "?"), arguments.get("target", "?"),
                          arguments.get("name", "?"), arguments.get("source_sections", []),
                          ok, elapsed)
+            if ok and gephi.connected:
+                src = arguments.get("source", "")
+                tgt = arguments.get("target", "")
+                rid = arguments.get("name", "") or f"{src}→{tgt}"
+                if src and tgt:
+                    gephi.sync_relation(rid, src, tgt, arguments.get("relation_type", "ReferenceUsage"), label=arguments.get("name", ""))
         elif tool_name == "sysml_merge_entities":
             logger.info("MCP MERGE | %s → %s | ok=%s | %.2fs",
                          arguments.get("source", "?"), arguments.get("target", "?"),
@@ -194,7 +212,7 @@ config.settings = config.settings.update(
     KG_EXTRACTION_TEMPERATURE=0.1,
     KG_EXTRACTION_TIMEOUT=300,
     KG_EXTRACTION_MAX_ITERATIONS=500,
-    BATCH_CONCURRENCY=1,
+    BATCH_CONCURRENCY=8,
     KG_KEEP_ALIVE="3600s",
     OCR_MODEL=None,
     OCR_API_URL=None,
@@ -212,6 +230,16 @@ async def main():
     logger.info("  Extract model: %s (Phase 3)", EXTRACT_MODEL)
     logger.info("  Log file: %s", LOG_FILE)
     logger.info("=" * 70)
+
+    # Initialize MCP early (before heavy document loading)
+    try:
+        from mcp_client.mcp_session import create_sysml_mcp_session
+        _early_mcp = create_sysml_mcp_session()
+        await asyncio.wait_for(_early_mcp.initialize(), timeout=30)
+        logger.info("MCP session established early")
+    except Exception as e:
+        logger.warning("Early MCP init failed: %s (will retry later)", e)
+        _early_mcp = None
 
     # Load document
     from rag.documents import load_rag_documents_from_paths
@@ -245,6 +273,9 @@ async def main():
 
     agent = KGBuildAgent(db_name=DB_NAME, model=ROOT_MODEL,
                          light_model=EXTRACT_MODEL)
+    # Pass pre-initialized MCP session if available
+    if _early_mcp is not None:
+        agent._mcp_session = _early_mcp
     agent.timeout = 300
     agent.max_iterations = 500
 
@@ -294,6 +325,9 @@ async def main():
         return 1
     finally:
         await agent.close()
+        if gephi.connected:
+            gephi.disconnect()
+            logger.info("Gephi streaming disconnected")
 
     logger.info("Log saved to: %s", LOG_FILE)
     return 0

@@ -44,6 +44,7 @@ dependencies = [
   "jieba>=0.42.1",
   "line-profiler>=5.0.2",
   "lark>=1.2.2",
+  "llama-index-readers-file>=0.6.0",
 ]
 
 [project.scripts]
@@ -77,4 +78,3 @@ explicit = true
 
 [tool.uv]
 allow-insecure-host = ["github.com"]
-required-environments = ["sys_platform == 'win32' and platform_machine == 'AMD64'"]

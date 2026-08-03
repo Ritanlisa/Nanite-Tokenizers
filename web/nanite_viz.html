@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh">
+<head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Intel Manual KG</title><script src="cytoscape.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0f1115;color:#f6f7fb;font-family:'Segoe UI',sans-serif;overflow:hidden;height:100vh;display:flex}
+#side{width:240px;background:#171a21;border-right:1px solid rgba(255,255,255,0.08);padding:14px;overflow-y:auto;flex-shrink:0}
+#side h2{font-size:13px;color:#f5c26b;margin-bottom:10px}
+#side label{font-size:10px;color:#9aa3b2;display:block;margin-top:8px;margin-bottom:3px}
+#side select,#side input{width:100%;padding:6px 8px;border-radius:5px;border:1px solid rgba(255,255,255,0.12);background:#202533;color:#f6f7fb;font-size:11px}
+#cy{flex:1;height:100vh}
+.s{font-size:10px;color:#9aa3b2;margin:3px 0}
+.s span{color:#f6f7fb}
+#legend .item{font-size:10px;color:#9aa3b2;padding:1px 0;display:flex;align-items:center;gap:5px}
+#legend .dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex-shrink:0}
+#legend .line{width:14px;height:2px;display:inline-block;flex-shrink:0;border-radius:1px}
+#dt{position:absolute;bottom:20px;left:50%;transform:translateX(-50%);background:rgba(23,26,33,0.95);padding:8px 14px;border-radius:6px;font-size:11px;border:1px solid rgba(255,255,255,0.08);display:none;max-width:500px;z-index:100;pointer-events:none}
+</style></head>
+<body>
+<div id="side">
+  <h2>📘 KG Explorer</h2>
+  <label>Layout</label>
+  <select id="ly" onchange="go()">
+    <option value="cose">CoSE</option><option value="concentric">Concentric</option><option value="circle">Circle</option><option value="grid">Grid</option>
+  </select>
+  <label>Search</label>
+  <input id="srch" placeholder="filter..." oninput="filt()"/>
+  <div class="s">Nodes: <span id="nc">0</span></div>
+  <div class="s">Edges: <span id="ec">0</span></div>
+  <div id="legend"></div>
+</div>
+<div id="cy"></div>
+<div id="dt"></div>
+<script>
+var N=[{"id": "Intel_64_and_IA-32_Architectures", "name": "Intel_64_and_IA-32_Architectures", "label": "Intel_64_and_IA-32_Architectures", "type": "PartDef", "description": "Intel 64和IA-32架构的处理器模型特定寄存器（MSRs）的软件开发手册"}, {"id": "FRED", "name": "FRED", "label": "FRED", "type": "PartDef", "description": "FLEXIBLE RETURN AND EVENT DELIVERY 事件交付机制"}, {"id": "ERETU", "name": "ERETU", "label": "ERETU", "type": "PartDef", "description": "Event Return to User 返回状态处理组件"}, {"id": "RSP", "name": "RSP", "label": "RSP", "type": "AttributeDef", "description": "堆栈指针寄存器（8字节字段）"}, {"id": "RIP", "name": "RIP", "label": "RIP", "type": "AttributeDef", "description": "指令指针寄存器（64位）"}, {"id": "RFLAGS", "name": "RFLAGS", "label": "RFLAGS", "type": "AttributeDef", "description": "标志寄存器（64位）"}, {"id": "CPL", "name": "CPL", "label": "CPL", "type": "AttributeDef", "description": "代码段特权级（3表示环3）"}, {"id": "stack_frame", "name": "stack_frame", "label": "stack_frame", "type": "ItemDef", "description": "保存返回状态的堆栈帧结构"}, {"id": "CS_selector", "name": "CS_selector", "label": "CS_selector", "type": "AttributeDef", "description": "代码段选择器（16位）"}, {"id": "SS_selector", "name": "SS_selector", "label": "SS_selector", "type": "AttributeDef", "description": "段选择器（16位）"}, {"id": "IOPL", "name": "IOPL", "label": "IOPL", "type": "AttributeDef", "description": "输入输出权限级别（2位）"}, {"id": "VM", "name": "VM", "label": "VM", "type": "AttributeDef", "description": "虚拟化标志位（1位）"}, {"id": "CS_Selector_Constraint", "name": "CS_Selector_Constraint", "label": "CS_Selector_Constraint", "type": "RequirementDef", "description": "Bits 1:0 must be 3 for valid CS selector"}, {"id": "CS_Segment_Zeroing", "name": "CS_Segment_Zeroing", "label": "CS_Segment_Zeroing", "type": "RequirementDef", "description": "Bits 63:16 of CS field must be zero"}, {"id": "RFLAGS_Bit_Mask", "name": "RFLAGS_Bit_Mask", "label": "RFLAGS_Bit_Mask", "type": "RequirementDef", "description": "Specific bits must be 1 or 0 for valid RFLAGS"}, {"id": "SS_Selector_Constraint", "name": "SS_Selector_Constraint", "label": "SS_Selector_Constraint", "type": "RequirementDef", "description": "Bits 1:0 must be 3 for valid SS selector"}, {"id": "返回状态", "name": "返回状态", "label": "返回状态", "type": "ItemDef", "description": "由FRED事件交付保存的返回状态数据结构\n事件返回时保存的上下文状态"}, {"id": "RIP检查", "name": "RIP检查", "label": "RIP检查", "type": "RequirementDef", "description": "验证RIP字段的CS配置有效性"}, {"id": "SS选择器检查", "name": "SS选择器检查", "label": "SS选择器检查", "type": "RequirementDef", "description": "SS选择器的位值有效性验证"}, {"id": "augmented_CS", "name": "augmented_CS", "label": "augmented_CS", "type": "AttributeDef", "description": "CS segment register of return state"}, {"id": "augmented_SS", "name": "augmented_SS", "label": "augmented_SS", "type": "AttributeDef", "description": "SS segment register of return state"}, {"id": "event_information", "name": "event_information", "label": "event_information", "type": "ItemDef", "description": "Event data field in augmented SS"}, {"id": "RFLAGS_Bit3_5_13_12_15_17_63_22", "name": "RFLAGS_Bit3_5_13_12_15_17_63_22", "label": "RFLAGS_Bit3_5_13_12_15_17_63_22", "type": "RequirementDef", "description": "RFLAGS的第3、5、13-12（IOPL）、15、17（VM）位以及63-22位必须为0"}, {"id": "IOPL_Check", "name": "IOPL_Check", "label": "IOPL_Check", "type": "RequirementDef", "description": "当FRED转换启用时，IOPL必须为0且CPL=3"}, {"id": "CPL_3配置约束", "name": "CPL_3配置约束", "label": "CPL_3配置约束", "type": "RequirementDef", "description": "64位模式下CPL 3的CS/SS段寄存器配置要求"}, {"id": "SS_Selector_Check", "name": "SS_Selector_Check", "label": "SS_Selector_Check", "type": "RequirementDef", "description": "Bits 1:0 of SS selector must be 3"}, {"id": "IA32_STAR[63_48]_+_8", "name": "IA32_STAR[63_48]_+_8", "label": "IA32_STAR[63_48]_+_8", "type": "AttributeDef", "description": "SS selector value calculation\nCS selector value calculation\nIA-32架构扩展控制寄存器，包含64位地址字段"}, {"id": "CS检查要求", "name": "CS检查要求", "label": "CS检查要求", "type": "RequirementDef", "description": "确保CS选择子的位1:0为3，否则触发#GP异常\nBits 1:0 of CS selector must be 3"}, {"id": "SS检查要求", "name": "SS检查要求", "label": "SS检查要求", "type": "RequirementDef", "description": "确保SS选择子的位1:0为3，否则触发#GP异常"}, {"id": "RFLAGS检查规范", "name": "RFLAGS检查规范", "label": "RFLAGS检查规范", "type": "RequirementDef", "description": "RFLAGS位字段的验证约束条件\nRFLAGS字段的位值约束条件"}, {"id": "RFLAGS_Checks", "name": "RFLAGS_Checks", "label": "RFLAGS_Checks", "type": "RequirementDef", "description": "Constraints on RFLAGS bits for valid return state"}, {"id": "CS_Configuration", "name": "CS_Configuration", "label": "CS_Configuration", "type": "RequirementDef", "description": "Requirements for augmented CS selector validation"}, {"id": "SS_Configuration", "name": "SS_Configuration", "label": "SS_Configuration", "type": "RequirementDef", "description": "Requirements for augmented SS selector validation"}, {"id": "RFLAGS_Bit_Check", "name": "RFLAGS_Bit_Check", "label": "RFLAGS_Bit_Check", "type": "RequirementDef", "description": "Specific bits must be zero in RFLAGS\nRFLAGS bit 1 must be 1, bits 3,5,13:12,15,17,63:22 must be 0"}, {"id": "IA32_STAR_Configuration", "name": "IA32_STAR_Configuration", "label": "IA32_STAR_Configuration", "type": "RequirementDef", "description": "Selector values must match IA32_STAR[63:48]"}, {"id": "IOPL_Requirement", "name": "IOPL_Requirement", "label": "IOPL_Requirement", "type": "RequirementDef", "description": "IOPL must be 0 when CPL=3 and FRED transitions are enabled"}, {"id": "#GP异常约束", "name": "#GP异常约束", "label": "#GP异常约束", "type": "RequirementDef", "description": "非法操作码异常约束条件\n通用保护异常触发条件，用于验证寄存器字段值\n通用保护异常约束条件"}, {"id": "CS_selector_bits_1_0_must_be_3", "name": "CS_selector_bits_1_0_must_be_3", "label": "CS_selector_bits_1_0_must_be_3", "type": "RequirementDef", "description": "Constraint on CS selector bits"}, {"id": "CS_selector_bits_63_16_must_be_zero", "name": "CS_selector_bits_63_16_must_be_zero", "label": "CS_selector_bits_63_16_must_be_zero", "type": "RequirementDef", "description": "Constraint on CS selector bits"}, {"id": "RFLAGS_bit_1_must_be_1", "name": "RFLAGS_bit_1_must_be_1", "label": "RFLAGS_bit_1_must_be_1", "type": "RequirementDef", "description": "Constraint on RFLAGS bits\nRFLAGS的第1位必须为1"}, {"id": "RFLAGS_bits_3_5_13_12_15_17_63_22_must_be_zero", "name": "RFLAGS_bits_3_5_13_12_15_17_63_22_must_be_zero", "label": "RFLAGS_bits_3_5_13_12_15_17_63_22_m", "type": "RequirementDef", "description": "Constraint on RFLAGS bits"}, {"id": "SS_selector_bits_17_and_18_determine_event_management", "name": "SS_selector_bits_17_and_18_determine_event_management", "label": "SS_selector_bits_17_and_18_determin", "type": "RequirementDef", "description": "Constraint on SS selector bits"}, {"id": "SS_selector_bits_31_19_must_be_zero", "name": "SS_selector_bits_31_19_must_be_zero", "label": "SS_selector_bits_31_19_must_be_zero", "type": "RequirementDef", "description": "Constraint on SS selector bits"}, {"id": "RIP_Check", "name": "RIP_Check", "label": "RIP_Check", "type": "RequirementDef", "description": "检查RIP字段是否符合要求"}, {"id": "CS_Bits_Check", "name": "CS_Bits_Check", "label": "CS_Bits_Check", "type": "RequirementDef", "description": "检查CS字段的位63:16是否为零"}, {"id": "RFLAGS_Bits_Check", "name": "RFLAGS_Bits_Check", "label": "RFLAGS_Bits_Check", "type": "RequirementDef", "description": "检查RFLAGS的特定位是否为零"}, {"id": "SS_Bits_Check", "name": "SS_Bits_Check", "label": "SS_Bits_Check", "type": "RequirementDef", "description": "检查SS字段的位31:19是否为零"}, {"id": "CS_Segment_Register", "name": "CS_Segment_Register", "label": "CS_Segment_Register", "type": "PartDef", "description": "代码段寄存器，用于存储返回状态的CS配置"}, {"id": "SS_Segment_Register", "name": "SS_Segment_Register", "label": "SS_Segment_Register", "type": "PartDef", "description": "堆栈段寄存器，用于存储返回状态的SS配置"}, {"id": "8-byte_field", "name": "8-byte_field", "label": "8-byte_field", "type": "PartDef", "description": "关系端点: RSP引用包含事件错误码的8字节字段"}, {"id": "#GP_Exception", "name": "#GP_Exception", "label": "#GP_Exception", "type": "RequirementDef", "description": "General Protection Fault triggered by invalid register state checks"}, {"id": "CPL_3_configuration", "name": "CPL_3_configuration", "label": "CPL_3_configuration", "type": "RequirementDef", "description": "64-bit mode privilege level requirement"}, {"id": "CS增强字段", "name": "CS增强字段", "label": "CS增强字段", "type": "AttributeDef", "description": "代码段选择子及权限位（64位）"}, {"id": "SS增强字段", "name": "SS增强字段", "label": "SS增强字段", "type": "AttributeDef", "description": "堆栈段选择子及权限位（64位）"}, {"id": "CS选择子检查", "name": "CS选择子检查", "label": "CS选择子检查", "type": "RequirementDef", "description": "确保CS选择子的低两位为3，否则触发#GP异常"}, {"id": "RFLAGS位检查", "name": "RFLAGS位检查", "label": "RFLAGS位检查", "type": "RequirementDef", "description": "RFLAGS的特定位必须为0或1，否则触发#GP异常"}, {"id": "SS选择子检查", "name": "SS选择子检查", "label": "SS选择子检查", "type": "RequirementDef", "description": "确保SS选择子的低两位为3，否则触发#GP异常"}, {"id": "IOPL检查", "name": "IOPL检查", "label": "IOPL检查", "type": "RequirementDef", "description": "确保在FRED转换启用时，IOPL为0且CPL=3"}, {"id": "CPL_3_Check", "name": "CPL_3_Check", "label": "CPL_3_Check", "type": "RequirementDef", "description": "Constraint: CPL must be 3 for 64-bit mode"}, {"id": "CPL_3_Privilege", "name": "CPL_3_Privilege", "label": "CPL_3_Privilege", "type": "RequirementDef", "description": "CPL=3时IOPL必须为0的约束要求"}]; var E=[]; var TC={"PartDef": "#f87171", "AttributeDef": "#60a5fa", "ItemDef": "#34d399", "RequirementDef": "#a78bfa", "Package": "#fb923c", "entity": "#a78bfa", "core": "#f87171", "non-core": "#60a5fa", "toc": "#34d399"}; var EC={"ConnectionUsage": "#94a3b8", "InterfaceUsage": "#06b6d4", "AllocationUsage": "#f59e0b"};
+var nm={}; N.forEach(function(n){nm[n.id]=n;});
+var ve=E.filter(function(e){return nm[e.source]&&nm[e.target];});
+var nt=[...new Set(N.map(function(n){return n.type;}).filter(Boolean))];
+var et=[...new Set(ve.map(function(e){return e.type;}).filter(Boolean))];
+var cy=null;
+function gl(n){
+  if(n==='cose') return {name:'cose',nodeRepulsion:10000,idealEdgeLength:150,gravity:0.3};
+  if(n==='concentric') return {name:'concentric',concentric:function(n){var L={PartDef:0,AttributeDef:1,ItemDef:2,RequirementDef:3,Package:4};return L[n.data('type')]!==undefined?L[n.data('type')]:9;},levelWidth:function(){return 2;},minNodeSpacing:80};
+  if(n==='circle') return {name:'circle'};
+  if(n==='grid') return {name:'grid'};
+  return {name:'cose'};
+}
+function go(){if(!cy) return; cy.layout(gl(document.getElementById('ly').value)).run();}
+function filt(){
+  var q=document.getElementById('srch').value.trim().toLowerCase();
+  if(!cy) return;
+  cy.nodes().forEach(function(n){n.style('display',(!q||(n.data('id')||'').toLowerCase().includes(q)||(n.data('label')||'').toLowerCase().includes(q))?'element':'none');});
+}
+render('cose');
+function render(l){
+  var nn=N.map(function(n){return{data:{id:n.id,label:n.label,type:n.type,color:TC[n.type]||'#666'}};});
+  var ee=ve.map(function(e){return{data:{id:'e'+Math.random(),source:e.source,target:e.target,type:e.type,color:EC[e.type]||'#4a5568'}};});
+  document.getElementById('nc').textContent=N.length;
+  document.getElementById('ec').textContent=ve.length;
+  if(cy) cy.destroy();
+  cy=cytoscape({
+    container:document.getElementById('cy'),
+    elements:{nodes:nn,edges:ee},
+    style:[
+      {selector:'node',style:{'background-color':'data(color)','label':'data(label)','color':'#f6f7fb','font-size':'9px','text-valign':'center','text-halign':'center','text-wrap':'wrap','text-max-width':'120px','width':24,'height':24,'border-width':1.5,'border-color':'rgba(255,255,255,0.15)','opacity':0.85}},
+      {selector:'node:selected',style:{'border-color':'#f5c26b','border-width':3,'opacity':1}},
+      {selector:'edge',style:{'width':1.2,'line-color':'data(color)','curve-style':'unbundled-bezier','opacity':0.3,'label':'data(type)','font-size':'6px','color':'#64748b','text-opacity':0.5}},
+    ],
+    layout:gl(l),
+  });
+  cy.on('tap','node',function(ev){
+    var d=ev.target.data();
+    var el=document.getElementById('dt');
+    el.style.display='block';
+    el.innerHTML='<b>'+d.label+'</b> | '+d.type;
+    setTimeout(function(){el.style.display='none';},3000);
+  });
+}
+var lg=document.getElementById('legend');
+if(nt.length){
+  lg.innerHTML='<div style="font-size:10px;color:#f6f7fb;margin-bottom:4px">Nodes</div>';
+  nt.forEach(function(t){lg.innerHTML+='<div class="item"><span class="dot" style="background:'+(TC[t]||'#666')+'"></span>'+t+'</div>';});
+}
+if(et.length){
+  lg.innerHTML+='<div style="font-size:10px;color:#f6f7fb;margin-top:8px;margin-bottom:4px">Edges</div>';
+  et.forEach(function(t){lg.innerHTML+='<div class="item"><span class="line" style="background:'+(EC[t]||'#4a5568')+'"></span>'+t+'</div>';});
+}
+</script></body></html>

@@ -557,7 +557,7 @@ class KGBuildAgent:
                 base_url=config.settings.OPENAI_API_URL,
                 timeout=self.timeout,
                 streaming=True,
-                model_kwargs={"keep_alive": str(self._get_config("KG_KEEP_ALIVE", "3600s"))},
+                extra_body={"keep_alive": str(self._get_config("KG_KEEP_ALIVE", "3600s"))},
                 max_tokens=max_tokens,
             )
         return self._llm
@@ -575,7 +575,7 @@ class KGBuildAgent:
                 base_url=config.settings.OPENAI_API_URL,
                 timeout=600,
                 streaming=False,
-                model_kwargs={"keep_alive": str(self._get_config("KG_KEEP_ALIVE", "3600s"))},
+                extra_body={"keep_alive": str(self._get_config("KG_KEEP_ALIVE", "3600s"))},
                 max_tokens=max_tokens,
             )
         return self._light_llm
@@ -1038,6 +1038,11 @@ class KGBuildAgent:
                         continue
                     # 关系: 显式标记 relation=true 或有 source+target 字段
                     if item.get("relation") or (item.get("source") and item.get("target")):
+                        # Normalize source/target from list to string (LLM output quirk)
+                        for _k in ("source", "target"):
+                            _v = item.get(_k)
+                            if isinstance(_v, list):
+                                item[_k] = str(_v[0]).strip() if _v else ""
                         relations.append(item)
                     elif item.get("name"):
                         candidates.append(item)
@@ -1512,7 +1517,7 @@ class KGBuildAgent:
                 if rr.get("ok"):
                     created_relations += 1
 
-        return {"entities": created_entities, "relations": created_relations}
+        return {"entities": created_entities, "relations": created_relations, "entity_map": entity_qn_map}
 
     # ── Phase 3: Enrichment ──────────────────────────────────
 
@@ -2213,10 +2218,11 @@ class KGBuildAgent:
             current_section = build.get("current_section")
 
             t0 = time.time()
+            self._section_entity_count = {}
 
             # ── Phase 2 → Phase 3 循环 ──
             iteration = 0
-            max_iterations = 500
+            max_iterations = 10000
             while iteration < max_iterations:
                 iteration += 1
                 logger.debug("Recursive loop iteration %d: build_queue=%d, processed=%d",
@@ -2296,7 +2302,12 @@ class KGBuildAgent:
                             pair = (ent, section_id)
                             if pair not in processed_pairs:
                                 section_entity_queue.append(ent)
-                        if not section_entity_queue:
+                        if new_ents:
+                            self._section_entity_count[section_id] = self._section_entity_count.get(section_id, 0) + len(new_ents)
+                        if not section_entity_queue or self._section_entity_count.get(section_id, 0) >= 50:
+                            if self._section_entity_count.get(section_id, 0) >= 50:
+                                logger.info("Phase 3: section %s max entities reached (%d), force done",
+                                             section_id, self._section_entity_count[section_id])
                             for nd in section_nodes:
                                 tree_state.mark_processed(nd.node_id)
                             processed_sections.add(section_id)
@@ -2562,11 +2573,12 @@ class KGBuildAgent:
 
             section_title = nodes[0].title[:60]
             section_key = section_title if section_title else f"Section {sid}"
-            await self._process_candidates_batch(
+            batch_result = await self._process_candidates_batch(
                 candidates, relations, doc_name,
                 nodes[0].page_start, section_key,
                 source_pages=source_pages,
             )
+            entity_map = batch_result.get("entity_map", {})
 
             # ── Auto-connect root-section entities to root entity ──
             if root_name:
@@ -2579,12 +2591,31 @@ class KGBuildAgent:
                         connected.add(s)
                     if t:
                         connected.add(t)
+                # Resolve root entity QN (with MCP fallback if not in entity_map)
+                root_qn = entity_map.get(root_name, root_name)
+                if root_qn == root_name and root_name:
+                    try:
+                        _sr = await self._mcp_session.call_tool("sysml_search_entity", {"query": root_name[:50], "threshold": 0.3})
+                        _sd = __import__('json').loads(_sr)
+                        if _sd.get("total_matches", 0) > 0:
+                            root_qn = _sd["matches"][0].get("qualified_name", root_name)
+                    except Exception:
+                        pass
                 for name in sorted(section_names):
                     if name and name not in connected and name != root_name:
+                        qn = entity_map.get(name, name)
+                        if qn == name:
+                            try:
+                                _sr2 = await self._mcp_session.call_tool("sysml_search_entity", {"query": name[:50], "threshold": 0.3})
+                                _sd2 = __import__('json').loads(_sr2)
+                                if _sd2.get("total_matches", 0) > 0:
+                                    qn = _sd2["matches"][0].get("qualified_name", name)
+                            except Exception:
+                                pass
                         await self._mcp_session.call_tool("sysml_add_relation", {
                             "relation_type": "allocation",
-                            "source": name,
-                            "target": root_name,
+                            "source": qn,
+                            "target": root_qn,
                             "description": f"{name}是{root_name}的组成部分",
                             "source_sections": source_pages,
                         })
@@ -2721,23 +2752,38 @@ class KGBuildAgent:
             nodes[0].page_start, section_key,
             source_pages=source_pages,
         )
+        entity_map = result.get("entity_map", {})
 
         # ── Auto-connect new entities to focus entity (structural integrity) ──
         if new_entity_names and entity_name:
             connected = set()
             for r in relations:
-                s = r.get("source", "").strip()
-                t = r.get("target", "").strip()
+                s_raw = r.get("source", "")
+                if isinstance(s_raw, list): s_raw = s_raw[0] if s_raw else ""
+                t_raw = r.get("target", "")
+                if isinstance(t_raw, list): t_raw = t_raw[0] if t_raw else ""
+                s = str(s_raw).strip()
+                t = str(t_raw).strip()
                 if s:
                     connected.add(s)
                 if t:
                     connected.add(t)
+            # Resolve focus entity QN
+            focus_qn = entity_map.get(entity_name, entity_name)
+            if focus_qn == entity_name and entity_name:
+                try:
+                    sr = __import__('json').loads(await self._mcp_session.call_tool("sysml_search_entity", {"query": entity_name, "threshold": 0.5}))
+                    if sr.get("total_matches", 0) > 0:
+                        focus_qn = sr["matches"][0].get("qualified_name", entity_name)
+                except Exception:
+                    pass
             for name in new_entity_names:
                 if name and name not in connected and name != entity_name:
+                    qn = entity_map.get(name, name)
                     await self._mcp_session.call_tool("sysml_add_relation", {
                         "relation_type": "allocation",
-                        "source": name,
-                        "target": entity_name,
+                        "source": qn,
+                        "target": focus_qn,
                         "description": f"{name}关联到{entity_name}",
                         "source_sections": source_pages,
                     })
