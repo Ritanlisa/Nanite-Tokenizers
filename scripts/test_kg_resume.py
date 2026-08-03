@@ -64,6 +64,9 @@ MINIMAL_DOC_TEXT = """## 1.1 系统概述
 """
 
 
+import pytest
+pytestmark = pytest.mark.integration
+
 def setup_logging():
     logging.basicConfig(
         level=logging.DEBUG,

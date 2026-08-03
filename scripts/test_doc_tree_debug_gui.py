@@ -54,6 +54,9 @@ HEAVY_METADATA_KEYS: Set[str] = {
 }
 
 
+import pytest
+pytestmark = pytest.mark.gui
+
 def _sanitize_filename(name: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fff._-]+", "_", str(name).strip())
     return cleaned or "document"

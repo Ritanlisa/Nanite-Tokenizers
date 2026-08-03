@@ -85,7 +85,7 @@ dev = ["pytest>=8.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -m \"not gui and not integration\""
 pythonpath = ["."]
 markers = [
     "gui: GUI debug tests (deselect with '-m \"not gui\"')",

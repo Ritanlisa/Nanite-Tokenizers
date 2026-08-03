@@ -12,6 +12,9 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 
+import pytest
+pytestmark = pytest.mark.integration
+
 def _default_value_from_annotation(annotation: Any) -> Any:
     text = str(annotation)
     if "int" in text:

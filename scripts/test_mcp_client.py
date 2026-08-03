@@ -7,6 +7,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+import pytest
+pytestmark = pytest.mark.integration
+
 async def test_mcp_session():
     """Test MCPSession with SysML MCP server"""
     print("=== Test MCPSession ===")

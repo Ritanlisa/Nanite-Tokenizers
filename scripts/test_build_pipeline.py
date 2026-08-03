@@ -8,6 +8,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+import pytest
+pytestmark = pytest.mark.integration
+
 def test_section_extraction():
     """Test that section extraction works with mock RAG documents"""
     print("=== Test section extraction ===")

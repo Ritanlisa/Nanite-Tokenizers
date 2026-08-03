@@ -8,6 +8,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+import pytest
+pytestmark = pytest.mark.integration
+
 async def test_kg_agent_init():
     """Test KGBuildAgent initialization and tool building"""
     print("=== Test KGBuildAgent init ===")

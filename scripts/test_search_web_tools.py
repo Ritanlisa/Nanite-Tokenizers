@@ -23,6 +23,9 @@ FAIL_HINTS = (
 )
 
 
+import pytest
+pytestmark = pytest.mark.integration
+
 def _parse_json_safely(text: str) -> Any:
     try:
         return json.loads(text)

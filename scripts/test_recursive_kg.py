@@ -143,6 +143,9 @@ config.settings = config.settings.update(
 # Tests
 # ═══════════════════════════════════════════════════════════════
 
+import pytest
+pytestmark = pytest.mark.integration
+
 async def main():
     from agent.kg_build_agent import KGBuildAgent, DocumentTreeState
 
