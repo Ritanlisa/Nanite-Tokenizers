@@ -70,6 +70,9 @@ class PyMuPDF4LLMPDFReader(BaseReader):
             return True
         if bool(re.fullmatch(r"contents(?:[ivxlcdm]+|\d+)?", compact)):
             return True
+        # "CONTENTS" (all caps) — common in Intel-style manuals
+        if lowered == "contents" or (len(lowered) <= 19 and lowered.startswith("contents")):
+            return True
         return False
 
     @classmethod
@@ -78,8 +81,26 @@ class PyMuPDF4LLMPDFReader(BaseReader):
         if not text:
             return False
         return bool(
-            re.match(r"^\s*([\u4e00-\u9fffA-Za-z0-9][^\n]{1,160}?)(?:\t+|[·•.\s]{2,})(\d{1,4})\s*$", text)
+            re.match(
+                r"^\s*([\u4e00-\u9fffA-Za-z0-9][^\n]{1,160}?)(?:\t+|[·•.\s]{2,})(\d{1,4}|[IVXLCDM]{1,8})\s*$",
+                text,
+                flags=re.IGNORECASE,
+            )
         )
+
+    @staticmethod
+    def _roman_to_int(roman: str) -> int:
+        values = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+        total = 0
+        prev = 0
+        for ch in reversed(str(roman or "").upper().strip()):
+            v = values.get(ch, 0)
+            if v >= prev:
+                total += v
+            else:
+                total -= v
+            prev = v
+        return total
 
     @classmethod
     def _infer_heading_level(cls, line: str) -> Optional[int]:
@@ -128,56 +149,97 @@ class PyMuPDF4LLMPDFReader(BaseReader):
         return deduped
 
     @classmethod
-    def _extract_toc_catalog_from_pages(cls, page_texts: Sequence[str]) -> List[Dict[str, Any]]:
-        if not page_texts:
-            return []
-
-        scan_limit = min(len(page_texts), 24)
-        toc_start: Optional[int] = None
-        for page_idx in range(scan_limit):
-            lines = [line.strip() for line in str(page_texts[page_idx] or "").splitlines() if line.strip()]
-            if any(cls._is_toc_anchor_line(line) for line in lines):
-                toc_start = page_idx
-                break
-            toc_count = sum(1 for line in lines if cls._is_toc_entry_line(line))
-            if page_idx <= 5 and toc_count >= 10:
-                toc_start = page_idx
-                break
-
-        if toc_start is None:
-            return []
-
-        toc_catalog: List[Dict[str, Any]] = []
+    def _collect_toc_entries_from_range(
+        cls,
+        page_texts: Sequence[str],
+        toc_start: int,
+        window: int,
+    ) -> List[Dict[str, Any]]:
+        catalog: List[Dict[str, Any]] = []
         non_toc_streak = 0
-        for page_idx in range(toc_start, min(len(page_texts), toc_start + 12)):
+        for page_idx in range(toc_start, min(len(page_texts), toc_start + window)):
             lines = [line for line in str(page_texts[page_idx] or "").splitlines() if line.strip()]
             page_hits = 0
             for line in lines:
                 stripped = line.strip()
                 match = re.match(
-                    r"^\s*([\u4e00-\u9fffA-Za-z0-9][^\n]{1,160}?)(?:\t+|[·•.\s]{2,})(\d{1,4})\s*$",
+                    r"^\s*([\u4e00-\u9fffA-Za-z0-9][^\n]{1,160}?)(?:\t+|[·•.\s]{2,})(\d{1,4}|[IVXLCDM]{1,8})\s*$",
                     stripped,
+                    flags=re.IGNORECASE,
                 )
                 if not match:
                     continue
                 title = cls._clean_heading_title(match.group(1))
                 if not title:
                     continue
-                page = int(match.group(2))
+                # Filter out page-number-only labels ("iv", "vi", "1-2" etc.)
+                if re.match(r"^[ivxlcdm\d\-\s\.]{1,12}$", title, flags=re.IGNORECASE):
+                    continue
+                page_str = match.group(2).upper()
+                try:
+                    page = int(page_str)
+                except ValueError:
+                    page = cls._roman_to_int(page_str)
                 if page <= 0:
                     continue
                 level = cls._infer_toc_level(match.group(1))
-                toc_catalog.append({"title": title, "page": page, "level": level})
+                catalog.append({"title": title, "page": page, "level": level})
                 page_hits += 1
 
             if page_hits == 0:
                 non_toc_streak += 1
-                if non_toc_streak >= 2 and toc_catalog:
+                if non_toc_streak >= 4 and catalog:
                     break
             else:
                 non_toc_streak = 0
+        return catalog
 
-        return cls._dedupe_catalog(toc_catalog)
+    @classmethod
+    def _extract_toc_catalog_from_pages(cls, page_texts: Sequence[str]) -> List[Dict[str, Any]]:
+        if not page_texts:
+            return []
+
+        total_pages = len(page_texts)
+        if total_pages <= 100:
+            scan_limit = min(total_pages, 24)
+            collect_window = 12
+        elif total_pages <= 1000:
+            scan_limit = min(total_pages, 60)
+            collect_window = 30
+        else:
+            scan_limit = min(total_pages, 200)
+            collect_window = 60
+
+        all_catalogs: List[Dict[str, Any]] = []
+
+        def _find_and_collect(start_offset: int, scan_range: int) -> bool:
+            toc_start: Optional[int] = None
+            for page_idx in range(start_offset, min(total_pages, start_offset + scan_range)):
+                lines = [line.strip() for line in str(page_texts[page_idx] or "").splitlines() if line.strip()]
+                if any(cls._is_toc_anchor_line(line) for line in lines):
+                    toc_start = page_idx
+                    break
+                toc_count = sum(1 for line in lines if cls._is_toc_entry_line(line))
+                if page_idx - start_offset <= max(5, scan_range // 20) and toc_count >= 8:
+                    toc_start = page_idx
+                    break
+            if toc_start is None:
+                return False
+            all_catalogs.extend(cls._collect_toc_entries_from_range(page_texts, toc_start, collect_window))
+            return True
+
+        # Primary pass: front of document
+        _find_and_collect(0, scan_limit)
+
+        # Multi-pass for large multi-volume PDFs
+        if total_pages > 500:
+            num_passes = 3 if total_pages > 2000 else 2
+            step = max(1, total_pages // num_passes)
+            for pass_idx in range(1, num_passes):
+                offset = pass_idx * step
+                _find_and_collect(offset, scan_limit // 2)
+
+        return cls._dedupe_catalog(all_catalogs)
 
     @classmethod
     def _extract_style_catalog_from_pages(
@@ -204,7 +266,9 @@ class PyMuPDF4LLMPDFReader(BaseReader):
                     continue
                 catalog.append({"title": title, "page": page_idx, "level": max(1, min(level, 6))})
                 if len(catalog) >= max_items:
-                    return cls._dedupe_catalog(catalog)
+                    break
+            if len(catalog) >= max_items:
+                break
         return cls._dedupe_catalog(catalog)
 
     @classmethod
@@ -212,39 +276,102 @@ class PyMuPDF4LLMPDFReader(BaseReader):
         cls,
         page_texts: Sequence[str],
     ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+        total_pages = len(page_texts)
         native_catalog = cls._extract_toc_catalog_from_pages(page_texts)
-        style_catalog = cls._extract_style_catalog_from_pages(page_texts)
-        # Keep a lightweight third source for compatibility with existing layered fallback.
-        font_catalog = style_catalog[:120]
+
+        # Scale style catalog cap with document size
+        if total_pages <= 500:
+            max_style = 240
+        elif total_pages <= 2000:
+            max_style = 800
+        else:
+            max_style = 2000
+
+        style_catalog = cls._extract_style_catalog_from_pages(page_texts, max_items=max_style)
+        font_catalog = style_catalog[:min(200, max_style // 2)]
         return native_catalog, style_catalog, font_catalog
 
     def _extract_text_by_pymupdf4llm(self, file: Path) -> tuple[str, int, List[str], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-        # Prefer page_chunks to preserve page boundaries for downstream pagination logic.
-        chunked_output = pymupdf4llm.to_markdown(str(file), page_chunks=True)
-        page_parts: List[str] = []
-        if isinstance(chunked_output, list):
-            for chunk in chunked_output:
-                if isinstance(chunk, dict):
-                    text = str(chunk.get("text") or chunk.get("md") or chunk.get("markdown") or "").strip()
-                else:
-                    text = str(chunk or "").strip()
-                page_parts.append(text)
-        elif isinstance(chunked_output, str):
-            text = chunked_output.strip()
-            if text:
-                page_parts = [text]
+        import json
+        import subprocess as _sp
+        import sys as _sys
 
-        if not page_parts:
-            fallback_output = pymupdf4llm.to_markdown(str(file))
-            fallback_text = str(fallback_output or "").strip()
-            if not fallback_text:
-                return "", 0, [], [], [], []
-            native_catalog, style_catalog, font_catalog = self._build_catalogs_from_pages([fallback_text])
-            return fallback_text, 1, [fallback_text], native_catalog, style_catalog, font_catalog
+        try:
+            import fitz
+            doc = fitz.open(str(file))
+            page_count = doc.page_count
+            doc.close()
+        except Exception:
+            return "", 0, [], [], [], []
 
-        text = "\n\f\n".join(page_parts).strip()
-        native_catalog, style_catalog, font_catalog = self._build_catalogs_from_pages(page_parts)
-        return text, len(page_parts), page_parts, native_catalog, style_catalog, font_catalog
+        if page_count <= 0:
+            return "", 0, [], [], [], []
+
+        # For single-chunk PDFs, try pymupdf4llm in a subprocess for richer markdown.
+        if page_count <= 800:
+            script = r"""
+import json, sys
+try:
+    import pymupdf4llm
+    chunks = pymupdf4llm.to_markdown(sys.argv[1], page_chunks=True)
+    if not isinstance(chunks, list):
+        sys.exit(1)
+    parts = []
+    for chunk in chunks:
+        if isinstance(chunk, dict):
+            parts.append(str(chunk.get("text") or chunk.get("md") or chunk.get("markdown") or "").strip())
+        else:
+            parts.append(str(chunk or "").strip())
+    print(json.dumps({"parts": parts}, ensure_ascii=False))
+except Exception:
+    sys.exit(1)
+""".strip()
+            try:
+                proc = _sp.run(
+                    [_sys.executable, "-c", script, str(file)],
+                    capture_output=True, text=True, timeout=120, check=False,
+                )
+                if proc.returncode == 0:
+                    result = json.loads(proc.stdout.strip())
+                    enriched = list(result.get("parts") or [])
+                    if enriched and len(enriched) >= page_count:
+                        text = "\n\f\n".join(enriched).strip()
+                        nc, sc, fc = self._build_catalogs_from_pages(enriched)
+                        return text, len(enriched), enriched, nc, sc, fc
+            except Exception:
+                pass
+
+        # For medium-large PDFs, try chunked pymupdf4llm for better quality.
+        # Very large PDFs (>3000 pages) use fitz direct for speed.
+        elif page_count <= 3000:
+            try:
+                from rag.document_pdf import _pymupdf4llm_extract_chunked
+                all_pages = _pymupdf4llm_extract_chunked(str(file), page_count)
+                if all_pages is not None:
+                    page_parts = [
+                        str(p.get("text") or p.get("md") or p.get("markdown") or "").strip()
+                        for p in all_pages
+                    ]
+                    if page_parts and len(page_parts) >= page_count:
+                        text = "\n\f\n".join(page_parts).strip()
+                        nc, sc, fc = self._build_catalogs_from_pages(page_parts)
+                        return text, len(page_parts), page_parts, nc, sc, fc
+            except Exception:
+                pass
+
+        # Fast fallback: fitz.get_text() page by page
+        try:
+            doc = fitz.open(str(file))
+            page_parts = [doc.load_page(i).get_text() for i in range(page_count)]
+            doc.close()
+            if page_parts:
+                text = "\n\f\n".join(page_parts).strip()
+                nc, sc, fc = self._build_catalogs_from_pages(page_parts)
+                return text, len(page_parts), page_parts, nc, sc, fc
+        except Exception:
+            pass
+
+        return "", 0, [], [], [], []
 
     @staticmethod
     def _normalize_heading_text(value: str) -> str:

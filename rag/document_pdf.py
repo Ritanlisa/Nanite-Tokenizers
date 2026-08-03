@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 import hashlib
+import shutil
 import subprocess
 import sys
+import tempfile
 import types
 from typing import Any, Dict, List, Optional
 
@@ -13,12 +17,159 @@ from llama_index.core import Document
 from rag.document_interface import ImageAsset, MonoPage, PageAssets, RAG_DB_Document, _dedupe_image_values, _dedupe_text_values
 from rag.preprocessor import clean_document
 
+logger = logging.getLogger(__name__)
+
 try:
     import pymupdf4llm  # type: ignore
 except Exception:  # pragma: no cover - optional dependency at runtime
     pymupdf4llm = None
 
 _MAIN_PDF_CLASS: Optional[type] = None
+
+# ── Chunked pymupdf4llm extraction ──────────────────────────────
+_PYMUPDF4LLM_CHUNK_SIZE = 200
+_PYMUPDF4LLM_CHUNK_TIMEOUT = 300
+_PYMUPDF4LLM_CHUNK_PARALLEL = 2
+
+_PYMUPDF4LLM_SCRIPT = r"""
+import json, sys
+def _sanitize(obj):
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize(x) for x in obj]
+    if isinstance(obj, dict):
+        return {str(k): _sanitize(v) for k, v in obj.items()}
+    if hasattr(obj, "x0") and hasattr(obj, "y0"):
+        return [float(obj.x0), float(obj.y0), float(obj.x1), float(obj.y1)]
+    return obj
+
+try:
+    import pymupdf4llm
+    chunks = pymupdf4llm.to_markdown(
+        sys.argv[1], page_chunks=True, extract_words=True, show_progress=False,
+    )
+    if not isinstance(chunks, list):
+        sys.exit(1)
+    pages = [_sanitize(item) for item in chunks if isinstance(item, dict)]
+    print(json.dumps(pages, ensure_ascii=False))
+except Exception:
+    sys.exit(1)
+"""
+
+
+def _pymupdf4llm_extract_chunked(
+    file_path: str,
+    total_pages: int,
+    chunk_size: int = _PYMUPDF4LLM_CHUNK_SIZE,
+    timeout_per_chunk: int = _PYMUPDF4LLM_CHUNK_TIMEOUT,
+    max_workers: int = _PYMUPDF4LLM_CHUNK_PARALLEL,
+) -> Optional[List[Dict[str, Any]]]:
+    """Extract all pages with pymupdf4llm by splitting into sub-PDF chunks.
+
+    Each chunk is processed in a subprocess to isolate native PyMuPDF crashes.
+    Multiple chunks can run in parallel via ThreadPoolExecutor.
+    Returns combined list of page dicts, or None if any chunk fails.
+    """
+    import fitz
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if total_pages <= 0:
+        return None
+    if not os.path.isfile(file_path):
+        return None
+
+    num_chunks = (total_pages + chunk_size - 1) // chunk_size
+    tmp_dir = tempfile.mkdtemp(prefix="pymupdf4llm_chunks_")
+
+    def _cleanup() -> None:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def _process_chunk(args: tuple[int, int, int]) -> Optional[List[Dict[str, Any]]]:
+        chunk_idx, start, end = args
+        chunk_path = os.path.join(tmp_dir, f"chunk_{start:05d}_{end:05d}.pdf")
+
+        doc_local = fitz.open(file_path)
+        sub = fitz.open()
+        sub.insert_pdf(doc_local, from_page=start, to_page=end - 1)
+        sub.save(chunk_path)
+        sub.close()
+        doc_local.close()
+
+        if num_chunks > 1:
+            logger.info("pymupdf4llm chunk %d/%d (pages %d–%d)",
+                        chunk_idx + 1, num_chunks, start + 1, end)
+
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", _PYMUPDF4LLM_SCRIPT, chunk_path],
+                capture_output=True, text=True,
+                timeout=timeout_per_chunk, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            try:
+                os.unlink(chunk_path)
+            except OSError:
+                pass
+            logger.warning("pymupdf4llm chunk %d/%d timed out after %ds",
+                           chunk_idx + 1, num_chunks, timeout_per_chunk)
+            return None
+
+        try:
+            os.unlink(chunk_path)
+        except OSError:
+            pass
+
+        if proc.returncode != 0:
+            err = str(proc.stderr or "")[:200].strip()
+            logger.warning("pymupdf4llm chunk %d/%d failed rc=%s%s",
+                           chunk_idx + 1, num_chunks, proc.returncode,
+                           f": {err}" if err else "")
+            return None
+
+        try:
+            chunk_pages = json.loads(proc.stdout.strip())
+        except json.JSONDecodeError:
+            logger.warning("pymupdf4llm chunk %d/%d returned invalid JSON",
+                           chunk_idx + 1, num_chunks)
+            return None
+
+        if not isinstance(chunk_pages, list):
+            return None
+        return chunk_pages
+
+    try:
+        chunk_args = [
+            (i, i * chunk_size, min((i + 1) * chunk_size, total_pages))
+            for i in range(num_chunks)
+        ]
+
+        if num_chunks == 1 or max_workers <= 1:
+            results = [_process_chunk(chunk_args[0])]
+        else:
+            results: list[Optional[List[Dict]]] = [None] * num_chunks
+            with ThreadPoolExecutor(max_workers=min(max_workers, num_chunks)) as executor:
+                future_map = {
+                    executor.submit(_process_chunk, args): args[0]
+                    for args in chunk_args
+                }
+                for future in as_completed(future_map):
+                    idx = future_map[future]
+                    try:
+                        results[idx] = future.result()
+                    except Exception:
+                        logger.warning("pymupdf4llm chunk %d/%d crashed",
+                                       idx + 1, num_chunks)
+                        results[idx] = None
+
+        if any(r is None for r in results):
+            return None
+
+        all_pages: List[Dict[str, Any]] = []
+        for r in results:
+            if r:
+                all_pages.extend(r)
+        return all_pages if all_pages else None
+    finally:
+        _cleanup()
 
 
 class PDFRAGDocument(RAG_DB_Document):
@@ -33,22 +184,9 @@ class PDFRAGDocument(RAG_DB_Document):
         file_path = str(self.metadata.get("file_name") or "").strip()
         if not file_path or not os.path.isfile(file_path):
             return None
-        try:
-            chunks = pymupdf4llm.to_markdown(
-                file_path,
-                page_chunks=True,
-                extract_words=True,
-                show_progress=False,
-            )
-        except Exception:
-            return None
-        if not isinstance(chunks, list):
-            return None
-        pages: List[Dict[str, Any]] = []
-        for item in chunks:
-            if isinstance(item, dict):
-                pages.append(item)
-        return pages or None
+
+        approx_pages = str(self.cleaned_text or "").count("\f") + 1
+        return _pymupdf4llm_extract_chunked(file_path, approx_pages)
 
     def _asset_output_dir(self) -> str:
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -410,6 +548,8 @@ class PDFRAGDocument(RAG_DB_Document):
             return []
 
     def _extract_main_page_section_map(self, page_texts: List[str]) -> Dict[int, str]:
+        if len(page_texts) > 500:
+            return {}
         main_cls = self._load_main_pdf_class()
         if main_cls is None:
             return {}
@@ -640,6 +780,25 @@ class PDFRAGDocument(RAG_DB_Document):
             page_texts = [str(item.get("text") or "") for item in tool_pages]
             metadata_markers = self._extract_markers_from_metadata(["native_catalog"])
             toc_markers = self._extract_toc_item_markers(tool_pages)
+
+            # If pymupdf4llm toc_items are empty, extract directly from fitz.get_toc()
+            if not toc_markers:
+                file_path = str(self.metadata.get("file_name") or "").strip()
+                if file_path and os.path.isfile(file_path):
+                    try:
+                        import fitz
+                        doc = fitz.open(file_path)
+                        raw_toc = doc.get_toc(simple=True) or []
+                        doc.close()
+                        toc_markers = [
+                            {"title": str(t or "").strip(), "page": int(p or 0),
+                             "level": max(1, min(int(l or 1), 6)), "kind": "fitz_toc"}
+                            for l, t, p in raw_toc if str(t or "").strip() and int(p or 0) > 0
+                        ]
+                        if toc_markers:
+                            logger.debug("Using fitz.get_toc(): %d markers", len(toc_markers))
+                    except Exception:
+                        pass
             marker_source, markers = self._select_tool_catalog_markers(metadata_markers, toc_markers, page_texts)
             markers = self._finalize_catalog_markers(markers, page_texts, marker_source)
             ranges = self.derive_catalog_ranges(markers, len(page_texts))
@@ -779,6 +938,12 @@ class PDFRAGDocument(RAG_DB_Document):
             page_texts = [self.cleaned_text.strip()]
 
         metadata_markers = self._extract_markers_from_metadata(["native_catalog"])
+        # If native_catalog is sparse (few entries, few unique pages), supplement
+        # with style_catalog which captures headings from the full document body.
+        if not metadata_markers or len(metadata_markers) < 50:
+            style_markers = self._extract_markers_from_metadata(["style_catalog"])
+            if style_markers and len(style_markers) > len(metadata_markers or []):
+                metadata_markers = list(style_markers)
         marker_source = "native_catalog" if metadata_markers else "main_compatible"
         markers = list(metadata_markers) if metadata_markers else self._extract_main_compatible_markers(page_texts)
         markers = self._finalize_catalog_markers(markers, page_texts, marker_source)
