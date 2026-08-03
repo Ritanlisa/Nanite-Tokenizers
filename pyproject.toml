@@ -78,3 +78,17 @@ explicit = true
 
 [tool.uv]
 allow-insecure-host = ["github.com"]
+
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]
+markers = [
+    "gui: GUI debug tests (deselect with '-m \"not gui\"')",
+    "integration: tests requiring MCP server/database/models",
+    "slow: long-running tests",
+]
