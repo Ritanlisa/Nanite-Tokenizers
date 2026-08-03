@@ -2,7 +2,6 @@
 """Test Step 5: KG API endpoints"""
 import os
 import sys
-import json
 import tempfile
 from pathlib import Path
 
@@ -15,7 +14,6 @@ pytestmark = pytest.mark.integration
 def test_kg_file_paths():
     """Test KG file path helpers"""
     print("=== Test KG file paths ===")
-    import web_server
     import config
 
     # We need to mock create_app internals - let's test inline
@@ -83,7 +81,7 @@ def test_kg_summary_via_manager():
 def test_kg_search_functionality():
     """Test enhanced search via manager"""
     print("=== Test KG search ===")
-    from sysml.sysml_manager import SysMLManager, AliasRegistry
+    from sysml.sysml_manager import SysMLManager
 
     mgr = SysMLManager()
     mgr.add_entity_with_metadata("PartDef", "数据采集模块", description="负责数据采集的模块",

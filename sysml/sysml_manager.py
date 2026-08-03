@@ -5,7 +5,6 @@ SysML 模型管理器：加载、保存、查询、修改模型。
 
 import json
 import re
-import os
 from pathlib import Path
 from typing import Optional, List, Union, Dict, Any, TypeVar, cast
 from .sysml_model import (

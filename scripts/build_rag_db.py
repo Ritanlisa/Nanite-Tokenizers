@@ -9,7 +9,6 @@ Usage:
 from __future__ import annotations
 
 import sys
-import os
 import asyncio
 import shutil
 import argparse
@@ -112,7 +111,7 @@ def _run_kg_extraction(db_name: str, persist_dir: Path) -> None:
     """Extract SysML KG entities and relations from RAG documents."""
     from rag.documents import load_rag_documents_from_persist_dir
     from rag.engine import SUPPORTED_RAG_EXTENSIONS
-    from agent.kg_build_agent import KGBuildAgent, SectionInfo
+    from agent.kg_build_agent import KGBuildAgent
     from web_server import _extract_sections_from_rag_doc
 
     persist_str = str(persist_dir)

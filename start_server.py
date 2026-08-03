@@ -4,11 +4,9 @@ import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 
 # Minimal startup without metrics
-import uvicorn
 
 # Import the function that creates the app
 from web_server import main as create_app_and_run
-import asyncio
 
 # Just run main() which handles everything
 if __name__ == "__main__":

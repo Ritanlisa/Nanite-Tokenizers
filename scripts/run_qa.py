@@ -164,7 +164,6 @@ async def run_qa(
         sysml_load_model,
         sysml_retrieve,
         sysml_model_summary,
-        _get_manager,
         _global_manager,
         _loaded_files,
     )

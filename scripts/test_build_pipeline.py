@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 """Test Step 4: KG build pipeline integration"""
-import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -15,7 +13,6 @@ def test_section_extraction():
     """Test that section extraction works with mock RAG documents"""
     print("=== Test section extraction ===")
     from web_server import _extract_sections_from_rag_doc
-    from agent.kg_build_agent import SectionInfo
 
     class MockMonoPage:
         def __init__(self, title, text, page_num):
@@ -80,7 +77,6 @@ def test_section_extraction():
 def test_kg_pipeline_source_structure():
     """Test that KG build hook is properly integrated in source code"""
     print("=== Test KG pipeline structure ===")
-    import inspect
 
     # Read web_server.py source
     with open("web_server.py", "r", encoding="utf-8") as f:

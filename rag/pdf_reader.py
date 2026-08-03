@@ -6,7 +6,6 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set
 
-import pymupdf4llm  # type: ignore
 
 from llama_index.core import Document
 from llama_index.core.readers.base import BaseReader

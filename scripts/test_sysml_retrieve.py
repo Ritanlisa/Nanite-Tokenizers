@@ -9,12 +9,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.sysml_rag_mcp_server import (
     sysml_retrieve,
-    sysml_load_model,
     sysml_add_entity,
     sysml_add_relation,
-    sysml_add_alias,
     _get_manager,
-    _global_manager,
     _loaded_files,
 )
 
@@ -179,7 +176,7 @@ def test_entity_with_members():
 
     # Create a definition with members (simulating SysML attribute/port definitions)
     mgr = _get_manager()
-    from sysml.sysml_model import PartDef, AttributeUsage, PortUsage, DirectionKind, Multiplicity
+    from sysml.sysml_model import PartDef, AttributeUsage, PortUsage, DirectionKind
 
     entity = PartDef(name="智能传感器", short_name="SmartSens")
     entity.add_member(AttributeUsage(name="采样率", value_expr="100"))

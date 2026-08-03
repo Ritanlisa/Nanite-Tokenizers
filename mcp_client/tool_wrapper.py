@@ -125,7 +125,6 @@ class MCPToolWrapper(BaseTool):
         else:
             coro = self.session.call_tool(self.tool_name, self._clean_kwargs(kwargs))
 
-        import concurrent.futures
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         return future.result(timeout=(self.session._timeout or 30) + 5)
 

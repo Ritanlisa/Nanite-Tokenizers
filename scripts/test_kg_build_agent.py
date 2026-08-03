@@ -14,7 +14,7 @@ pytestmark = pytest.mark.integration
 async def test_kg_agent_init():
     """Test KGBuildAgent initialization and tool building"""
     print("=== Test KGBuildAgent init ===")
-    from agent.kg_build_agent import KGBuildAgent, SectionInfo
+    from agent.kg_build_agent import KGBuildAgent
 
     agent = KGBuildAgent(db_name="test_kg_init", persist_dir="/tmp/test_kg_build")
 

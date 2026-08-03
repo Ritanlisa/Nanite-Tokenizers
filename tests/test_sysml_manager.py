@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Test sysml_manager.py enhancements: AliasRegistry + CRUD + merge + search"""
-import sys
-from pathlib import Path
 
 
 from sysml.sysml_manager import (
-    SysMLManager, AliasRegistry, ENTITY_CLASS_MAP, RELATION_CLASS_MAP
+    SysMLManager, AliasRegistry
 )
 
 def test_alias_registry():

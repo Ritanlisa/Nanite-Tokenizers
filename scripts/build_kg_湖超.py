@@ -1,5 +1,5 @@
 """Build KG for 湖超-硬件维护手册20231225.doc (uses unified agent with document tree navigation)"""
-import asyncio, json, os, sys, time, logging
+import asyncio, sys, time, logging
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

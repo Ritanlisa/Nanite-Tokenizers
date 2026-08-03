@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Test sysml_rag_mcp_server.py via direct function calls + MCP stdio"""
-import sys, json, subprocess, os
+import sys, json, subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -13,7 +13,7 @@ def test_direct_tools():
         sysml_update_entity, sysml_delete_entity, sysml_suggest_merge,
         sysml_merge_entities, sysml_normalize_name, sysml_add_alias,
         sysml_list_entities, sysml_list_relations, sysml_model_summary,
-        sysml_get_entity, sysml_get_connections,
+        sysml_get_connections,
     )
 
     # Add entities

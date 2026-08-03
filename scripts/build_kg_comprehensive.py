@@ -24,7 +24,6 @@ config.settings = config.settings.update(
 
 from rag.documents import load_rag_documents_from_paths
 from rag.engine import SUPPORTED_RAG_EXTENSIONS
-from web_server import _extract_sections_from_rag_doc
 
 
 COMPREHENSIVE_EXTRACTION_PROMPT = """你是SysML v2知识图谱构建专家。请从技术文档中**全面且详细**地提取系统架构信息。

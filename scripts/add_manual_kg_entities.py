@@ -24,8 +24,6 @@ from scripts.sysml_rag_mcp_server import (
     sysml_add_cabinet_instance,
     sysml_add_relation,
     sysml_model_summary,
-    _get_manager,
-    _global_manager,
     _loaded_files,
 )
 

@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sysml.sysml_manager import (
-    SysMLManager, AliasRegistry, ENTITY_CLASS_MAP, RELATION_CLASS_MAP
+    SysMLManager, AliasRegistry
 )
 
 def test_alias_registry():

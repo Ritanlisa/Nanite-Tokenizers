@@ -178,17 +178,6 @@ UNIFIED_TOOL_NAMES = [
     "sysml_connected_components",
 ]
 
-# ═══════════════════════════════════════════════════════════════
-# 以下为"冻结"动态数据工具 —— 暂不纳入提取流程，保留代码以备后用
-# ═══════════════════════════════════════════════════════════════
-# "sysml_add_command",          # 运维命令创建 (CommandDef)
-# "sysml_set_hostname",         # 主机名标识
-# "sysml_add_cabinet_instance", # 机柜实例映射
-# "sysml_add_chapter_ref",      # 章节出处引用
-# "sysml_add_quantity",         # 精确数量提取
-# "sysml_add_ip_config",        # IP 网络配置
-# "sysml_set_display_name",     # 中文显示名
-# ═══════════════════════════════════════════════════════════════
 
 MERGE_TOOL_NAMES = [
     "sysml_suggest_merge",

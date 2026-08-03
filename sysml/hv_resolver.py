@@ -30,7 +30,6 @@ Usage (model-independent):
 from __future__ import annotations
 import re, subprocess, shlex, json
 from pathlib import Path
-from typing import Optional
 
 
 # ── Protocol Driver Interface ──

@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 from typing import Optional
 
 import httpx
 
 import config
-from exceptions import MCPConnectionError, MCPFatalError, MCPTimeoutError
-from monitoring import mcp_restart_count
+from exceptions import MCPConnectionError, MCPTimeoutError
 from .mcp_session import MCPSession
 
 logger = logging.getLogger(__name__)

@@ -21,7 +21,6 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-from io import StringIO
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -367,7 +366,6 @@ async def step3_qa():
     # Import MCP server functions
     from scripts.sysml_rag_mcp_server import (
         sysml_load_model, sysml_retrieve, sysml_model_summary,
-        _get_manager, _global_manager, _loaded_files,
     )
 
     # Reset MCP state
