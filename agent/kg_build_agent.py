@@ -498,6 +498,1095 @@ class SectionInfo:
 
 # ── KGBuildAgent ─────────────────────────────────────────────
 
+class CandidateExtractionEngine:
+    """候选提取引擎：Phase 1 页面候选提取 / 解析 / MCP 入库（T9 拆分自 KGBuildAgent）。"""
+
+    def __init__(self, agent: "KGBuildAgent"):
+        self._agent = agent
+
+    async def extract_page_candidates(
+        self, text: str, title: str, page: int
+    ) -> tuple:
+        """用轻量模型从页面文本提取实体/关系候选列表 (JSON).
+        支持滑动窗口处理长文本: >4000 字符时分块提取后合并去重。
+        """
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        max_chars = 4000
+        if len(text) <= max_chars:
+            chunks = [text]
+        else:
+            # 滑动窗口: window=3000, stride=2500 (重叠500)
+            window = min(3000, max_chars)
+            stride = max(1, window - 500)
+            chunks = []
+            start = 0
+            while start < len(text):
+                end = min(start + window, len(text))
+                chunks.append(text[start:end])
+                if end >= len(text):
+                    break
+                start += stride
+            logger.debug("  Page %d: %d chars → %d chunks", page, len(text), len(chunks))
+
+        all_candidates = []
+        all_relations = []
+        for ci, chunk in enumerate(chunks):
+            suffix = f" (chunk {ci+1}/{len(chunks)})" if len(chunks) > 1 else ""
+            prompt = f"""页面标题: {title} (第{page}页){suffix}
+
+文本内容:
+---BEGIN---
+{chunk}
+---END---
+
+请输出JSON数组。无系统架构内容则输出 []"""
+            try:
+                t_call = time.time()
+                response = await asyncio.wait_for(
+                    self._agent.light_llm.ainvoke([
+                        SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
+                        HumanMessage(content=prompt),
+                    ]),
+                    timeout=180,
+                )
+                logger.debug("  Phase1a LLM p%d c%d (%.1fs): prompt=%dch resp=%dch",
+                             page, ci+1, time.time()-t_call, len(prompt), len(raw))
+                logger.debug("  Phase1a RESP p%d c%d: %s", page, ci+1, raw[:500])
+            except asyncio.TimeoutError:
+                logger.warning("  Light LLM timeout for page %d chunk %d, retrying...", page, ci+1)
+                try:
+                    response = await asyncio.wait_for(
+                        self._agent.light_llm.ainvoke([
+                            SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
+                            HumanMessage(content=prompt),
+                        ]),
+                        timeout=180,
+                    )
+                    raw = str(response.content) if hasattr(response, "content") else str(response)
+                except asyncio.TimeoutError:
+                    logger.warning("  Light LLM retry also timeout for page %d chunk %d, skipping", page, ci+1)
+                    continue
+            except Exception as e:
+                logger.warning("  Light LLM error for page %d chunk %d: %s", page, ci+1, e)
+                continue
+
+            candidates, relations = self.parse_candidates(raw)
+            all_candidates.extend(candidates)
+            all_relations.extend(relations)
+
+        # 合并去重: 同名实体保留最详细的一个
+        if len(chunks) > 1:
+            seen = {}
+            merged_candidates = []
+            for c in all_candidates:
+                name = c.get("name", "")
+                if name in seen:
+                    existing = seen[name]
+                    if len(c.get("description", "")) > len(existing.get("description", "")):
+                        existing["description"] = c["description"]
+                    existing_aliases = set(existing.get("aliases", []))
+                    for a in c.get("aliases", []):
+                        if a not in existing_aliases:
+                            existing["aliases"].append(a)
+                else:
+                    seen[name] = dict(c)
+                    merged_candidates.append(c)
+            all_candidates = merged_candidates
+
+            seen_rel = set()
+            merged_relations = []
+            for r in all_relations:
+                key = (r.get("source", ""), r.get("target", ""), r.get("type", ""))
+                if key not in seen_rel:
+                    seen_rel.add(key)
+                    merged_relations.append(r)
+            all_relations = merged_relations
+
+        if all_candidates or all_relations:
+            logger.debug("  Page %d: %d entities, %d relations extracted (from %d chunks)",
+                         page, len(all_candidates), len(all_relations), len(chunks))
+        return all_candidates, all_relations
+
+    @staticmethod
+    def parse_candidates(raw: str) -> tuple:
+        """从 LLM 输出解析实体候选和关系候选."""
+        import re
+        candidates = []
+        relations = []
+
+        # 提取 JSON 块
+        json_str = raw
+        m = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', raw, re.DOTALL)
+        if m:
+            json_str = m.group(1)
+        else:
+            m = re.search(r'(\[.*\])', raw, re.DOTALL)
+            if m:
+                json_str = m.group(1)
+
+        try:
+            items = json.loads(json_str)
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    # 关系: 显式标记 relation=true 或有 source+target 字段
+                    if item.get("relation") or (item.get("source") and item.get("target")):
+                        # Normalize source/target from list to string (LLM output quirk)
+                        for _k in ("source", "target"):
+                            _v = item.get(_k)
+                            if isinstance(_v, list):
+                                item[_k] = str(_v[0]).strip() if _v else ""
+                        relations.append(item)
+                    elif item.get("name"):
+                        candidates.append(item)
+        except json.JSONDecodeError:
+            # 逐行解析
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line or line.startswith("//") or line.startswith("#"):
+                    continue
+                m2 = re.search(r'\{.*\}', line)
+                if m2:
+                    try:
+                        item = json.loads(m2.group())
+                        if isinstance(item, dict):
+                            if item.get("relation") or (item.get("source") and item.get("target")):
+                                relations.append(item)
+                            elif item.get("name"):
+                                candidates.append(item)
+                    except json.JSONDecodeError:
+                        pass
+
+        return candidates, relations
+
+    @staticmethod
+    def parse_enrichment_json(raw: str) -> list:
+        """从 LLM 输出解析富化操作 JSON 数组."""
+        import re
+        json_str = raw
+        m = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', raw, re.DOTALL)
+        if m:
+            json_str = m.group(1)
+        else:
+            m = re.search(r'(\[.*\])', raw, re.DOTALL)
+            if m:
+                json_str = m.group(1)
+        try:
+            items = json.loads(json_str)
+            if isinstance(items, list):
+                return [i for i in items if isinstance(i, dict) and i.get("action")]
+        except json.JSONDecodeError:
+            pass
+        return []
+
+    async def process_candidates(
+        self, candidates: list, relations: list,
+        doc_name: str, page: int, section_title: str,
+        source_pages: Optional[list] = None,
+        batch: bool = True,
+    ) -> dict:
+        """Single merged entry point for candidate/relation processing (T8).
+
+        batch=True (default): 3-stage sysml_batch path (search batch ->
+        write batch -> relations batch, with endpoint auto-creation).
+        batch=False: serial path, per-candidate and per-relation MCP calls.
+        Both paths use identical MCP arguments and identical create/update
+        semantics; both return {"entities", "relations", "entity_map"}.
+        """
+        pages_list = source_pages or [section_title or f"p{page}"]
+
+        async def _serial_impl() -> dict:
+            """系统直接调用 MCP 工具: 搜索去重 + 创建/更新实体和关系."""
+            created_entities = 0
+            created_relations = 0
+
+            # 记录已有实体名 → QN 映射（避免重复创建）
+            entity_qn_map: dict = {}
+            pages_list = source_pages or [section_title or f"p{page}"]
+
+            for c in candidates:
+                name = str(c.get("name", "")).strip()
+                etype = str(c.get("type", "PartDef")).strip()
+                desc = str(c.get("description", "")).strip()
+                aliases = c.get("aliases", []) or []
+
+                if not name:
+                    continue
+
+                # 搜索去重
+                search_result = await self._agent._mcp_session.call_tool(
+                    "sysml_search_entity",
+                    {"query": name, "regex_pattern": "", "threshold": 0.7},
+                )
+                try:
+                    search_data = json.loads(search_result)
+                except json.JSONDecodeError:
+                    search_data = {}
+
+                if search_data.get("total_matches", 0) > 0:
+                    # 已存在 → 追加来源页面
+                    match = search_data["matches"][0]
+                    existing_qn = match.get("qualified_name", name)
+                    entity_qn_map[name] = existing_qn
+                    logger.debug("  Phase1b: entity EXISTS '%s' (qn=%s, matched=%.2f)",
+                                 name, existing_qn, match.get("confidence", 0))
+                    # 追加新的来源页面
+                    await self._agent._mcp_session.call_tool(
+                        "sysml_update_entity",
+                        {"qualified_name": existing_qn,
+                         "append_source_sections": pages_list},
+                    )
+                    if aliases:
+                        for alias in aliases:
+                            await self._agent._mcp_session.call_tool(
+                                "sysml_add_alias",
+                                {"qualified_name": existing_qn, "alias": alias},
+                            )
+                    continue
+
+                # 不存在 → 创建（记录所有来源页面）
+                add_result = await self._agent._mcp_session.call_tool(
+                    "sysml_add_entity", {
+                        "entity_type": etype,
+                        "name": name,
+                        "parent_package": "",
+                        "description": desc,
+                        "aliases": aliases,
+                        "source_sections": pages_list,
+                        "source_text": desc,
+                        "properties": {},
+                        "supertypes": [],
+                        "short_name": name,
+                    },
+                )
+                try:
+                    add_data = json.loads(add_result)
+                    if add_data.get("ok"):
+                        created_entities += 1
+                        entity_qn_map[name] = add_data.get("qualified_name", name)
+                        logger.debug("  Phase1b: entity NEW '%s' <%s> (qn=%s)",
+                                     name, etype, add_data.get("qualified_name", name))
+                except json.JSONDecodeError:
+                    pass
+
+            # 创建关系 (先确保端点实体存在)
+            for r in relations:
+                rtype = str(r.get("type", "Connection")).strip()
+                source = str(r.get("source", "")).strip()
+                target = str(r.get("target", "")).strip()
+                desc = str(r.get("description", "")).strip()
+                rel_source_section = r.get("source_section", "")
+
+                if not source or not target:
+                    continue
+
+                # 构建关系来源
+                rel_src_sections: list = []
+                if rel_source_section:
+                    rel_src_sections = [rel_source_section]
+                if pages_list:
+                    rel_src_sections.extend(pages_list)
+
+                # 确保源/目标实体存在（LLM 可能在关系中提到未单独列出的实体）
+                src_qn = entity_qn_map.get(source, None)
+                tgt_qn = entity_qn_map.get(target, None)
+
+                for endpoint_name in ([source] if src_qn is None else []) + ([target] if tgt_qn is None else []):
+                    # 搜索是否已存在
+                    sr = await self._agent._mcp_session.call_tool(
+                        "sysml_search_entity", {"query": endpoint_name, "threshold": 0.5}
+                    )
+                    try:
+                        sd = json.loads(sr)
+                        if sd.get("total_matches", 0) > 0:
+                            existing_qn = sd["matches"][0].get("qualified_name", endpoint_name)
+                            if endpoint_name == source:
+                                src_qn = existing_qn
+                            else:
+                                tgt_qn = existing_qn
+                            entity_qn_map[endpoint_name] = existing_qn
+                            continue
+                    except Exception:
+                        pass
+                    # 新建最小实体
+                    ar = await self._agent._mcp_session.call_tool("sysml_add_entity", {
+                        "entity_type": "PartDef", "name": endpoint_name,
+                        "parent_package": "", "description": f"关系端点: {desc}",
+                        "aliases": [], "source_sections": pages_list,
+                        "source_text": desc, "properties": {}, "supertypes": [],
+                        "short_name": endpoint_name,
+                    })
+                    try:
+                        ad = json.loads(ar)
+                        if ad.get("ok"):
+                            qn = ad.get("qualified_name", endpoint_name)
+                            entity_qn_map[endpoint_name] = qn
+                            if endpoint_name == source:
+                                src_qn = qn
+                            else:
+                                tgt_qn = qn
+                            created_entities += 1
+                            logger.debug("  Phase1b: auto-created entity '%s' (qn=%s) for relation", endpoint_name, qn)
+                    except Exception:
+                        pass
+
+                if src_qn is None:
+                    src_qn = source
+                if tgt_qn is None:
+                    tgt_qn = target
+
+                rel_result = await self._agent._mcp_session.call_tool(
+                    "sysml_add_relation", {
+                        "relation_type": rtype.lower(),
+                        "source": src_qn,
+                        "target": tgt_qn,
+                        "name": f"{source}_{target}_{rtype}",
+                        "parent_package": "",
+                        "description": desc,
+                        "role_source": "",
+                        "role_target": "",
+                        "source_sections": rel_src_sections if rel_src_sections else (pages_list if pages_list else ["未知"]),
+                    },
+                )
+                try:
+                    rel_data = json.loads(rel_result)
+                    if rel_data.get("ok"):
+                        created_relations += 1
+                        logger.debug("  Phase1b: relation NEW '%s' --[%s]--> '%s'",
+                                     src_qn, rtype, tgt_qn)
+                except json.JSONDecodeError:
+                    pass
+
+            return {"entities": created_entities, "relations": created_relations, "entity_map": entity_qn_map}
+
+        async def _batch_impl() -> dict:
+            """3-stage sysml_batch path (search batch -> write batch -> relations batch).
+
+            Reduces stdio round-trips from 12-18 per section to 3 (plus up to 2
+            for endpoint auto-creation). Semantically identical to serial path.
+            """
+            created_entities = 0
+            created_relations = 0
+            entity_qn_map: dict = {}
+            pages_list = source_pages or [section_title or f"p{page}"]
+
+            # ═══════════════════════════════════════════════════════════
+            # Batch 1: Search all entities at once
+            # ═══════════════════════════════════════════════════════════
+            search_ops = []
+            search_indices: List[int] = []  # search_op_idx → candidate_idx
+
+            for i, c in enumerate(candidates):
+                name = str(c.get("name", "")).strip()
+                if not name:
+                    continue
+                search_ops.append({
+                    "tool": "sysml_search_entity",
+                    "arguments": {"query": name, "regex_pattern": "", "threshold": 0.7},
+                })
+                search_indices.append(i)
+
+            if search_ops:
+                search_result_raw = await self._agent._mcp_session.call_tool(
+                    "sysml_batch",
+                    {"operations": search_ops, "continue_on_error": True},
+                )
+                search_result = json.loads(search_result_raw)
+            else:
+                search_result = {"results": []}
+
+            # ═══════════════════════════════════════════════════════════
+            # Batch 2: Create/update entities + add aliases
+            # ═══════════════════════════════════════════════════════════
+            write_ops = []
+            create_op_positions: Dict[int, str] = {}  # op_idx → entity name (new entities only)
+
+            for si, ci in enumerate(search_indices):
+                c = candidates[ci]
+                name = str(c.get("name", "")).strip()
+                if not name:
+                    continue
+                etype = str(c.get("type", "PartDef")).strip()
+                desc = str(c.get("description", "")).strip()
+                aliases = c.get("aliases", []) or []
+
+                # Find this entity's search result
+                sr = (search_result.get("results", [])[si]
+                      if si < len(search_result.get("results", [])) else None)
+
+                if sr and sr.get("ok"):
+                    rd = sr.get("result", {})
+                    if rd.get("total_matches", 0) > 0:
+                        # Entity EXISTS → update + aliases
+                        match = rd["matches"][0]
+                        existing_qn = match.get("qualified_name", name)
+                        entity_qn_map[name] = existing_qn
+                        logger.debug(
+                            "  Phase1b batch: entity EXISTS '%s' (qn=%s, matched=%.2f)",
+                            name, existing_qn, match.get("confidence", 0),
+                        )
+                        write_ops.append({
+                            "tool": "sysml_update_entity",
+                            "arguments": {
+                                "qualified_name": existing_qn,
+                                "append_source_sections": pages_list,
+                            },
+                        })
+                        for alias in aliases:
+                            write_ops.append({
+                                "tool": "sysml_add_alias",
+                                "arguments": {
+                                    "qualified_name": existing_qn,
+                                    "alias": alias,
+                                },
+                            })
+                        continue
+
+                # Entity does NOT exist → create
+                op_idx = len(write_ops)
+                write_ops.append({
+                    "tool": "sysml_add_entity",
+                    "arguments": {
+                        "entity_type": etype,
+                        "name": name,
+                        "parent_package": "",
+                        "description": desc,
+                        "aliases": aliases,
+                        "source_sections": pages_list,
+                        "source_text": desc,
+                        "properties": {},
+                        "supertypes": [],
+                        "short_name": name,
+                    },
+                })
+                create_op_positions[op_idx] = name
+
+            if write_ops:
+                write_result_raw = await self._agent._mcp_session.call_tool(
+                    "sysml_batch",
+                    {"operations": write_ops, "continue_on_error": True},
+                )
+                write_result = json.loads(write_result_raw)
+
+                # Harvest entity_qn_map from create results
+                for wr in write_result.get("results", []):
+                    idx = wr.get("index", -1)
+                    if idx in create_op_positions and wr.get("ok"):
+                        inner = wr.get("result", {})
+                        if inner.get("ok", True):
+                            ename = create_op_positions[idx]
+                            entity_qn_map[ename] = inner.get("qualified_name", ename)
+                            created_entities += 1
+                            logger.debug(
+                                "  Phase1b batch: entity NEW '%s' (qn=%s)",
+                                ename, inner.get("qualified_name", ename),
+                            )
+
+            # ═══════════════════════════════════════════════════════════
+            # Batch 3: Create all relations (with endpoint auto-creation)
+            # ═══════════════════════════════════════════════════════════
+
+            # ── 3a: Search for missing endpoints ──
+            endpoint_search_ops = []
+            endpoint_search_names: List[str] = []
+
+            for r in relations:
+                source = str(r.get("source", "")).strip()
+                target = str(r.get("target", "")).strip()
+                for en in (source, target):
+                    if en and en not in entity_qn_map and en not in endpoint_search_names:
+                        endpoint_search_ops.append({
+                            "tool": "sysml_search_entity",
+                            "arguments": {"query": en, "threshold": 0.5},
+                        })
+                        endpoint_search_names.append(en)
+
+            if endpoint_search_ops:
+                ep_result_raw = await self._agent._mcp_session.call_tool(
+                    "sysml_batch",
+                    {"operations": endpoint_search_ops, "continue_on_error": True},
+                )
+                ep_result = json.loads(ep_result_raw)
+                for ei, er in enumerate(ep_result.get("results", [])):
+                    if ei >= len(endpoint_search_names):
+                        continue
+                    ename = endpoint_search_names[ei]
+                    if er.get("ok"):
+                        rd = er.get("result", {})
+                        if rd.get("total_matches", 0) > 0:
+                            existing_qn = rd["matches"][0].get("qualified_name", ename)
+                            entity_qn_map[ename] = existing_qn
+
+            # ── 3b: Auto-create still-missing endpoints ──
+            auto_create_ops = []
+            auto_create_op_names: Dict[int, str] = {}
+
+            for r in relations:
+                source = str(r.get("source", "")).strip()
+                target = str(r.get("target", "")).strip()
+                desc = str(r.get("description", "")).strip()
+                for en in (source, target):
+                    if en and en not in entity_qn_map:
+                        op_idx = len(auto_create_ops)
+                        auto_create_ops.append({
+                            "tool": "sysml_add_entity",
+                            "arguments": {
+                                "entity_type": "PartDef",
+                                "name": en,
+                                "parent_package": "",
+                                "description": f"关系端点: {desc}",
+                                "aliases": [],
+                                "source_sections": pages_list,
+                                "source_text": desc,
+                                "properties": {},
+                                "supertypes": [],
+                                "short_name": en,
+                            },
+                        })
+                        auto_create_op_names[op_idx] = en
+                        # Mark as "in progress" to avoid duplicate creates
+                        # (actual QN updated after batch)
+                        entity_qn_map[en] = en
+
+            if auto_create_ops:
+                ac_result_raw = await self._agent._mcp_session.call_tool(
+                    "sysml_batch",
+                    {"operations": auto_create_ops, "continue_on_error": True},
+                )
+                ac_result = json.loads(ac_result_raw)
+                for acr in ac_result.get("results", []):
+                    idx = acr.get("index", -1)
+                    if idx in auto_create_op_names and acr.get("ok"):
+                        inner = acr.get("result", {})
+                        if inner.get("ok", True):
+                            ename = auto_create_op_names[idx]
+                            qn = inner.get("qualified_name", ename)
+                            entity_qn_map[ename] = qn
+                            created_entities += 1
+                            logger.debug(
+                                "  Phase1b batch: auto-created entity '%s' (qn=%s) for relation",
+                                ename, qn,
+                            )
+
+            # ── 3c: Create all relations ──
+            rel_ops = []
+            for r in relations:
+                rtype = str(r.get("type", "Connection")).strip()
+                source = str(r.get("source", "")).strip()
+                target = str(r.get("target", "")).strip()
+                desc = str(r.get("description", "")).strip()
+                rel_source_section = r.get("source_section", "")
+
+                if not source or not target:
+                    continue
+
+                # Build relation source sections
+                rel_src_sections: list = []
+                if rel_source_section:
+                    rel_src_sections = [rel_source_section]
+                if pages_list:
+                    rel_src_sections.extend(pages_list)
+
+                src_qn = entity_qn_map.get(source, source)
+                tgt_qn = entity_qn_map.get(target, target)
+
+                rel_ops.append({
+                    "tool": "sysml_add_relation",
+                    "arguments": {
+                        "relation_type": rtype.lower(),
+                        "source": src_qn,
+                        "target": tgt_qn,
+                        "name": f"{source}_{target}_{rtype}",
+                        "parent_package": "",
+                        "description": desc,
+                        "role_source": "",
+                        "role_target": "",
+                        "source_sections": (
+                            rel_src_sections if rel_src_sections
+                            else (pages_list if pages_list else ["未知"])
+                        ),
+                    },
+                })
+
+            if rel_ops:
+                rel_result_raw = await self._agent._mcp_session.call_tool(
+                    "sysml_batch",
+                    {"operations": rel_ops, "continue_on_error": True},
+                )
+                rel_result = json.loads(rel_result_raw)
+                for rr in rel_result.get("results", []):
+                    if rr.get("ok"):
+                        created_relations += 1
+
+            return {"entities": created_entities, "relations": created_relations, "entity_map": entity_qn_map}
+
+        if batch:
+            return await _batch_impl()
+        return await _serial_impl()
+
+class RelationEnricher:
+    """关系富化与图聚合引擎：Phase 3 富化 / Phase 4 桥接聚合 / 图查询（T9 拆分自 KGBuildAgent）。"""
+
+    def __init__(self, agent: "KGBuildAgent"):
+        self._agent = agent
+
+    async def enrich_entities(
+        self, doc_name: str, processed_sections: set = None, errors: list = None
+    ) -> None:
+        """JSON 模式：并行 LLM 逐节生成富化指令 → 顺序 MCP 应用。支持断点续跑。"""
+        if processed_sections is None:
+            processed_sections = set()
+        if errors is None:
+            errors = []
+
+        if self._agent._mcp_session is None:
+            return
+
+        summary = await self._agent._summary()
+        total_entities = summary.get("total_entities", 0)
+        if total_entities == 0:
+            return
+
+        entity_list = await self._agent._mcp_session.call_tool(
+            "sysml_list_entities", {"include_details": True}
+        )
+        try:
+            entities_data = json.loads(entity_list)
+        except json.JSONDecodeError:
+            return
+
+        entities = entities_data.get("entities", [])
+        if not entities:
+            return
+
+        section_groups: dict = {}
+        for e in entities:
+            name = e.get("name", "")
+            sections = e.get("source_sections") or e.get("source_section") or []
+            if isinstance(sections, str):
+                sections = [sections]
+            if not sections:
+                key = "__no_section__"
+            else:
+                first = str(sections[0])
+                import re
+                m = re.search(r'([\d]+\.[\d]+)', first)
+                if m:
+                    key = m.group(1)
+                else:
+                    key = first[:30]
+            if key not in section_groups:
+                section_groups[key] = []
+            section_groups[key].append(e)
+
+        logger.info("Enrichment: %d entities in %d sections",
+                     len(entities), len(section_groups))
+
+        batch_concurrency = self._agent._get_config("BATCH_CONCURRENCY", 5)
+        sem = asyncio.Semaphore(batch_concurrency)
+
+        MAX_ENTITIES_PER_BATCH = 15
+
+        async def _enrich_section(sec_key, sec_entities, doc_name, sem):
+            async with sem:
+                sec_names = [e.get("name", "") for e in sec_entities if e.get("name")]
+                if not sec_names:
+                    return None
+
+                if sec_key in processed_sections:
+                    logger.info("  Enrich section [%s]: SKIP (already processed)", sec_key)
+                    return None
+
+                entity_details = [{
+                    "name": e.get("name", ""),
+                    "type": e.get("type", ""),
+                    "description": (e.get("description") or "")[:200],
+                } for e in sec_entities if e.get("name")]
+
+                all_actions = []
+                from langchain_core.messages import HumanMessage, SystemMessage
+
+                # Split into batches to avoid overwhelming small model
+                for batch_start in range(0, len(entity_details), MAX_ENTITIES_PER_BATCH):
+                    batch = entity_details[batch_start:batch_start + MAX_ENTITIES_PER_BATCH]
+                    chunk_label = f" ({batch_start//MAX_ENTITIES_PER_BATCH + 1}/{(len(entity_details)-1)//MAX_ENTITIES_PER_BATCH + 1})" if len(entity_details) > MAX_ENTITIES_PER_BATCH else ""
+                    prompt = f"""文档: {doc_name}
+小节: {sec_key}{chunk_label}
+本小节实体列表:
+{json.dumps(batch, ensure_ascii=False, indent=2)}
+
+请为本小节实体输出JSON格式的富化操作。每个实体至少一条关系。
+只在同小节实体之间创建关系。"""
+                    try:
+                        t_call = time.time()
+                        response = await asyncio.wait_for(
+                            self._agent.light_llm.ainvoke([
+                                SystemMessage(content=ENRICHMENT_JSON_PROMPT),
+                                HumanMessage(content=prompt),
+                            ]),
+                    timeout=600,
+                        )
+                        raw = str(response.content) if hasattr(response, "content") else str(response)
+                        logger.debug("  Phase3 LLM [%s] b%d (%.1fs): prompt=%dch resp=%dch",
+                                     sec_key, batch_start//MAX_ENTITIES_PER_BATCH,
+                                     time.time()-t_call, len(prompt), len(raw))
+                        logger.debug("  Phase3 RESP [%s] b%d: %s", sec_key,
+                                     batch_start//MAX_ENTITIES_PER_BATCH, raw[:500])
+                    except asyncio.TimeoutError:
+                        logger.warning("Enrichment LLM timeout for section [%s] batch %d", sec_key, batch_start//MAX_ENTITIES_PER_BATCH)
+                        errors.append({"section": sec_key, "phase": "phase3", "error": "TimeoutError"})
+                        continue
+                    except Exception as e:
+                        logger.warning("Enrichment LLM error for section [%s]: %s", sec_key, e)
+                        errors.append({"section": sec_key, "phase": "phase3", "error": str(e)})
+                        continue
+
+                    batch_actions = self._agent._parse_enrichment_json(raw) if raw else []
+                    if isinstance(batch_actions, list):
+                        all_actions.extend(batch_actions)
+
+                if all_actions:
+                    logger.info("  Enrich section [%s]: %d entities, %d actions generated",
+                                 sec_key, len(sec_names), len(all_actions))
+                return sec_key, all_actions
+
+        section_items = sorted(section_groups.items())
+        tasks = [_enrich_section(key, ents, doc_name, sem)
+                  for key, ents in section_items]
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for result in results:
+            if result is None or isinstance(result, Exception):
+                if isinstance(result, Exception):
+                    errors.append({"phase": "phase3", "error": str(result)})
+                continue
+            sec_key, actions = result
+            if not actions:
+                continue
+
+            created_relations = 0
+            for act in actions[:50]:
+                action_type = act.get("action", "")
+                try:
+                    if action_type == "add_relation":
+                        rel_type = act.get("type", "connection")
+                        if rel_type not in ("connection", "interface", "allocation"):
+                            rel_type = "connection"
+                        rel_res = await self._agent._mcp_session.call_tool("sysml_add_relation", {
+                            "relation_type": rel_type,
+                            "source": act.get("source", ""),
+                            "target": act.get("target", ""),
+                            "description": act.get("description", ""),
+                            "source_sections": [sec_key] if sec_key else ["富化"],
+                        })
+                        rdata = json.loads(rel_res)
+                        if rdata.get("ok"):
+                            created_relations += 1
+                            logger.debug("  Phase3 REL: '%s' --[%s]--> '%s'",
+                                         act.get("source", ""), rel_type, act.get("target", ""))
+                    elif action_type == "add_alias":
+                        await self._agent._mcp_session.call_tool("sysml_add_alias", {
+                            "qualified_name": act.get("entity", ""),
+                            "alias": act.get("alias", ""),
+                        })
+                        logger.debug("  Phase3 ALIAS: '%s' ← '%s'",
+                                     act.get("entity", ""), act.get("alias", ""))
+                    elif action_type == "update_entity":
+                        await self._agent._mcp_session.call_tool("sysml_update_entity", {
+                            "qualified_name": act.get("entity", ""),
+                            "append_description": act.get("append_description", ""),
+                        })
+                except Exception as e:
+                    logger.debug("Enrich action error: %s", e)
+
+            logger.info("  Enrich section [%s]: %d relations created", sec_key, created_relations)
+            processed_sections.add(sec_key)
+            await self._agent._trigger_save()
+            try:
+                self._agent._save_build_state(
+                    doc_name, "phase3", processed_sections=list(processed_sections))
+            except Exception:
+                pass
+
+    async def count_orphan_entities(self) -> int:
+        """计算零关系实体的数量."""
+        if self._agent._mcp_session is None:
+            return 0
+
+        entity_list = await self._agent._mcp_session.call_tool(
+            "sysml_list_entities", {"include_details": False}
+        )
+        relation_list = await self._agent._mcp_session.call_tool(
+            "sysml_list_relations", {"include_details": True}
+        )
+
+        try:
+            entities_data = json.loads(entity_list)
+            relations_data = json.loads(relation_list)
+        except json.JSONDecodeError:
+            return 0
+
+        entity_names = [e.get("name", "") for e in entities_data.get("entities", [])]
+        connected: set = set()
+        for rel in relations_data.get("relations", []):
+            for end in rel.get("ends", []):
+                ref = end.get("ref", "")
+                if ref:
+                    connected.add(ref)
+
+        orphans = [n for n in entity_names if n not in connected]
+        return len(orphans)
+
+    async def aggregate_graph(self, doc_name: str) -> None:
+        """迭代合并连通分量，消除孤立子图，直到全图连通. 每轮后保存."""
+        if self._agent._mcp_session is None:
+            return
+
+        max_rounds = 100
+        for round_idx in range(max_rounds):
+            comps_result = await self._agent._mcp_session.call_tool("sysml_connected_components", {})
+            try:
+                cc_data = json.loads(comps_result)
+            except json.JSONDecodeError:
+                break
+            components = cc_data.get("components", [])
+            if len(components) <= 1:
+                logger.info("Phase 4: graph fully connected (%d component, round %d)",
+                             len(components), round_idx + 1)
+                await self._agent._trigger_save()
+                break
+
+            smallest = components[0]
+            target = components[-1] if len(components) >= 2 else components[0]
+
+            logger.info("Phase 4 round %d: merging component size=%d into size=%d (%d total)",
+                         round_idx + 1, smallest["size"], target["size"], len(components))
+
+            small_entities = await self.get_entities_with_sections(smallest["entities"])
+            target_entities = await self.get_entities_with_sections(target["entities"])
+
+            bridge_candidates = []
+            for s_name, s_sections in small_entities.items():
+                for t_name, t_sections in target_entities.items():
+                    common = set(s_sections) & set(t_sections)
+                    if common:
+                        bridge_candidates.append((s_name, t_name, list(common)[:5]))
+
+            if bridge_candidates:
+                logger.info("  Found %d bridge candidates via shared sections", len(bridge_candidates))
+            else:
+                bridge_candidates = [
+                    (smallest["entities"][0], target["entities"][0], ["无共同章节"])
+                ]
+
+            created = await self.bridge_components(bridge_candidates)
+            logger.info("  Created %d bridge relations", created)
+
+            await self._agent._trigger_save()
+
+    async def get_entities_with_sections(self, entity_names: list) -> dict:
+        """获取实体的 source_sections 映射."""
+        result = {}
+        for name in entity_names:
+            try:
+                r = await self._agent._mcp_session.call_tool(
+                    "sysml_get_entity", {"entity_name": name}
+                )
+                data = json.loads(r)
+                sections = data.get("source_sections", []) or []
+                result[name] = [str(s) for s in sections if s]
+            except Exception:
+                result[name] = []
+        return result
+
+    async def bridge_components(self, candidates: list) -> int:
+        """并行 LLM 判断候选实体对是否存在有意义的关系并创建."""
+        if not candidates:
+            return 0
+
+        model_name = self._agent.light_model
+        api_url = (config.settings.OPENAI_API_URL or "http://localhost:11434/v1").rstrip("/")
+        batch_concurrency = self._agent._get_config("BATCH_CONCURRENCY", 5)
+        sem = asyncio.Semaphore(batch_concurrency)
+
+        async def _classify_one(s_name, t_name, shared_sections):
+            async with sem:
+                prompt = f"""你是知识图谱关系审查员。判断以下两个实体之间是否存在有意义的关系。
+
+实体A: {s_name}
+实体B: {t_name}
+共同出现的章节: {', '.join(shared_sections[:3])}
+
+请将以下两实体关系归类为以下类型之一:
+- allocation: A是B的一部分, B包含A
+- connection: A和B之间有物理连接或数据流
+- interface: A实现B的接口
+- containment: A包含B（层级分解）
+- composition: A由B组成（强整体-部分）
+- reference: A引用B（弱交叉引用）
+- generalization: A继承B
+- dependency: A依赖B
+- abstraction: A抽象B
+- realization: A实现B
+- derive: A派生自B
+- trace: A追溯到B
+- derivereqt: 需求A派生自B
+- refine: A细化B
+- satisfy: A满足B
+- verify: A验证B
+- copy: A复制B
+- usecaseassociation: 用例关联
+- usecaseinclude: 用例包含
+- usecaseextend: 用例扩展
+- none: 两者无直接关系
+
+请只回答一个词: allocation, connection, interface, containment, composition, reference, generalization, dependency, abstraction, realization, derive, trace, derivereqt, refine, satisfy, verify, copy, usecaseassociation, usecaseinclude, usecaseextend, 或 none"""
+                try:
+                    t_call = time.time()
+                    async with httpx.AsyncClient(timeout=120) as client:
+                        resp = await client.post(
+                            f"{api_url}/chat/completions",
+                            json={
+                                "model": model_name,
+                                "messages": [{"role": "user", "content": prompt}],
+                                "stream": False,
+                                "options": {"num_predict": 8},
+                            },
+                        )
+                        data = resp.json()
+                        choice = data.get("choices", [{}])[0]
+                        answer = (choice.get("message", {})
+                                   .get("content", "")).strip().lower()
+                        logger.debug("  Phase4 BRIDGE '%s' ↔ '%s' (%.1fs): %s",
+                                     s_name, t_name, time.time()-t_call, answer or 'none')
+                        return s_name, t_name, shared_sections, answer
+                except Exception:
+                    return s_name, t_name, shared_sections, None
+
+        tasks = [_classify_one(s_name, t_name, shared)
+                  for s_name, t_name, shared in candidates[:20]]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        created = 0
+        for result in results:
+            if isinstance(result, Exception) or result is None:
+                continue
+            s_name, t_name, shared_sections, answer = result
+            if not answer or answer in ("none", "无", ""):
+                continue
+
+            rel_type = answer  # answer is already the canonical type: allocation|connection|containment|composition|reference
+            try:
+                rel_result = await self._agent._mcp_session.call_tool(
+                    "sysml_add_relation", {
+                        "relation_type": rel_type,
+                        "source": s_name,
+                        "target": t_name,
+                        "description": f"桥接关系: {s_name} ↔ {t_name} (同章: {', '.join(shared_sections[:2])})",
+                        "source_sections": shared_sections[:3],
+                    }
+                )
+                rel_data = json.loads(rel_result)
+                if rel_data.get("ok"):
+                    created += 1
+                    logger.debug("  Bridge: %s --[%s]--> %s", s_name, rel_type, t_name)
+            except Exception:
+                pass
+
+        return created
+
+class StatePersistence:
+    """构建状态持久化：build_state 文件读写 / 后台保存 / 摘要（T9 拆分自 KGBuildAgent）。"""
+
+    def __init__(self, agent: "KGBuildAgent"):
+        self._agent = agent
+
+    @property
+    def build_state_file(self) -> Path:
+        return self._agent.persist_dir / "knowledge_graph.build.json"
+
+    def load_build_state(self, doc_name: str) -> Dict[str, Any]:
+        try:
+            bsf = self.build_state_file
+            if bsf.exists():
+                with open(bsf, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                docs = data.get("documents", {})
+                if doc_name in docs:
+                    return docs[doc_name]
+        except Exception:
+            pass
+        return {}
+
+    def save_build_state(
+        self, doc_name: str, phase: str,
+        processed_sections: Optional[List[str]] = None,
+        phase1_processed_sections: Optional[List[str]] = None,
+        stats: Optional[Dict[str, Any]] = None,
+        errors: Optional[List[Dict]] = None,
+    ) -> None:
+        try:
+            bsf = self.build_state_file
+            data = {}
+            if bsf.exists():
+                with open(bsf, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            docs = data.get("documents", {})
+            entry = docs.get(doc_name, {})
+            entry |= {"phase": phase, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            if processed_sections is not None:
+                entry["processed_sections"] = processed_sections
+            if phase1_processed_sections is not None:
+                entry["phase1_processed_sections"] = phase1_processed_sections
+            if stats is not None:
+                entry.setdefault("stats", {}).update(stats)
+            if errors is not None:
+                entry.setdefault("errors", []).extend(errors)
+            docs[doc_name] = entry
+            data["documents"] = docs
+            data["version"] = 1
+            tmp = bsf.with_suffix(".tmp")
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            tmp.replace(bsf)
+        except Exception as e:
+            logger.warning("Failed to save build state: %s", e)
+
+    async def trigger_save(self) -> None:
+        self._agent._save_desired = True
+        if self._agent._save_task is None or self._agent._save_task.done():
+            self._agent._save_task = asyncio.create_task(self.do_save())
+
+    async def do_save(self) -> None:
+        async with self._agent._save_lock:
+            while self._agent._save_desired:
+                self._agent._save_desired = False
+                await self.save_knowledge_graph()
+
+    async def save_knowledge_graph(self) -> None:
+        """保存知识图谱到 .sysml 文件"""
+        if self._agent._mcp_session is None:
+            return
+        self._agent.persist_dir.mkdir(parents=True, exist_ok=True)
+        kg_file = self._agent.persist_dir / "knowledge_graph.sysml"
+        await self._agent._mcp_session.call_tool(
+            "sysml_save_model", {"file_path": str(kg_file)})
+        logger.info("KG saved to %s", kg_file)
+
+    async def summary(self) -> Dict[str, Any]:
+        if self._agent._mcp_session is None:
+            return {}
+        result = await self._agent._mcp_session.call_tool("sysml_model_summary", {})
+        try:
+            return json.loads(result)
+        except json.JSONDecodeError:
+            return {}
+
+
+
 class KGBuildAgent:
     """知识图谱构建 Agent 协调器"""
 
@@ -529,6 +1618,29 @@ class KGBuildAgent:
         self._save_desired = False
         self._save_task: Optional[asyncio.Task] = None
         self._fts_index: Optional[sqlite3.Connection] = None
+
+    def _candidate_engine(self) -> "CandidateExtractionEngine":
+        eng = getattr(self, "_candidate_engine_cache", None)
+        if eng is None:
+            eng = CandidateExtractionEngine(self)
+            self._candidate_engine_cache = eng
+        return eng
+
+    def _relation_enricher(self) -> "RelationEnricher":
+        eng = getattr(self, "_relation_enricher_cache", None)
+        if eng is None:
+            eng = RelationEnricher(self)
+            self._relation_enricher_cache = eng
+        return eng
+
+    def _state_persistence(self) -> "StatePersistence":
+        eng = getattr(self, "_state_persistence_cache", None)
+        if eng is None:
+            eng = StatePersistence(self)
+            self._state_persistence_cache = eng
+        return eng
+
+
 
     @staticmethod
     def _get_config(key: str, default: Any = None) -> Any:
@@ -899,808 +2011,34 @@ class KGBuildAgent:
 
     # ── Phase 1 helpers ──────────────────────────────────────
 
-    async def _extract_page_candidates(
-        self, text: str, title: str, page: int
-    ) -> tuple:
-        """用轻量模型从页面文本提取实体/关系候选列表 (JSON).
-        支持滑动窗口处理长文本: >4000 字符时分块提取后合并去重。
-        """
-        from langchain_core.messages import HumanMessage, SystemMessage
+    async def _extract_page_candidates(self, text: str, title: str, page: int) -> tuple:
+        """T9 委托包装：转发到 CandidateExtractionEngine.extract_page_candidates。"""
+        return await self._candidate_engine().extract_page_candidates(text, title, page)
 
-        max_chars = 4000
-        if len(text) <= max_chars:
-            chunks = [text]
-        else:
-            # 滑动窗口: window=3000, stride=2500 (重叠500)
-            window = min(3000, max_chars)
-            stride = max(1, window - 500)
-            chunks = []
-            start = 0
-            while start < len(text):
-                end = min(start + window, len(text))
-                chunks.append(text[start:end])
-                if end >= len(text):
-                    break
-                start += stride
-            logger.debug("  Page %d: %d chars → %d chunks", page, len(text), len(chunks))
-
-        all_candidates = []
-        all_relations = []
-        for ci, chunk in enumerate(chunks):
-            suffix = f" (chunk {ci+1}/{len(chunks)})" if len(chunks) > 1 else ""
-            prompt = f"""页面标题: {title} (第{page}页){suffix}
-
-文本内容:
----BEGIN---
-{chunk}
----END---
-
-请输出JSON数组。无系统架构内容则输出 []"""
-            try:
-                t_call = time.time()
-                response = await asyncio.wait_for(
-                    self.light_llm.ainvoke([
-                        SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
-                        HumanMessage(content=prompt),
-                    ]),
-                    timeout=180,
-                )
-                logger.debug("  Phase1a LLM p%d c%d (%.1fs): prompt=%dch resp=%dch",
-                             page, ci+1, time.time()-t_call, len(prompt), len(raw))
-                logger.debug("  Phase1a RESP p%d c%d: %s", page, ci+1, raw[:500])
-            except asyncio.TimeoutError:
-                logger.warning("  Light LLM timeout for page %d chunk %d, retrying...", page, ci+1)
-                try:
-                    response = await asyncio.wait_for(
-                        self.light_llm.ainvoke([
-                            SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
-                            HumanMessage(content=prompt),
-                        ]),
-                        timeout=180,
-                    )
-                    raw = str(response.content) if hasattr(response, "content") else str(response)
-                except asyncio.TimeoutError:
-                    logger.warning("  Light LLM retry also timeout for page %d chunk %d, skipping", page, ci+1)
-                    continue
-            except Exception as e:
-                logger.warning("  Light LLM error for page %d chunk %d: %s", page, ci+1, e)
-                continue
-
-            candidates, relations = self._parse_candidates(raw)
-            all_candidates.extend(candidates)
-            all_relations.extend(relations)
-
-        # 合并去重: 同名实体保留最详细的一个
-        if len(chunks) > 1:
-            seen = {}
-            merged_candidates = []
-            for c in all_candidates:
-                name = c.get("name", "")
-                if name in seen:
-                    existing = seen[name]
-                    if len(c.get("description", "")) > len(existing.get("description", "")):
-                        existing["description"] = c["description"]
-                    existing_aliases = set(existing.get("aliases", []))
-                    for a in c.get("aliases", []):
-                        if a not in existing_aliases:
-                            existing["aliases"].append(a)
-                else:
-                    seen[name] = dict(c)
-                    merged_candidates.append(c)
-            all_candidates = merged_candidates
-
-            seen_rel = set()
-            merged_relations = []
-            for r in all_relations:
-                key = (r.get("source", ""), r.get("target", ""), r.get("type", ""))
-                if key not in seen_rel:
-                    seen_rel.add(key)
-                    merged_relations.append(r)
-            all_relations = merged_relations
-
-        if all_candidates or all_relations:
-            logger.debug("  Page %d: %d entities, %d relations extracted (from %d chunks)",
-                         page, len(all_candidates), len(all_relations), len(chunks))
-        return all_candidates, all_relations
 
     @staticmethod
     def _parse_candidates(raw: str) -> tuple:
-        """从 LLM 输出解析实体候选和关系候选."""
-        import re
-        candidates = []
-        relations = []
+        """T9 委托包装：转发到 CandidateExtractionEngine 静态方法。"""
+        return CandidateExtractionEngine.parse_candidates(raw)
 
-        # 提取 JSON 块
-        json_str = raw
-        m = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', raw, re.DOTALL)
-        if m:
-            json_str = m.group(1)
-        else:
-            m = re.search(r'(\[.*\])', raw, re.DOTALL)
-            if m:
-                json_str = m.group(1)
-
-        try:
-            items = json.loads(json_str)
-            if isinstance(items, list):
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    # 关系: 显式标记 relation=true 或有 source+target 字段
-                    if item.get("relation") or (item.get("source") and item.get("target")):
-                        # Normalize source/target from list to string (LLM output quirk)
-                        for _k in ("source", "target"):
-                            _v = item.get(_k)
-                            if isinstance(_v, list):
-                                item[_k] = str(_v[0]).strip() if _v else ""
-                        relations.append(item)
-                    elif item.get("name"):
-                        candidates.append(item)
-        except json.JSONDecodeError:
-            # 逐行解析
-            for line in raw.splitlines():
-                line = line.strip()
-                if not line or line.startswith("//") or line.startswith("#"):
-                    continue
-                m2 = re.search(r'\{.*\}', line)
-                if m2:
-                    try:
-                        item = json.loads(m2.group())
-                        if isinstance(item, dict):
-                            if item.get("relation") or (item.get("source") and item.get("target")):
-                                relations.append(item)
-                            elif item.get("name"):
-                                candidates.append(item)
-                    except json.JSONDecodeError:
-                        pass
-
-        return candidates, relations
 
     @staticmethod
     def _parse_enrichment_json(raw: str) -> list:
-        """从 LLM 输出解析富化操作 JSON 数组."""
-        import re
-        json_str = raw
-        m = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', raw, re.DOTALL)
-        if m:
-            json_str = m.group(1)
-        else:
-            m = re.search(r'(\[.*\])', raw, re.DOTALL)
-            if m:
-                json_str = m.group(1)
-        try:
-            items = json.loads(json_str)
-            if isinstance(items, list):
-                return [i for i in items if isinstance(i, dict) and i.get("action")]
-        except json.JSONDecodeError:
-            pass
-        return []
+        """T9 委托包装：转发到 CandidateExtractionEngine 静态方法。"""
+        return CandidateExtractionEngine.parse_enrichment_json(raw)
 
-    async def _process_candidates(
-        self, candidates: list, relations: list,
-        doc_name: str, page: int, section_title: str,
-        source_pages: Optional[list] = None,
-        batch: bool = True,
-    ) -> dict:
-        """Single merged entry point for candidate/relation processing (T8).
 
-        batch=True (default): 3-stage sysml_batch path (search batch ->
-        write batch -> relations batch, with endpoint auto-creation).
-        batch=False: serial path, per-candidate and per-relation MCP calls.
-        Both paths use identical MCP arguments and identical create/update
-        semantics; both return {"entities", "relations", "entity_map"}.
-        """
-        pages_list = source_pages or [section_title or f"p{page}"]
+    async def _process_candidates(self, candidates: list, relations: list, doc_name: str, page: int, section_title: str, source_pages: Optional[list]=None, batch: bool=True) -> dict:
+        """T9 委托包装：转发到 CandidateExtractionEngine.process_candidates。"""
+        return await self._candidate_engine().process_candidates(candidates, relations, doc_name, page, section_title, source_pages, batch)
 
-        async def _serial_impl() -> dict:
-            """系统直接调用 MCP 工具: 搜索去重 + 创建/更新实体和关系."""
-            created_entities = 0
-            created_relations = 0
-
-            # 记录已有实体名 → QN 映射（避免重复创建）
-            entity_qn_map: dict = {}
-            pages_list = source_pages or [section_title or f"p{page}"]
-
-            for c in candidates:
-                name = str(c.get("name", "")).strip()
-                etype = str(c.get("type", "PartDef")).strip()
-                desc = str(c.get("description", "")).strip()
-                aliases = c.get("aliases", []) or []
-
-                if not name:
-                    continue
-
-                # 搜索去重
-                search_result = await self._mcp_session.call_tool(
-                    "sysml_search_entity",
-                    {"query": name, "regex_pattern": "", "threshold": 0.7},
-                )
-                try:
-                    search_data = json.loads(search_result)
-                except json.JSONDecodeError:
-                    search_data = {}
-
-                if search_data.get("total_matches", 0) > 0:
-                    # 已存在 → 追加来源页面
-                    match = search_data["matches"][0]
-                    existing_qn = match.get("qualified_name", name)
-                    entity_qn_map[name] = existing_qn
-                    logger.debug("  Phase1b: entity EXISTS '%s' (qn=%s, matched=%.2f)",
-                                 name, existing_qn, match.get("confidence", 0))
-                    # 追加新的来源页面
-                    await self._mcp_session.call_tool(
-                        "sysml_update_entity",
-                        {"qualified_name": existing_qn,
-                         "append_source_sections": pages_list},
-                    )
-                    if aliases:
-                        for alias in aliases:
-                            await self._mcp_session.call_tool(
-                                "sysml_add_alias",
-                                {"qualified_name": existing_qn, "alias": alias},
-                            )
-                    continue
-
-                # 不存在 → 创建（记录所有来源页面）
-                add_result = await self._mcp_session.call_tool(
-                    "sysml_add_entity", {
-                        "entity_type": etype,
-                        "name": name,
-                        "parent_package": "",
-                        "description": desc,
-                        "aliases": aliases,
-                        "source_sections": pages_list,
-                        "source_text": desc,
-                        "properties": {},
-                        "supertypes": [],
-                        "short_name": name,
-                    },
-                )
-                try:
-                    add_data = json.loads(add_result)
-                    if add_data.get("ok"):
-                        created_entities += 1
-                        entity_qn_map[name] = add_data.get("qualified_name", name)
-                        logger.debug("  Phase1b: entity NEW '%s' <%s> (qn=%s)",
-                                     name, etype, add_data.get("qualified_name", name))
-                except json.JSONDecodeError:
-                    pass
-
-            # 创建关系 (先确保端点实体存在)
-            for r in relations:
-                rtype = str(r.get("type", "Connection")).strip()
-                source = str(r.get("source", "")).strip()
-                target = str(r.get("target", "")).strip()
-                desc = str(r.get("description", "")).strip()
-                rel_source_section = r.get("source_section", "")
-
-                if not source or not target:
-                    continue
-
-                # 构建关系来源
-                rel_src_sections: list = []
-                if rel_source_section:
-                    rel_src_sections = [rel_source_section]
-                if pages_list:
-                    rel_src_sections.extend(pages_list)
-
-                # 确保源/目标实体存在（LLM 可能在关系中提到未单独列出的实体）
-                src_qn = entity_qn_map.get(source, None)
-                tgt_qn = entity_qn_map.get(target, None)
-
-                for endpoint_name in ([source] if src_qn is None else []) + ([target] if tgt_qn is None else []):
-                    # 搜索是否已存在
-                    sr = await self._mcp_session.call_tool(
-                        "sysml_search_entity", {"query": endpoint_name, "threshold": 0.5}
-                    )
-                    try:
-                        sd = json.loads(sr)
-                        if sd.get("total_matches", 0) > 0:
-                            existing_qn = sd["matches"][0].get("qualified_name", endpoint_name)
-                            if endpoint_name == source:
-                                src_qn = existing_qn
-                            else:
-                                tgt_qn = existing_qn
-                            entity_qn_map[endpoint_name] = existing_qn
-                            continue
-                    except Exception:
-                        pass
-                    # 新建最小实体
-                    ar = await self._mcp_session.call_tool("sysml_add_entity", {
-                        "entity_type": "PartDef", "name": endpoint_name,
-                        "parent_package": "", "description": f"关系端点: {desc}",
-                        "aliases": [], "source_sections": pages_list,
-                        "source_text": desc, "properties": {}, "supertypes": [],
-                        "short_name": endpoint_name,
-                    })
-                    try:
-                        ad = json.loads(ar)
-                        if ad.get("ok"):
-                            qn = ad.get("qualified_name", endpoint_name)
-                            entity_qn_map[endpoint_name] = qn
-                            if endpoint_name == source:
-                                src_qn = qn
-                            else:
-                                tgt_qn = qn
-                            created_entities += 1
-                            logger.debug("  Phase1b: auto-created entity '%s' (qn=%s) for relation", endpoint_name, qn)
-                    except Exception:
-                        pass
-
-                if src_qn is None:
-                    src_qn = source
-                if tgt_qn is None:
-                    tgt_qn = target
-
-                rel_result = await self._mcp_session.call_tool(
-                    "sysml_add_relation", {
-                        "relation_type": rtype.lower(),
-                        "source": src_qn,
-                        "target": tgt_qn,
-                        "name": f"{source}_{target}_{rtype}",
-                        "parent_package": "",
-                        "description": desc,
-                        "role_source": "",
-                        "role_target": "",
-                        "source_sections": rel_src_sections if rel_src_sections else (pages_list if pages_list else ["未知"]),
-                    },
-                )
-                try:
-                    rel_data = json.loads(rel_result)
-                    if rel_data.get("ok"):
-                        created_relations += 1
-                        logger.debug("  Phase1b: relation NEW '%s' --[%s]--> '%s'",
-                                     src_qn, rtype, tgt_qn)
-                except json.JSONDecodeError:
-                    pass
-
-            return {"entities": created_entities, "relations": created_relations, "entity_map": entity_qn_map}
-
-        async def _batch_impl() -> dict:
-            """3-stage sysml_batch path (search batch -> write batch -> relations batch).
-
-            Reduces stdio round-trips from 12-18 per section to 3 (plus up to 2
-            for endpoint auto-creation). Semantically identical to serial path.
-            """
-            created_entities = 0
-            created_relations = 0
-            entity_qn_map: dict = {}
-            pages_list = source_pages or [section_title or f"p{page}"]
-
-            # ═══════════════════════════════════════════════════════════
-            # Batch 1: Search all entities at once
-            # ═══════════════════════════════════════════════════════════
-            search_ops = []
-            search_indices: List[int] = []  # search_op_idx → candidate_idx
-
-            for i, c in enumerate(candidates):
-                name = str(c.get("name", "")).strip()
-                if not name:
-                    continue
-                search_ops.append({
-                    "tool": "sysml_search_entity",
-                    "arguments": {"query": name, "regex_pattern": "", "threshold": 0.7},
-                })
-                search_indices.append(i)
-
-            if search_ops:
-                search_result_raw = await self._mcp_session.call_tool(
-                    "sysml_batch",
-                    {"operations": search_ops, "continue_on_error": True},
-                )
-                search_result = json.loads(search_result_raw)
-            else:
-                search_result = {"results": []}
-
-            # ═══════════════════════════════════════════════════════════
-            # Batch 2: Create/update entities + add aliases
-            # ═══════════════════════════════════════════════════════════
-            write_ops = []
-            create_op_positions: Dict[int, str] = {}  # op_idx → entity name (new entities only)
-
-            for si, ci in enumerate(search_indices):
-                c = candidates[ci]
-                name = str(c.get("name", "")).strip()
-                if not name:
-                    continue
-                etype = str(c.get("type", "PartDef")).strip()
-                desc = str(c.get("description", "")).strip()
-                aliases = c.get("aliases", []) or []
-
-                # Find this entity's search result
-                sr = (search_result.get("results", [])[si]
-                      if si < len(search_result.get("results", [])) else None)
-
-                if sr and sr.get("ok"):
-                    rd = sr.get("result", {})
-                    if rd.get("total_matches", 0) > 0:
-                        # Entity EXISTS → update + aliases
-                        match = rd["matches"][0]
-                        existing_qn = match.get("qualified_name", name)
-                        entity_qn_map[name] = existing_qn
-                        logger.debug(
-                            "  Phase1b batch: entity EXISTS '%s' (qn=%s, matched=%.2f)",
-                            name, existing_qn, match.get("confidence", 0),
-                        )
-                        write_ops.append({
-                            "tool": "sysml_update_entity",
-                            "arguments": {
-                                "qualified_name": existing_qn,
-                                "append_source_sections": pages_list,
-                            },
-                        })
-                        for alias in aliases:
-                            write_ops.append({
-                                "tool": "sysml_add_alias",
-                                "arguments": {
-                                    "qualified_name": existing_qn,
-                                    "alias": alias,
-                                },
-                            })
-                        continue
-
-                # Entity does NOT exist → create
-                op_idx = len(write_ops)
-                write_ops.append({
-                    "tool": "sysml_add_entity",
-                    "arguments": {
-                        "entity_type": etype,
-                        "name": name,
-                        "parent_package": "",
-                        "description": desc,
-                        "aliases": aliases,
-                        "source_sections": pages_list,
-                        "source_text": desc,
-                        "properties": {},
-                        "supertypes": [],
-                        "short_name": name,
-                    },
-                })
-                create_op_positions[op_idx] = name
-
-            if write_ops:
-                write_result_raw = await self._mcp_session.call_tool(
-                    "sysml_batch",
-                    {"operations": write_ops, "continue_on_error": True},
-                )
-                write_result = json.loads(write_result_raw)
-
-                # Harvest entity_qn_map from create results
-                for wr in write_result.get("results", []):
-                    idx = wr.get("index", -1)
-                    if idx in create_op_positions and wr.get("ok"):
-                        inner = wr.get("result", {})
-                        if inner.get("ok", True):
-                            ename = create_op_positions[idx]
-                            entity_qn_map[ename] = inner.get("qualified_name", ename)
-                            created_entities += 1
-                            logger.debug(
-                                "  Phase1b batch: entity NEW '%s' (qn=%s)",
-                                ename, inner.get("qualified_name", ename),
-                            )
-
-            # ═══════════════════════════════════════════════════════════
-            # Batch 3: Create all relations (with endpoint auto-creation)
-            # ═══════════════════════════════════════════════════════════
-
-            # ── 3a: Search for missing endpoints ──
-            endpoint_search_ops = []
-            endpoint_search_names: List[str] = []
-
-            for r in relations:
-                source = str(r.get("source", "")).strip()
-                target = str(r.get("target", "")).strip()
-                for en in (source, target):
-                    if en and en not in entity_qn_map and en not in endpoint_search_names:
-                        endpoint_search_ops.append({
-                            "tool": "sysml_search_entity",
-                            "arguments": {"query": en, "threshold": 0.5},
-                        })
-                        endpoint_search_names.append(en)
-
-            if endpoint_search_ops:
-                ep_result_raw = await self._mcp_session.call_tool(
-                    "sysml_batch",
-                    {"operations": endpoint_search_ops, "continue_on_error": True},
-                )
-                ep_result = json.loads(ep_result_raw)
-                for ei, er in enumerate(ep_result.get("results", [])):
-                    if ei >= len(endpoint_search_names):
-                        continue
-                    ename = endpoint_search_names[ei]
-                    if er.get("ok"):
-                        rd = er.get("result", {})
-                        if rd.get("total_matches", 0) > 0:
-                            existing_qn = rd["matches"][0].get("qualified_name", ename)
-                            entity_qn_map[ename] = existing_qn
-
-            # ── 3b: Auto-create still-missing endpoints ──
-            auto_create_ops = []
-            auto_create_op_names: Dict[int, str] = {}
-
-            for r in relations:
-                source = str(r.get("source", "")).strip()
-                target = str(r.get("target", "")).strip()
-                desc = str(r.get("description", "")).strip()
-                for en in (source, target):
-                    if en and en not in entity_qn_map:
-                        op_idx = len(auto_create_ops)
-                        auto_create_ops.append({
-                            "tool": "sysml_add_entity",
-                            "arguments": {
-                                "entity_type": "PartDef",
-                                "name": en,
-                                "parent_package": "",
-                                "description": f"关系端点: {desc}",
-                                "aliases": [],
-                                "source_sections": pages_list,
-                                "source_text": desc,
-                                "properties": {},
-                                "supertypes": [],
-                                "short_name": en,
-                            },
-                        })
-                        auto_create_op_names[op_idx] = en
-                        # Mark as "in progress" to avoid duplicate creates
-                        # (actual QN updated after batch)
-                        entity_qn_map[en] = en
-
-            if auto_create_ops:
-                ac_result_raw = await self._mcp_session.call_tool(
-                    "sysml_batch",
-                    {"operations": auto_create_ops, "continue_on_error": True},
-                )
-                ac_result = json.loads(ac_result_raw)
-                for acr in ac_result.get("results", []):
-                    idx = acr.get("index", -1)
-                    if idx in auto_create_op_names and acr.get("ok"):
-                        inner = acr.get("result", {})
-                        if inner.get("ok", True):
-                            ename = auto_create_op_names[idx]
-                            qn = inner.get("qualified_name", ename)
-                            entity_qn_map[ename] = qn
-                            created_entities += 1
-                            logger.debug(
-                                "  Phase1b batch: auto-created entity '%s' (qn=%s) for relation",
-                                ename, qn,
-                            )
-
-            # ── 3c: Create all relations ──
-            rel_ops = []
-            for r in relations:
-                rtype = str(r.get("type", "Connection")).strip()
-                source = str(r.get("source", "")).strip()
-                target = str(r.get("target", "")).strip()
-                desc = str(r.get("description", "")).strip()
-                rel_source_section = r.get("source_section", "")
-
-                if not source or not target:
-                    continue
-
-                # Build relation source sections
-                rel_src_sections: list = []
-                if rel_source_section:
-                    rel_src_sections = [rel_source_section]
-                if pages_list:
-                    rel_src_sections.extend(pages_list)
-
-                src_qn = entity_qn_map.get(source, source)
-                tgt_qn = entity_qn_map.get(target, target)
-
-                rel_ops.append({
-                    "tool": "sysml_add_relation",
-                    "arguments": {
-                        "relation_type": rtype.lower(),
-                        "source": src_qn,
-                        "target": tgt_qn,
-                        "name": f"{source}_{target}_{rtype}",
-                        "parent_package": "",
-                        "description": desc,
-                        "role_source": "",
-                        "role_target": "",
-                        "source_sections": (
-                            rel_src_sections if rel_src_sections
-                            else (pages_list if pages_list else ["未知"])
-                        ),
-                    },
-                })
-
-            if rel_ops:
-                rel_result_raw = await self._mcp_session.call_tool(
-                    "sysml_batch",
-                    {"operations": rel_ops, "continue_on_error": True},
-                )
-                rel_result = json.loads(rel_result_raw)
-                for rr in rel_result.get("results", []):
-                    if rr.get("ok"):
-                        created_relations += 1
-
-            return {"entities": created_entities, "relations": created_relations, "entity_map": entity_qn_map}
-
-        if batch:
-            return await _batch_impl()
-        return await _serial_impl()
 
     # ── Phase 3: Enrichment ──────────────────────────────────
 
-    async def _enrich_entities(
-        self, doc_name: str, processed_sections: set = None, errors: list = None
-    ) -> None:
-        """JSON 模式：并行 LLM 逐节生成富化指令 → 顺序 MCP 应用。支持断点续跑。"""
-        if processed_sections is None:
-            processed_sections = set()
-        if errors is None:
-            errors = []
+    async def _enrich_entities(self, doc_name: str, processed_sections: set=None, errors: list=None) -> None:
+        """T9 委托包装：转发到 RelationEnricher.enrich_entities。"""
+        return await self._relation_enricher().enrich_entities(doc_name, processed_sections, errors)
 
-        if self._mcp_session is None:
-            return
-
-        summary = await self._summary()
-        total_entities = summary.get("total_entities", 0)
-        if total_entities == 0:
-            return
-
-        entity_list = await self._mcp_session.call_tool(
-            "sysml_list_entities", {"include_details": True}
-        )
-        try:
-            entities_data = json.loads(entity_list)
-        except json.JSONDecodeError:
-            return
-
-        entities = entities_data.get("entities", [])
-        if not entities:
-            return
-
-        section_groups: dict = {}
-        for e in entities:
-            name = e.get("name", "")
-            sections = e.get("source_sections") or e.get("source_section") or []
-            if isinstance(sections, str):
-                sections = [sections]
-            if not sections:
-                key = "__no_section__"
-            else:
-                first = str(sections[0])
-                import re
-                m = re.search(r'([\d]+\.[\d]+)', first)
-                if m:
-                    key = m.group(1)
-                else:
-                    key = first[:30]
-            if key not in section_groups:
-                section_groups[key] = []
-            section_groups[key].append(e)
-
-        logger.info("Enrichment: %d entities in %d sections",
-                     len(entities), len(section_groups))
-
-        batch_concurrency = self._get_config("BATCH_CONCURRENCY", 5)
-        sem = asyncio.Semaphore(batch_concurrency)
-
-        MAX_ENTITIES_PER_BATCH = 15
-
-        async def _enrich_section(sec_key, sec_entities, doc_name, sem):
-            async with sem:
-                sec_names = [e.get("name", "") for e in sec_entities if e.get("name")]
-                if not sec_names:
-                    return None
-
-                if sec_key in processed_sections:
-                    logger.info("  Enrich section [%s]: SKIP (already processed)", sec_key)
-                    return None
-
-                entity_details = [{
-                    "name": e.get("name", ""),
-                    "type": e.get("type", ""),
-                    "description": (e.get("description") or "")[:200],
-                } for e in sec_entities if e.get("name")]
-
-                all_actions = []
-                from langchain_core.messages import HumanMessage, SystemMessage
-
-                # Split into batches to avoid overwhelming small model
-                for batch_start in range(0, len(entity_details), MAX_ENTITIES_PER_BATCH):
-                    batch = entity_details[batch_start:batch_start + MAX_ENTITIES_PER_BATCH]
-                    chunk_label = f" ({batch_start//MAX_ENTITIES_PER_BATCH + 1}/{(len(entity_details)-1)//MAX_ENTITIES_PER_BATCH + 1})" if len(entity_details) > MAX_ENTITIES_PER_BATCH else ""
-                    prompt = f"""文档: {doc_name}
-小节: {sec_key}{chunk_label}
-本小节实体列表:
-{json.dumps(batch, ensure_ascii=False, indent=2)}
-
-请为本小节实体输出JSON格式的富化操作。每个实体至少一条关系。
-只在同小节实体之间创建关系。"""
-                    try:
-                        t_call = time.time()
-                        response = await asyncio.wait_for(
-                            self.light_llm.ainvoke([
-                                SystemMessage(content=ENRICHMENT_JSON_PROMPT),
-                                HumanMessage(content=prompt),
-                            ]),
-                    timeout=600,
-                        )
-                        raw = str(response.content) if hasattr(response, "content") else str(response)
-                        logger.debug("  Phase3 LLM [%s] b%d (%.1fs): prompt=%dch resp=%dch",
-                                     sec_key, batch_start//MAX_ENTITIES_PER_BATCH,
-                                     time.time()-t_call, len(prompt), len(raw))
-                        logger.debug("  Phase3 RESP [%s] b%d: %s", sec_key,
-                                     batch_start//MAX_ENTITIES_PER_BATCH, raw[:500])
-                    except asyncio.TimeoutError:
-                        logger.warning("Enrichment LLM timeout for section [%s] batch %d", sec_key, batch_start//MAX_ENTITIES_PER_BATCH)
-                        errors.append({"section": sec_key, "phase": "phase3", "error": "TimeoutError"})
-                        continue
-                    except Exception as e:
-                        logger.warning("Enrichment LLM error for section [%s]: %s", sec_key, e)
-                        errors.append({"section": sec_key, "phase": "phase3", "error": str(e)})
-                        continue
-
-                    batch_actions = self._parse_enrichment_json(raw) if raw else []
-                    if isinstance(batch_actions, list):
-                        all_actions.extend(batch_actions)
-
-                if all_actions:
-                    logger.info("  Enrich section [%s]: %d entities, %d actions generated",
-                                 sec_key, len(sec_names), len(all_actions))
-                return sec_key, all_actions
-
-        section_items = sorted(section_groups.items())
-        tasks = [_enrich_section(key, ents, doc_name, sem)
-                  for key, ents in section_items]
-
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for result in results:
-            if result is None or isinstance(result, Exception):
-                if isinstance(result, Exception):
-                    errors.append({"phase": "phase3", "error": str(result)})
-                continue
-            sec_key, actions = result
-            if not actions:
-                continue
-
-            created_relations = 0
-            for act in actions[:50]:
-                action_type = act.get("action", "")
-                try:
-                    if action_type == "add_relation":
-                        rel_type = act.get("type", "connection")
-                        if rel_type not in ("connection", "interface", "allocation"):
-                            rel_type = "connection"
-                        rel_res = await self._mcp_session.call_tool("sysml_add_relation", {
-                            "relation_type": rel_type,
-                            "source": act.get("source", ""),
-                            "target": act.get("target", ""),
-                            "description": act.get("description", ""),
-                            "source_sections": [sec_key] if sec_key else ["富化"],
-                        })
-                        rdata = json.loads(rel_res)
-                        if rdata.get("ok"):
-                            created_relations += 1
-                            logger.debug("  Phase3 REL: '%s' --[%s]--> '%s'",
-                                         act.get("source", ""), rel_type, act.get("target", ""))
-                    elif action_type == "add_alias":
-                        await self._mcp_session.call_tool("sysml_add_alias", {
-                            "qualified_name": act.get("entity", ""),
-                            "alias": act.get("alias", ""),
-                        })
-                        logger.debug("  Phase3 ALIAS: '%s' ← '%s'",
-                                     act.get("entity", ""), act.get("alias", ""))
-                    elif action_type == "update_entity":
-                        await self._mcp_session.call_tool("sysml_update_entity", {
-                            "qualified_name": act.get("entity", ""),
-                            "append_description": act.get("append_description", ""),
-                        })
-                except Exception as e:
-                    logger.debug("Enrich action error: %s", e)
-
-            logger.info("  Enrich section [%s]: %d relations created", sec_key, created_relations)
-            processed_sections.add(sec_key)
-            await self._trigger_save()
-            try:
-                self._save_build_state(
-                    doc_name, "phase3", processed_sections=list(processed_sections))
-            except Exception:
-                pass
 
     # ── 旧接口：向后兼容 ───────────────────────────────────────
 
@@ -1773,193 +2111,26 @@ class KGBuildAgent:
         return stats
 
     async def _count_orphan_entities(self) -> int:
-        """计算零关系实体的数量."""
-        if self._mcp_session is None:
-            return 0
+        """T9 委托包装：转发到 RelationEnricher.count_orphan_entities。"""
+        return await self._relation_enricher().count_orphan_entities()
 
-        entity_list = await self._mcp_session.call_tool(
-            "sysml_list_entities", {"include_details": False}
-        )
-        relation_list = await self._mcp_session.call_tool(
-            "sysml_list_relations", {"include_details": True}
-        )
-
-        try:
-            entities_data = json.loads(entity_list)
-            relations_data = json.loads(relation_list)
-        except json.JSONDecodeError:
-            return 0
-
-        entity_names = [e.get("name", "") for e in entities_data.get("entities", [])]
-        connected: set = set()
-        for rel in relations_data.get("relations", []):
-            for end in rel.get("ends", []):
-                ref = end.get("ref", "")
-                if ref:
-                    connected.add(ref)
-
-        orphans = [n for n in entity_names if n not in connected]
-        return len(orphans)
 
     # ── Phase 4: Graph Aggregation ─────────────────────────────
 
     async def _aggregate_graph(self, doc_name: str) -> None:
-        """迭代合并连通分量，消除孤立子图，直到全图连通. 每轮后保存."""
-        if self._mcp_session is None:
-            return
+        """T9 委托包装：转发到 RelationEnricher.aggregate_graph。"""
+        return await self._relation_enricher().aggregate_graph(doc_name)
 
-        max_rounds = 100
-        for round_idx in range(max_rounds):
-            comps_result = await self._mcp_session.call_tool("sysml_connected_components", {})
-            try:
-                cc_data = json.loads(comps_result)
-            except json.JSONDecodeError:
-                break
-            components = cc_data.get("components", [])
-            if len(components) <= 1:
-                logger.info("Phase 4: graph fully connected (%d component, round %d)",
-                             len(components), round_idx + 1)
-                await self._trigger_save()
-                break
-
-            smallest = components[0]
-            target = components[-1] if len(components) >= 2 else components[0]
-
-            logger.info("Phase 4 round %d: merging component size=%d into size=%d (%d total)",
-                         round_idx + 1, smallest["size"], target["size"], len(components))
-
-            small_entities = await self._get_entities_with_sections(smallest["entities"])
-            target_entities = await self._get_entities_with_sections(target["entities"])
-
-            bridge_candidates = []
-            for s_name, s_sections in small_entities.items():
-                for t_name, t_sections in target_entities.items():
-                    common = set(s_sections) & set(t_sections)
-                    if common:
-                        bridge_candidates.append((s_name, t_name, list(common)[:5]))
-
-            if bridge_candidates:
-                logger.info("  Found %d bridge candidates via shared sections", len(bridge_candidates))
-            else:
-                bridge_candidates = [
-                    (smallest["entities"][0], target["entities"][0], ["无共同章节"])
-                ]
-
-            created = await self._bridge_components(bridge_candidates)
-            logger.info("  Created %d bridge relations", created)
-
-            await self._trigger_save()
 
     async def _get_entities_with_sections(self, entity_names: list) -> dict:
-        """获取实体的 source_sections 映射."""
-        result = {}
-        for name in entity_names:
-            try:
-                r = await self._mcp_session.call_tool(
-                    "sysml_get_entity", {"entity_name": name}
-                )
-                data = json.loads(r)
-                sections = data.get("source_sections", []) or []
-                result[name] = [str(s) for s in sections if s]
-            except Exception:
-                result[name] = []
-        return result
+        """T9 委托包装：转发到 RelationEnricher.get_entities_with_sections。"""
+        return await self._relation_enricher().get_entities_with_sections(entity_names)
+
 
     async def _bridge_components(self, candidates: list) -> int:
-        """并行 LLM 判断候选实体对是否存在有意义的关系并创建."""
-        if not candidates:
-            return 0
+        """T9 委托包装：转发到 RelationEnricher.bridge_components。"""
+        return await self._relation_enricher().bridge_components(candidates)
 
-        model_name = self.light_model
-        api_url = (config.settings.OPENAI_API_URL or "http://localhost:11434/v1").rstrip("/")
-        batch_concurrency = self._get_config("BATCH_CONCURRENCY", 5)
-        sem = asyncio.Semaphore(batch_concurrency)
-
-        async def _classify_one(s_name, t_name, shared_sections):
-            async with sem:
-                prompt = f"""你是知识图谱关系审查员。判断以下两个实体之间是否存在有意义的关系。
-
-实体A: {s_name}
-实体B: {t_name}
-共同出现的章节: {', '.join(shared_sections[:3])}
-
-请将以下两实体关系归类为以下类型之一:
-- allocation: A是B的一部分, B包含A
-- connection: A和B之间有物理连接或数据流
-- interface: A实现B的接口
-- containment: A包含B（层级分解）
-- composition: A由B组成（强整体-部分）
-- reference: A引用B（弱交叉引用）
-- generalization: A继承B
-- dependency: A依赖B
-- abstraction: A抽象B
-- realization: A实现B
-- derive: A派生自B
-- trace: A追溯到B
-- derivereqt: 需求A派生自B
-- refine: A细化B
-- satisfy: A满足B
-- verify: A验证B
-- copy: A复制B
-- usecaseassociation: 用例关联
-- usecaseinclude: 用例包含
-- usecaseextend: 用例扩展
-- none: 两者无直接关系
-
-请只回答一个词: allocation, connection, interface, containment, composition, reference, generalization, dependency, abstraction, realization, derive, trace, derivereqt, refine, satisfy, verify, copy, usecaseassociation, usecaseinclude, usecaseextend, 或 none"""
-                try:
-                    t_call = time.time()
-                    async with httpx.AsyncClient(timeout=120) as client:
-                        resp = await client.post(
-                            f"{api_url}/chat/completions",
-                            json={
-                                "model": model_name,
-                                "messages": [{"role": "user", "content": prompt}],
-                                "stream": False,
-                                "options": {"num_predict": 8},
-                            },
-                        )
-                        data = resp.json()
-                        choice = data.get("choices", [{}])[0]
-                        answer = (choice.get("message", {})
-                                   .get("content", "")).strip().lower()
-                        logger.debug("  Phase4 BRIDGE '%s' ↔ '%s' (%.1fs): %s",
-                                     s_name, t_name, time.time()-t_call, answer or 'none')
-                        return s_name, t_name, shared_sections, answer
-                except Exception:
-                    return s_name, t_name, shared_sections, None
-
-        tasks = [_classify_one(s_name, t_name, shared)
-                  for s_name, t_name, shared in candidates[:20]]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        created = 0
-        for result in results:
-            if isinstance(result, Exception) or result is None:
-                continue
-            s_name, t_name, shared_sections, answer = result
-            if not answer or answer in ("none", "无", ""):
-                continue
-
-            rel_type = answer  # answer is already the canonical type: allocation|connection|containment|composition|reference
-            try:
-                rel_result = await self._mcp_session.call_tool(
-                    "sysml_add_relation", {
-                        "relation_type": rel_type,
-                        "source": s_name,
-                        "target": t_name,
-                        "description": f"桥接关系: {s_name} ↔ {t_name} (同章: {', '.join(shared_sections[:2])})",
-                        "source_sections": shared_sections[:3],
-                    }
-                )
-                rel_data = json.loads(rel_result)
-                if rel_data.get("ok"):
-                    created += 1
-                    logger.debug("  Bridge: %s --[%s]--> %s", s_name, rel_type, t_name)
-            except Exception:
-                pass
-
-        return created
 
     # ── Light model unload ─────────────────────────────────────
 
@@ -2040,84 +2211,39 @@ class KGBuildAgent:
 
     @property
     def _build_state_file(self) -> Path:
-        return self.persist_dir / "knowledge_graph.build.json"
+        """构建状态文件路径（T9 委托 StatePersistence）。"""
+        return self._state_persistence().build_state_file
+
 
     def _load_build_state(self, doc_name: str) -> Dict[str, Any]:
-        try:
-            bsf = self._build_state_file
-            if bsf.exists():
-                with open(bsf, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                docs = data.get("documents", {})
-                if doc_name in docs:
-                    return docs[doc_name]
-        except Exception:
-            pass
-        return {}
+        """T9 委托包装：转发到 StatePersistence.load_build_state。"""
+        return self._state_persistence().load_build_state(doc_name)
 
-    def _save_build_state(
-        self, doc_name: str, phase: str,
-        processed_sections: Optional[List[str]] = None,
-        phase1_processed_sections: Optional[List[str]] = None,
-        stats: Optional[Dict[str, Any]] = None,
-        errors: Optional[List[Dict]] = None,
-    ) -> None:
-        try:
-            bsf = self._build_state_file
-            data = {}
-            if bsf.exists():
-                with open(bsf, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-            docs = data.get("documents", {})
-            entry = docs.get(doc_name, {})
-            entry |= {"phase": phase, "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
-            if processed_sections is not None:
-                entry["processed_sections"] = processed_sections
-            if phase1_processed_sections is not None:
-                entry["phase1_processed_sections"] = phase1_processed_sections
-            if stats is not None:
-                entry.setdefault("stats", {}).update(stats)
-            if errors is not None:
-                entry.setdefault("errors", []).extend(errors)
-            docs[doc_name] = entry
-            data["documents"] = docs
-            data["version"] = 1
-            tmp = bsf.with_suffix(".tmp")
-            with open(tmp, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            tmp.replace(bsf)
-        except Exception as e:
-            logger.warning("Failed to save build state: %s", e)
+
+    def _save_build_state(self, doc_name: str, phase: str, processed_sections: Optional[List[str]]=None, phase1_processed_sections: Optional[List[str]]=None, stats: Optional[Dict[str, Any]]=None, errors: Optional[List[Dict]]=None) -> None:
+        """T9 委托包装：转发到 StatePersistence.save_build_state。"""
+        return self._state_persistence().save_build_state(doc_name, phase, processed_sections, phase1_processed_sections, stats, errors)
+
 
     async def _trigger_save(self) -> None:
-        self._save_desired = True
-        if self._save_task is None or self._save_task.done():
-            self._save_task = asyncio.create_task(self._do_save())
+        """T9 委托包装：转发到 StatePersistence.trigger_save。"""
+        return await self._state_persistence().trigger_save()
+
 
     async def _do_save(self) -> None:
-        async with self._save_lock:
-            while self._save_desired:
-                self._save_desired = False
-                await self._save_knowledge_graph()
+        """T9 委托包装：转发到 StatePersistence.do_save。"""
+        return await self._state_persistence().do_save()
+
 
     async def _save_knowledge_graph(self) -> None:
-        """保存知识图谱到 .sysml 文件"""
-        if self._mcp_session is None:
-            return
-        self.persist_dir.mkdir(parents=True, exist_ok=True)
-        kg_file = self.persist_dir / "knowledge_graph.sysml"
-        await self._mcp_session.call_tool(
-            "sysml_save_model", {"file_path": str(kg_file)})
-        logger.info("KG saved to %s", kg_file)
+        """T9 委托包装：转发到 StatePersistence.save_knowledge_graph。"""
+        return await self._state_persistence().save_knowledge_graph()
+
 
     async def _summary(self) -> Dict[str, Any]:
-        if self._mcp_session is None:
-            return {}
-        result = await self._mcp_session.call_tool("sysml_model_summary", {})
-        try:
-            return json.loads(result)
-        except json.JSONDecodeError:
-            return {}
+        """T9 委托包装：转发到 StatePersistence.summary。"""
+        return await self._state_persistence().summary()
+
 
     # ═══════════════════════════════════════════════════════════════
     # 递归级联 KG 构建 (cascading-recursive pipeline)
