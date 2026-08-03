@@ -15,7 +15,27 @@ from .shell_tools import FileIOTool, ShellTool
 from .skill_tools import _build_skill_tools
 from .web_tools import FetchWebpageTool, SearchTool, URLRegSearchTool, WebVisitTool
 
-__all__ = ["tools", "rag_engine"]
+__all__ = [
+    "tools",
+    "rag_engine",
+    "RAGDocListTool",
+    "RAGDocCatalogTool",
+    "RAGKeywordSearchTool",
+    "RAGRegexSearchTool",
+    "RAGVectorSearchTool",
+    "RAGLastSearchPagingTool",
+    "RAGGetPagesTool",
+    "FeedbackTool",
+    "BugTool",
+    "MathComputeTool",
+    "FetchWebpageTool",
+    "ShellTool",
+    "FileIOTool",
+    "SearchTool",
+    "URLRegSearchTool",
+    "WebVisitTool",
+    "_build_skill_tools",
+]
 
 tools = [
     RAGDocListTool(),
