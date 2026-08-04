@@ -20,18 +20,18 @@ async def test_kg_agent_init():
 
     # Initialize
     await agent.initialize()
-    assert agent._entity_tools is not None
-    assert agent._relation_tools is not None
+    assert agent._unified_tools is not None
+    assert agent._unified_tools is not None
     assert agent._merge_tools is not None
-    assert len(agent._entity_tools) >= 5
-    assert len(agent._relation_tools) >= 4
+    assert len(agent._unified_tools) >= 5
+    assert len(agent._unified_tools) >= 4
     assert len(agent._merge_tools) >= 2
-    print(f"  entity tools: {[t.name for t in agent._entity_tools]}")
-    print(f"  relation tools: {[t.name for t in agent._relation_tools]}")
+    print(f"  entity tools: {[t.name for t in agent._unified_tools]}")
+    print(f"  relation tools: {[t.name for t in agent._unified_tools]}")
     print(f"  merge tools: {[t.name for t in agent._merge_tools]}")
 
     # Verify tool names are prefixed with "mcp__"
-    for t in agent._entity_tools:
+    for t in agent._unified_tools:
         assert t.name.startswith("mcp__"), f"Bad prefix: {t.name}"
 
     # Get initial summary
@@ -153,7 +153,7 @@ async def test_entity_tool_schema():
     await agent.initialize()
 
     # Check add_entity tool has expected fields
-    add_tool = next((t for t in agent._entity_tools if "add_entity" in t.name), None)
+    add_tool = next((t for t in agent._unified_tools if "add_entity" in t.name), None)
     if add_tool:
         fields = add_tool.args_schema.model_fields
         assert "entity_type" in fields, f"Missing entity_type in {list(fields.keys())}"
@@ -164,7 +164,7 @@ async def test_entity_tool_schema():
         print(f"  add_entity schema fields: {list(fields.keys())}")
 
     # Check search_entity tool has expected fields
-    search_tool = next((t for t in agent._entity_tools if "search_entity" in t.name), None)
+    search_tool = next((t for t in agent._unified_tools if "search_entity" in t.name), None)
     if search_tool:
         fields = search_tool.args_schema.model_fields
         assert "query" in fields
