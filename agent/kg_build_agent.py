@@ -689,6 +689,31 @@ class CandidateExtractionEngine:
         Both paths use identical MCP arguments and identical create/update
         semantics; both return {"entities", "relations", "entity_map"}.
         """
+        # ── 元架构软过滤（kg-meta T6）：类型不在 meta-schema 允许列表则跳过 ──
+        # 只影响"新建实体"；已存在实体按现有逻辑追加 source_sections。
+        # 无 meta_schema（ok=False / 异常 / schema 缺失）时不过滤，行为与之前一致。
+        meta_types: Optional[set] = None
+        try:
+            meta_raw = await self._agent._mcp_session.call_tool(
+                "sysml_get_meta_schema", {})
+            if isinstance(meta_raw, str):
+                meta = json.loads(meta_raw)
+            else:
+                meta = meta_raw or {}
+            if isinstance(meta, dict) and meta.get("ok"):
+                schema = meta.get("schema") or {}
+                if schema:
+                    meta_types = set()
+                    for et in schema.get("entity_types") or []:
+                        if isinstance(et, dict):
+                            tname = str(et.get("name") or "").strip()
+                        else:
+                            tname = str(et).strip()
+                        if tname:
+                            meta_types.add(tname)
+        except Exception:
+            pass  # 无 meta 时不过滤
+
         async def _serial_impl() -> dict:
             """系统直接调用 MCP 工具: 搜索去重 + 创建/更新实体和关系."""
             created_entities = 0
@@ -736,6 +761,12 @@ class CandidateExtractionEngine:
                                 "sysml_add_alias",
                                 {"qualified_name": existing_qn, "alias": alias},
                             )
+                    continue
+
+                # 元架构软过滤：新建实体类型不在允许列表则跳过（已存在实体不受影响）
+                if meta_types is not None and etype and etype not in meta_types:
+                    logger.debug("Skipping entity '%s' type=%s (not in meta-schema)",
+                                 name, etype)
                     continue
 
                 # 不存在 → 创建（记录所有来源页面）
@@ -935,6 +966,12 @@ class CandidateExtractionEngine:
                                 },
                             })
                         continue
+
+                # 元架构软过滤：新建实体类型不在允许列表则跳过（已存在实体不受影响）
+                if meta_types is not None and etype and etype not in meta_types:
+                    logger.debug("Skipping entity '%s' type=%s (not in meta-schema)",
+                                 name, etype)
+                    continue
 
                 # Entity does NOT exist → create
                 op_idx = len(write_ops)

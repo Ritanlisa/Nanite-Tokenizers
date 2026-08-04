@@ -40,11 +40,12 @@ class MockMCP:
     """In-memory SysML store + call recorder. call_tool records TOP-level
     invocations only; sysml_batch dispatches its operations internally."""
 
-    def __init__(self):
+    def __init__(self, meta_response=None):
         self.calls = []  # list[(tool, arguments)]
         self.qn_by_name = {}
         self.entities = {}
         self.relations = []
+        self.meta_response = meta_response if meta_response is not None else {"ok": False}
 
     def _seed_entity(self, name, qn, aliases=()):
         self.qn_by_name[name] = qn
@@ -75,6 +76,8 @@ class MockMCP:
                 raw = await self._dispatch(op["tool"], op.get("arguments", {}))
                 results.append({"index": idx, "ok": True, "result": json.loads(raw)})
             return json.dumps({"results": results})
+        if tool == "sysml_get_meta_schema":
+            return json.dumps(self.meta_response)
         if tool == "sysml_search_entity":
             return json.dumps(self._match(arguments.get("query", "")))
         if tool == "sysml_add_entity":
@@ -183,7 +186,8 @@ def test_batch_is_default_path(no_expensive_rag):
         res = await _build_agent(mcp)._process_candidates(*_input(), "doc", 3, "Section A")
         assert res["entities"] == 4 and res["relations"] == 2, res
         tools = {t for t, _ in mcp.calls}
-        assert tools == {"sysml_batch"}, tools  # no solo tools on default path
+        # meta-schema probe + single sysml_batch; no solo tools on default path
+        assert tools == {"sysml_batch", "sysml_get_meta_schema"}, tools
     asyncio.run(run())
 
 
