@@ -10,11 +10,12 @@
 - 详细日志追加到单一日志文件
 
 Usage:
-  python3 scripts/build_kg_recursive.py
+  python3 scripts/build_kg_recursive.py [--granularity <描述>]
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
@@ -222,7 +223,7 @@ config.settings = config.settings.update(
 # Main
 # ═══════════════════════════════════════════════════════════════
 
-async def main():
+async def main(granularity_description: str | None = None):
     logger.info("=" * 70)
     logger.info("RECURSIVE KG BUILD: 湖超-硬件维护手册 → %s", DB_NAME)
     logger.info("  Root model: %s (Phase 0/1)", ROOT_MODEL)
@@ -287,7 +288,8 @@ async def main():
     # Build
     try:
         logger.info("\nStarting recursive KG build...")
-        stats = await agent.build_kg_recursive(doc)
+        stats = await agent.build_kg_recursive(
+            doc, granularity_description=granularity_description)
         elapsed = time.time() - t0
 
         logger.info("=" * 70)
@@ -333,4 +335,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    parser = argparse.ArgumentParser(
+        description="Recursive KG build with optional granularity meta-architecture")
+    parser.add_argument("--granularity", type=str, default=None,
+                        help="自然语言粒度描述 (如 '只提取顶层架构'); 缺省时不启用元架构阶段")
+    args = parser.parse_args()
+    sys.exit(asyncio.run(main(granularity_description=args.granularity)))
