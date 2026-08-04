@@ -533,11 +533,12 @@ class CandidateExtractionEngine:
 ---END---
 
 请输出JSON数组。无系统架构内容则输出 []"""
+            system_prompt = await self._agent._build_extraction_prompt()
             try:
                 t_call = time.time()
                 response = await asyncio.wait_for(
                     self._agent.light_llm.ainvoke([
-                        SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
+                        SystemMessage(content=system_prompt),
                         HumanMessage(content=prompt),
                     ]),
                     timeout=180,
@@ -551,7 +552,7 @@ class CandidateExtractionEngine:
                 try:
                     response = await asyncio.wait_for(
                         self._agent.light_llm.ainvoke([
-                            SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
+                            SystemMessage(content=system_prompt),
                             HumanMessage(content=prompt),
                         ]),
                         timeout=180,
@@ -1980,6 +1981,119 @@ class KGBuildAgent:
         """T9 委托包装：转发到 CandidateExtractionEngine.extract_page_candidates。"""
         return await self._candidate_engine().extract_page_candidates(text, title, page)
 
+    async def _build_extraction_prompt(self) -> str:
+        """根据元架构动态生成提取 Prompt；无元架构或异常时回退静态 Prompt。
+
+        读取 ``sysml_get_meta_schema`` 的 schema 字段，将实体类型层级 / 关系模式 /
+        约束 / 根节点 / 粒度描述动态拼接进提取 Prompt；输出格式段与静态
+        EXTRACTION_CANDIDATES_PROMPT 保持一致。无 schema、调用失败或异常时
+        逐字符回退静态 Prompt。
+        """
+        try:
+            meta_raw = await self._mcp_session.call_tool("sysml_get_meta_schema", {})
+            if isinstance(meta_raw, str):
+                meta = json.loads(meta_raw)
+            else:
+                meta = meta_raw or {}
+            if not isinstance(meta, dict) or not meta.get("ok"):
+                return EXTRACTION_CANDIDATES_PROMPT
+            schema = meta.get("schema") or {}
+            if not schema:
+                return EXTRACTION_CANDIDATES_PROMPT
+
+            desc = str(schema.get("granularity_description") or "")
+
+            type_lines = []
+            for t in schema.get("entity_types") or []:
+                if isinstance(t, dict):
+                    name = str(t.get("name") or "")
+                    if not name:
+                        continue
+                    bits = [name]
+                    parent = t.get("parent")
+                    if parent:
+                        bits.append("父类型: %s" % parent)
+                    td = t.get("description")
+                    if td:
+                        bits.append(str(td))
+                    type_lines.append("- " + "，".join(bits))
+                else:
+                    s = str(t).strip()
+                    if s:
+                        type_lines.append("- " + s)
+
+            rel_lines = []
+            for r in schema.get("relation_patterns") or []:
+                if isinstance(r, dict):
+                    st = str(r.get("source_type") or "")
+                    rt = str(r.get("relation_type") or "")
+                    tt = str(r.get("target_type") or "")
+                    rd = r.get("desc")
+                    core = " → ".join(x for x in (st, rt, tt) if x)
+                    if not core:
+                        continue
+                    line = "- " + core
+                    if rd:
+                        line += ": " + str(rd)
+                    rel_lines.append(line)
+                else:
+                    s = str(r).strip()
+                    if s:
+                        rel_lines.append("- " + s)
+
+            constraint_lines = []
+            for c in schema.get("constraints") or []:
+                s = str(c).strip()
+                if s:
+                    constraint_lines.append("- " + s)
+
+            root_lines = []
+            for r in schema.get("root_nodes") or []:
+                if isinstance(r, dict):
+                    name = str(r.get("name") or "").strip()
+                    rtype = str(r.get("type") or "")
+                    rd = r.get("description")
+                    core = name + (" (%s)" % rtype if rtype else "")
+                    if not core and not rd:
+                        continue
+                    line = "- " + (core or name)
+                    if rd:
+                        line += ": " + str(rd)
+                    root_lines.append(line)
+                else:
+                    s = str(r).strip()
+                    if s:
+                        root_lines.append("- " + s)
+
+            parts = [
+                "你是一个技术文档实体提取器。当前粒度要求："
+                + (desc or "（未指定）"),
+                "",
+                "## 允许的实体类型",
+            ]
+            parts.extend(type_lines or ["- （未指定，沿用默认类型）"])
+            parts.extend(["", "## 允许的关系模式"])
+            parts.extend(rel_lines or ["- （未指定，沿用默认关系）"])
+            parts.extend(["", "## 约束"])
+            parts.extend(constraint_lines or ["- （无）"])
+            parts.extend(["", "## 根节点"])
+            parts.extend(root_lines or ["- （无）"])
+            parts.extend([
+                "",
+                "## 输出格式",
+                "输出一个JSON数组，每个元素是一个实体或关系：",
+                "",
+                '实体格式: {"type":"PartDef","name":"实体名","description":"简短描述","aliases":["别名"]}',
+                '关系格式: {"relation":true,"type":"Connection","source":"源实体","target":"目标实体","description":"关系描述"}',
+                "",
+                "输入文本无任何系统架构内容时输出: []",
+            ])
+            return "\n".join(parts)
+        except Exception as e:
+            logger.warning("Failed to build meta prompt, falling back to static: %s", e)
+            return EXTRACTION_CANDIDATES_PROMPT
+
+
     @staticmethod
     def _parse_candidates(raw: str) -> tuple:
         """T9 委托包装：转发到 CandidateExtractionEngine 静态方法。"""
@@ -2825,11 +2939,13 @@ class KGBuildAgent:
 
 请输出JSON数组。无系统架构内容则输出 []"""
 
+        system_prompt = await self._build_extraction_prompt()
+
         try:
             t_call = time.time()
             response = await asyncio.wait_for(
                 self.light_llm.ainvoke([
-                    SystemMessage(content=EXTRACTION_CANDIDATES_PROMPT),
+                    SystemMessage(content=system_prompt),
                     HumanMessage(content=prompt),
                 ]),
                 timeout=180,
