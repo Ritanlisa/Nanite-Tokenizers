@@ -877,6 +877,22 @@ def sysml_model_summary() -> Dict[str, Any]:
     }
 
 
+def sysml_set_meta_schema(schema_json: dict) -> dict:
+    """设置当前元架构 Schema（KG 元架构引导用）"""
+    if not isinstance(schema_json, dict):
+        return {"ok": False, "error": "schema_json must be a dict"}
+    _get_manager()._meta_schema = schema_json
+    return {"ok": True, "schema": schema_json}
+
+
+def sysml_get_meta_schema() -> dict:
+    """查询当前元架构 Schema"""
+    schema = _get_manager()._meta_schema
+    if schema is None:
+        return {"ok": False, "error": "no meta schema set"}
+    return {"ok": True, "schema": schema}
+
+
 def sysml_connected_components() -> Dict[str, Any]:
     """
     计算知识图谱的连通分量（子图），返回各分量包含的实体名称列表。
@@ -2500,6 +2516,18 @@ TOOL_DEFINITIONS = {
             },
         },
     },
+    "sysml_set_meta_schema": {
+        "function": sysml_set_meta_schema,
+        "description": "设置当前元架构 Schema（KG 元架构引导用）",
+        "parameters": {
+            "schema_json": {"type": "object", "description": "元架构 Schema 字典"},
+        },
+    },
+    "sysml_get_meta_schema": {
+        "function": sysml_get_meta_schema,
+        "description": "查询当前元架构 Schema",
+        "parameters": {},
+    }
 }
 
 

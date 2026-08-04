@@ -242,6 +242,7 @@ class SysMLManager:
         self.root_elements: List[SysMLElement] = []
         self.current_model_file: Optional[Path] = None
         self._entity_metadata: Dict[str, Dict[str, Any]] = {}
+        self._meta_schema: Optional[dict] = None
         self._alias_registry = AliasRegistry()
 
     def _meta_path(self, file_path: Path) -> Path:
