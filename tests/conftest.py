@@ -73,3 +73,21 @@ def mock_rag_engine(monkeypatch):
 
     monkeypatch.setattr(engine_module, "RAGEngine", StubRAGEngine)
     return StubRAGEngine
+
+
+@pytest.fixture(autouse=True)
+def reset_sysml_global_state():
+    """Reset sysml_rag_mcp_server module globals before every test.
+
+    _global_manager / _HV_RESOLVER / _loaded_files are process-global
+    singletons shared across ALL test files (including integration-tagged
+    test_mcp_server.py / test_kg_api.py). Without a reset between tests,
+    data added by one test leaks into the next (e.g. test_k_layer_traversal
+    sees extra entities and fails `assert 5 == 4`).
+    """
+    import scripts.sysml_rag_mcp_server as _mcp
+
+    _mcp._global_manager = None
+    _mcp._HV_RESOLVER = None
+    _mcp._loaded_files.clear()
+    yield

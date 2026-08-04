@@ -17,9 +17,13 @@ import scripts.sysml_rag_mcp_server as mcp
 
 def reset_global_state():
     """Reset the global manager for a clean test"""
-    global _global_manager
-    _global_manager = None
-    _loaded_files.clear()
+    # Must reset globals in the mcp module itself; a bare `global _global_manager`
+    # here would only create a new name in THIS module's namespace, leaving the
+    # mcp module's cached singleton (and _HV_RESOLVER) untouched.
+    import scripts.sysml_rag_mcp_server as _mcp
+    _mcp._global_manager = None
+    _mcp._HV_RESOLVER = None
+    _mcp._loaded_files.clear()
 
 
 def test_definition_lookup():
