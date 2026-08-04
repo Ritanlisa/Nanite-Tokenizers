@@ -6,6 +6,7 @@ import logging
 import random
 import re
 import time
+from html import unescape
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -37,7 +38,6 @@ from exceptions import MCPFatalError
 from mcp_client.client import get_mcp_client
 from tool_usage import (
     end_current_tool_call,
-    get_current_scope_key,
     get_current_session_id,
     get_tool_usage,
     start_current_tool_call,
