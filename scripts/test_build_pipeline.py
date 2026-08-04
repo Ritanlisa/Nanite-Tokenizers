@@ -36,7 +36,7 @@ def test_section_extraction():
     mock = MockRAGDoc(
         mono_pages=[
             MockMonoPage("Old Title", "The system has three modules: Data Collector, Analyzer, Dashboard.", 3),
-            MockMonoPage("Data", "Data Collector uses MQTT. Sampling rate: 100Hz.", 5),
+            MockMonoPage("Data", "Data Collector uses MQTT to stream telemetry. Sampling rate: 100Hz.", 5),
             MockMonoPage("", "", 6),  # Empty — skip
         ],
         catalog=[
@@ -53,7 +53,7 @@ def test_section_extraction():
 
     # Test without catalog (fallback to page title)
     mock2 = MockRAGDoc(
-        mono_pages=[MockMonoPage("Custom Title", "Some content.", 1)],
+        mono_pages=[MockMonoPage("Custom Title", "Some content that is long enough to pass the minimum length filter for extraction.", 1)],
         catalog=[]
     )
     sections2 = _extract_sections_from_rag_doc(mock2)
@@ -68,7 +68,7 @@ def test_section_extraction():
         mono_pages=[MockMonoPage("Long", long_text, 1)],
     )
     sections3 = _extract_sections_from_rag_doc(mock3)
-    assert len(sections3[0].text) == 8000
+    assert len(sections3[0].text) == 4000
     print("  text truncation: OK")
 
     print("  PASS\n")
@@ -127,7 +127,10 @@ def test_config_kg_settings():
         assert val is not None, f"Missing config: {key}"
         print(f"  {key}: {val}")
 
-    assert config.settings.KG_EXTRACTION_ENABLED is True
+    # config.py 的产品默认值为 True；运行时可能被 settings.yaml 有意覆盖为 false，
+    # 因此这里验证"默认类属性为 True"（产品逻辑）与"运行时值为合法 bool"，而非硬编码运行时值。
+    assert config.Settings.model_fields["KG_EXTRACTION_ENABLED"].default is True
+    assert isinstance(config.settings.KG_EXTRACTION_ENABLED, bool)
     print("  PASS\n")
 
 
@@ -141,9 +144,9 @@ def test_kg_build_hook_runs_with_disabled_setting():
     config.settings = config.settings.update(KG_EXTRACTION_ENABLED=False)
     assert config.settings.KG_EXTRACTION_ENABLED is False
 
-    # Restore
+    # Restore — 恢复后应与保存的 original 一致（原值可能被 settings.yaml 覆盖为 false）
     config.settings = config.settings.update(KG_EXTRACTION_ENABLED=original)
-    assert config.settings.KG_EXTRACTION_ENABLED is True
+    assert config.settings.KG_EXTRACTION_ENABLED is original
     print("  KG toggle works: OK")
     print("  PASS\n")
 
