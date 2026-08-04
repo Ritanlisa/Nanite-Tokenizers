@@ -19,7 +19,6 @@ import asyncio
 import json
 import logging
 import re
-from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -436,12 +435,18 @@ class GranularityAgent:
                 for key in ("entity_types", "root_nodes", "relation_patterns"):
                     if not isinstance(result.get(key), list):
                         raise ValueError(f"field {key!r} missing or not a list")
+                # F2-F2: constraints 非 list（如 LLM 输出裸字符串）时逐字符拆分产生
+                # 垃圾约束；非 list 视为无效并置空，不崩溃。
+                raw_constraints = result.get("constraints")
+                constraints = (
+                    list(raw_constraints) if isinstance(raw_constraints, list) else []
+                )
                 return MetaArchitecture(
                     entity_types=[dict(t) for t in result["entity_types"] if isinstance(t, dict)],
                     root_nodes=[dict(r) for r in result["root_nodes"] if isinstance(r, dict)],
                     relation_patterns=[dict(r) for r in result["relation_patterns"]
                                        if isinstance(r, dict)],
-                    constraints=[str(c) for c in (result.get("constraints") or [])],
+                    constraints=constraints,
                     granularity_description=granularity_description,
                 )
             except Exception as e:  # noqa: BLE001 — LLM 输出不可信，全部按解析失败重试

@@ -711,6 +711,10 @@ class CandidateExtractionEngine:
                             tname = str(et).strip()
                         if tname:
                             meta_types.add(tname)
+                # F2-F1: schema 存在但 entity_types 为空 → 空集过滤条件恒真会屏蔽
+                # 所有新建实体。空集视为"无 meta"，恢复不过滤行为。
+                if not meta_types:
+                    meta_types = None
         except Exception:
             pass  # 无 meta 时不过滤
 
@@ -1577,6 +1581,8 @@ class StatePersistence:
             data["documents"] = docs
             data["version"] = 1
             tmp = bsf.with_suffix(".tmp")
+            # F4-观察1: 粗粒度等新 db 目录可能不存在，先确保父目录（通用修复）
+            tmp.parent.mkdir(parents=True, exist_ok=True)
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             tmp.replace(bsf)
@@ -2405,6 +2411,14 @@ class KGBuildAgent:
             meta_schema = build.get("meta_schema") if build else None
             if meta_schema and meta_schema.get("version") == 1:
                 logger.info("Meta-phase already done (resume): %s", doc_name)
+                # F2-F3: 跨进程 resume 时新进程 MCP manager 的 _meta_schema 为 None，
+                # 软过滤/动态 prompt 会静默回退。把已存 schema 写回 MCP（失败仅降级）。
+                try:
+                    await self._mcp_session.call_tool("sysml_set_meta_schema", {
+                        "schema_json": meta_schema})
+                except Exception as e:
+                    logger.warning(
+                        "Meta-phase resume: failed to restore meta_schema to MCP: %s", e)
             elif granularity_description:
                 try:
                     from agent.kg_granularity import GranularityAgent
@@ -3114,6 +3128,8 @@ class KGBuildAgent:
             data["documents"] = docs
             data["version"] = 2
             tmp = bsf.with_suffix(".tmp")
+            # F4-观察1: 粗粒度等新 db 目录可能不存在，先确保父目录（通用修复）
+            tmp.parent.mkdir(parents=True, exist_ok=True)
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             tmp.replace(bsf)

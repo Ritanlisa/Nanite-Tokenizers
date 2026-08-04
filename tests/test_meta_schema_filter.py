@@ -218,3 +218,13 @@ def test_dict_entity_types_hierarchy_expansion(no_expensive_rag, batch):
     mcp, res = asyncio.run(_run(meta, batch=batch))
     assert res["entities"] == 3, res
     assert _created_names(mcp) == {"Valve", "Pressure", "NoType"}
+
+
+@pytest.mark.parametrize("batch", [True, False])
+def test_empty_entity_types_no_filtering(no_expensive_rag, batch):
+    """schema 存在但 entity_types=[] → 空集不再屏蔽所有新建实体（F2-F1）：
+    空 entity_types 视为无 meta，全部候选正常创建。"""
+    meta = {"ok": True, "schema": {"entity_types": [], "relation_patterns": []}}
+    mcp, res = asyncio.run(_run(meta, batch=batch))
+    assert res["entities"] == 3, res
+    assert _created_names(mcp) == {"Valve", "Pressure", "NoType"}

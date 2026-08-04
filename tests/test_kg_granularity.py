@@ -415,7 +415,6 @@ def test_fallback_sample_prefers_dense_chapters(no_expensive_rag):
 
 def test_step2_fallback_empty_still_degrades(no_expensive_rag):
     """整棵树无有效节点 → 回退返回空 → 仍抛 ValueError（降级兜底保留）。"""
-    from agent.kg_granularity import GranularityAgent
 
     ga, light_mock, llm_mock = _make_agent(json.dumps({"sample_node_ids": []}))
     empty_nodes = {
@@ -432,3 +431,42 @@ def test_step2_fallback_empty_still_degrades(no_expensive_rag):
 
     assert light_mock.ainvoke.await_count == 2
     llm_mock.ainvoke.assert_not_awaited()  # 采样失败后不进入 Step 3
+
+
+# ── F2-F2: Step3 constraints 非 list 防御 ─────────────────────
+
+_META_RESPONSE_CONSTRAINTS_STR = json.dumps({
+    "entity_types": [
+        {"name": "PartDef", "parent": None, "level": 1, "description": "部件/模块"},
+    ],
+    "root_nodes": [
+        {"name": "系统概览", "type": "PartDef", "description": "顶层系统组成"},
+    ],
+    "relation_patterns": [
+        {"source_type": "PartDef", "target_type": "PartDef",
+         "relation_type": "allocation", "desc": "组成关系"},
+    ],
+    "constraints": "忽略温度参数",  # LLM 输出裸字符串（非 list）
+}, ensure_ascii=False)
+
+
+def test_step3_constraints_string_returns_empty(no_expensive_rag):
+    """constraints 非 list（LLM 输出裸字符串）→ 不再逐字符拆分（F2-F2）：
+    返回空 constraints、不崩溃，其余字段正常解析。"""
+    from agent.kg_granularity import MetaArchitecture
+
+    ga, light_mock, llm_mock = _make_agent(
+        _SAMPLE_RESPONSE, _META_RESPONSE_CONSTRAINTS_STR)
+
+    meta = asyncio.run(ga.determine_meta_architecture(
+        granularity_description="详细到端口和命令级别",
+        tree_state=_fake_tree_state(), sections=_SECTIONS,
+    ))
+
+    assert isinstance(meta, MetaArchitecture)
+    assert meta.constraints == []  # 非 list 视为无效，置空
+    assert meta.entity_types[0]["name"] == "PartDef"
+    assert meta.root_nodes[0]["name"] == "系统概览"
+    assert meta.relation_patterns[0]["relation_type"] == "allocation"
+    light_mock.ainvoke.assert_awaited_once()
+    llm_mock.ainvoke.assert_awaited_once()

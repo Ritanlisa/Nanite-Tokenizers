@@ -186,7 +186,10 @@ def test_meta_phase_runs_and_saves(no_expensive_rag):
 
 def test_meta_phase_resume_skips(no_expensive_rag):
     """build dict already has meta_schema version=1 → meta-phase skipped
-    (GranularityAgent never instantiated, no schema write, no meta save)."""
+    (GranularityAgent never instantiated, no meta save), and the stored
+    meta_schema is restored into the MCP session (F2-F3: 跨进程 resume 时
+    新进程 MCP manager 的 _meta_schema 为 None，软过滤/动态 prompt 会静默
+    回退——已存 schema 必须写回)."""
     agent = _make_agent(build_state={
         "meta_schema": {"version": 1, "entity_types": [{"name": "PartDef"}]},
     })
@@ -197,8 +200,12 @@ def test_meta_phase_resume_skips(no_expensive_rag):
             stats = asyncio.run(agent.build_kg_recursive(
                 _rag_doc(), granularity_description="详细到端口和命令级别"))
 
-    ga_cls.assert_not_called()
-    assert _meta_schema_calls(agent._mcp_session) == []
+    ga_cls.assert_not_called()  # 不重新生成
+    # F2-F3: 已存 schema 原样写回 MCP（含 version 与 entity_types）
+    schema_calls = _meta_schema_calls(agent._mcp_session)
+    assert len(schema_calls) == 1
+    assert schema_calls[0].args[1]["schema_json"] == {
+        "version": 1, "entity_types": [{"name": "PartDef"}]}
     assert _meta_state_calls(agent._save_recursive_state) == []
     assert isinstance(stats, dict)
 
