@@ -95,3 +95,14 @@ edgedriver_linux64/
 # Local agent skill snapshots
 # =========================
 .agents/skills/find-skills/
+
+# =========================
+# T13 hygiene: venv variants / backups / stray artifacts
+# =========================
+.venvlinux/
+.venvwin/
+*.bak
+sessions/
+log.txt
+Intel*.pdf
+laptop_manual.docx
