@@ -91,14 +91,19 @@ class GranularityAgent:
       Step 1 — TOC 分析：程序化摘要 ``tree_state.get_tree_structure()`` 的
                章节层次 / 密度（每章子树节点数 / 叶子页数）。
       Step 2 — 小节采样：light_llm 从 TOC 摘要挑选 3-5 个采样 node_id，
-               从内存 sections（或 tree_state.nodes）读取文本。
+               从内存 sections（或 tree_state.nodes）读取文本；LLM 两次
+               尝试均失败/有效节点不足时程序化回退（_fallback_sample：
+               按内容密度选代表章节），保证采样环节不因 LLM 输出不稳定
+               而整体失败。
       Step 3 — 元架构生成：llm 综合粒度描述 + TOC 摘要 + 采样文本 →
                MetaArchitecture JSON（严格 JSON 解析，参照
                KGBuildAgent._parse_json_response 模式）。
 
     模型选择与现有管线一致：Step 2 用 ``agent.light_llm``（快速小模型），
-    Step 3 用 ``agent.llm``。LLM 解析失败重试 1 次，仍失败则抛异常
-    （由 T4 的调用方捕获并降级为无 meta 构建，保持向后兼容）。
+    Step 3 用 ``agent.llm``。Step 2 解析失败重试 1 次，仍失败则程序化
+    回退采样（无 LLM）；Step 3 解析失败重试 1 次，仍失败则抛异常。
+    异常（含回退也找不到任何有效节点）由 T4 的调用方捕获并降级为无
+    meta 构建，保持向后兼容。
     """
 
     STEP2_SYSTEM_PROMPT = "你是技术文档分析专家。仅输出 JSON，无其他内容。"
@@ -207,7 +212,99 @@ class GranularityAgent:
     def _section_has_text(cls, nid: str, tree_state: Any, sections: Any) -> bool:
         return any(getattr(nd, "text", "") for nd in cls._section_nodes(nid, tree_state, sections))
 
-    # ── Step 2: 小节采样（light_llm）──
+    # ── Step 2: 小节采样（light_llm + 程序化回退）──
+
+    @staticmethod
+    def _first_leaf_id(node: Dict[str, Any]) -> Optional[str]:
+        """深度优先取子树首个叶子节点（无 children）的 node_id；无则 None。"""
+        children = node.get("children") or []
+        if not children:
+            return node.get("node_id")
+        for child in children:
+            leaf = GranularityAgent._first_leaf_id(child)
+            if leaf is not None:
+                return leaf
+        return None
+
+    @staticmethod
+    def _toc_node_by_id(
+        node: Dict[str, Any], nid: str
+    ) -> Optional[Dict[str, Any]]:
+        """在 TOC 结构树中按 node_id 查找节点（含后代）；未找到返回 None。"""
+        if node.get("node_id") == nid:
+            return node
+        for child in node.get("children") or []:
+            found = GranularityAgent._toc_node_by_id(child, nid)
+            if found is not None:
+                return found
+        return None
+
+    def _fallback_sample(
+        self,
+        tree_state: Any,
+        sections: Optional[Dict[str, List[Any]]] = None,
+        n: int = 3,
+    ) -> List[str]:
+        """程序化回退采样：LLM 采样失败时基于 TOC 结构选代表性节点（无 LLM）。
+
+        策略（确定性）：
+          1. 重新生成 TOC 摘要（_summarize_toc 为纯函数，结果与 Step 1 一致），
+             目录条目按叶子页数（leaf_pages，内容密度）降序排序；
+          2. 逐条目取其子树首个叶子 node_id（跨章节去重），取前 n 个不同章节；
+          3. TOC 结构不可用/无章节时，直接取 tree_state.nodes 前 n 个节点；
+          4. 有效性过滤（_section_has_text）；有效节点不足 2 个时从
+             tree_state.nodes 全量补充。
+
+        返回至少 2 个有效 node_id；仅当整棵树都没有有效节点时才返回空列表
+        （此时才允许调用方降级为无 meta 构建）。
+        """
+        candidates: List[str] = []
+        roots: List[Dict[str, Any]] = []
+        try:
+            tree = tree_state.get_tree_structure()
+            roots = tree.get("structure") or []
+            entries: List[Dict[str, Any]] = []
+            for node in roots:
+                self._collect_toc_entries(node, entries, self.TOC_MAX_ENTRIES)
+            entries.sort(
+                key=lambda e: (e.get("leaf_pages", 0), e.get("subtree_nodes", 0)),
+                reverse=True,
+            )
+            for entry in entries:
+                if len(candidates) >= n:
+                    break
+                nid = entry.get("node_id")
+                if not nid:
+                    continue
+                raw: Optional[Dict[str, Any]] = None
+                for root in roots:
+                    raw = self._toc_node_by_id(root, nid)
+                    if raw is not None:
+                        break
+                leaf_id = self._first_leaf_id(raw) if raw is not None else None
+                if leaf_id and leaf_id not in candidates:
+                    candidates.append(leaf_id)
+        except Exception as e:  # noqa: BLE001 — 回退路径自身不因结构异常而失败
+            logger.warning("GranularityAgent[%s] fallback TOC scan failed: %s",
+                           self.doc_name, e)
+        if not candidates:
+            for nid in (getattr(tree_state, "nodes", None) or {}):
+                if len(candidates) >= n:
+                    break
+                candidates.append(str(nid))
+
+        valid = [i for i in candidates if self._section_has_text(i, tree_state, sections)]
+        if len(valid) < 2:
+            # 候选不足 2 个 → 从 tree_state.nodes 全量补充（除非整棵树不足）
+            for nid in (getattr(tree_state, "nodes", None) or {}):
+                if len(valid) >= 2:
+                    break
+                nid_s = str(nid)
+                if nid_s not in candidates and self._section_has_text(
+                    nid_s, tree_state, sections
+                ):
+                    valid.append(nid_s)
+        return valid
 
     async def _sample_sections(
         self,
@@ -218,7 +315,9 @@ class GranularityAgent:
     ) -> List[str]:
         """light_llm 决定采样 3-5 个 node_id；过滤无效 id 后返回有效列表。
 
-        解析失败 / 有效采样不足时重试 1 次，仍失败抛 ValueError。
+        解析失败 / 有效采样不足时重试 1 次，仍失败则程序化回退采样
+        （_fallback_sample，基于 TOC 内容密度选代表章节）；仅当回退也
+        找不到任何有效节点时才抛 ValueError（由 T4 调用方降级）。
         """
         from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -263,7 +362,18 @@ class GranularityAgent:
                 last_err = e
                 logger.warning("GranularityAgent[%s] Step2 attempt %d failed: %s",
                                self.doc_name, attempt + 1, e)
-        raise ValueError(f"section sampling failed after {self.MAX_ATTEMPTS} attempts: {last_err}")
+        # LLM 两次尝试均失败/有效节点不足 → 程序化回退采样（T8 修复）：
+        # 保证采样环节不因 LLM 输出不稳定而整体失败（T8 实证：粗粒度描述
+        # 下 LLM 常只输出顶层章节，经有效性过滤后不足 2 个）。
+        fallback_ids = self._fallback_sample(tree_state, sections, n=3)
+        if fallback_ids:
+            logger.info("Fallback sampling used (LLM sampling failed): %d nodes",
+                        len(fallback_ids))
+            return fallback_ids
+        raise ValueError(
+            f"section sampling failed after {self.MAX_ATTEMPTS} attempts: {last_err}"
+            " (fallback found no valid nodes in the whole tree)"
+        )
 
     # ── Step 3: 元架构生成（llm）──
 
@@ -362,7 +472,8 @@ class GranularityAgent:
             MetaArchitecture（granularity_description 已回填原始输入）。
 
         Raises:
-            ValueError: Step 2 采样 LLM 两次尝试均失败或有效采样不足。
+            ValueError: Step 2 采样 LLM 两次尝试均失败/有效采样不足，且
+                程序化回退（_fallback_sample）也找不到任何有效节点。
             RuntimeError: Step 3 生成 LLM 两次尝试均失败或字段缺失。
             由 T4 的调用方捕获并降级为无 meta 构建。
         """

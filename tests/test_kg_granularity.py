@@ -310,3 +310,125 @@ def test_analyze_relation_network_undirected_dedup(no_expensive_rag):
     ]
     assert report["num_components"] == 1
     assert report["max_depth"] == 1
+
+
+# ── T8: 程序化回退采样（LLM 采样失败时不降级）──
+
+
+def _make_agent(light_response: str, meta_response: str = _META_RESPONSE):
+    """构造 GranularityAgent（mock light_llm/llm），返回 (ga, light_mock, llm_mock)。"""
+    from agent.kg_build_agent import KGBuildAgent
+    from agent.kg_granularity import GranularityAgent
+
+    light_mock = MagicMock()
+    light_mock.ainvoke = AsyncMock(return_value=_FakeLLMResponse(light_response))
+    llm_mock = MagicMock()
+    llm_mock.ainvoke = AsyncMock(return_value=_FakeLLMResponse(meta_response))
+
+    agent = object.__new__(KGBuildAgent)
+    agent._light_llm = light_mock
+    agent._llm = llm_mock
+    return GranularityAgent(agent, doc_name="测试文档"), light_mock, llm_mock
+
+
+def _fake_tree_state():
+    return _FakeTreeState(_TOC, {nid: nodes for nid, nodes in _SECTIONS.items()})
+
+
+def test_step2_empty_llm_response_falls_back(no_expensive_rag, caplog):
+    """LLM 两次返回空 sample_node_ids → 程序化回退：≥2 节点、不抛异常。"""
+    import logging
+
+    from agent.kg_granularity import MetaArchitecture
+
+    ga, light_mock, llm_mock = _make_agent(json.dumps({"sample_node_ids": []}))
+    caplog.set_level(logging.INFO, logger="agent.kg_granularity")
+
+    meta = asyncio.run(ga.determine_meta_architecture(
+        granularity_description="只提取顶层架构",
+        tree_state=_fake_tree_state(), sections=_SECTIONS,
+    ))
+
+    assert isinstance(meta, MetaArchitecture)
+    # LLM 先试 2 次，再回退程序化
+    assert light_mock.ainvoke.await_count == 2
+    assert "Fallback sampling used (LLM sampling failed)" in caplog.text
+    # 回退采样文本真正喂给了 Step 3（证明回退产生 ≥2 个有效节点且流程继续）
+    step3_human = llm_mock.ainvoke.await_args.args[0][1]
+    assert "总体架构：系统由电源模块与主控模块组成" in step3_human.content
+    assert "接口定义：串口与以太网接口" in step3_human.content
+
+
+def test_step2_invalid_llm_ids_fall_back(no_expensive_rag, caplog):
+    """LLM 返回的 node_id 均不在 sections → 同样程序化回退，不抛异常。"""
+    import logging
+
+    from agent.kg_granularity import MetaArchitecture
+
+    ga, light_mock, _ = _make_agent(
+        json.dumps({"sample_node_ids": ["x1", "x2", "x3"]})
+    )
+    caplog.set_level(logging.INFO, logger="agent.kg_granularity")
+
+    meta = asyncio.run(ga.determine_meta_architecture(
+        granularity_description="只提取顶层架构",
+        tree_state=_fake_tree_state(), sections=_SECTIONS,
+    ))
+
+    assert isinstance(meta, MetaArchitecture)
+    assert light_mock.ainvoke.await_count == 2
+    assert "Fallback sampling used (LLM sampling failed)" in caplog.text
+
+
+def test_step2_valid_response_keeps_llm_path(no_expensive_rag, caplog):
+    """LLM 返回 5 个有效节点 → 原逻辑不变（一次成功，不触发回退）。"""
+    import logging
+
+    from agent.kg_granularity import MetaArchitecture
+
+    sections5 = dict(_SECTIONS)
+    sections5["n1"] = [_fake_node("系统概览：整机由电源、主控与接口组成。", "系统概览", 0)]
+    ga, light_mock, _ = _make_agent(
+        json.dumps({"sample_node_ids": ["n1", "n2", "n3", "n5", "n8"]})
+    )
+    caplog.set_level(logging.INFO, logger="agent.kg_granularity")
+
+    meta = asyncio.run(ga.determine_meta_architecture(
+        granularity_description="详细到端口和命令级别",
+        tree_state=_FakeTreeState(_TOC, {nid: nodes for nid, nodes in sections5.items()}),
+        sections=sections5,
+    ))
+
+    assert isinstance(meta, MetaArchitecture)
+    light_mock.ainvoke.assert_awaited_once()  # 无重试、无回退
+    assert "Fallback sampling used" not in caplog.text
+
+
+def test_fallback_sample_prefers_dense_chapters(no_expensive_rag):
+    """_fallback_sample：叶子页数多的章节优先，取前 n 个不同章节的叶子。"""
+    from agent.kg_granularity import GranularityAgent
+
+    ga = GranularityAgent(None, doc_name="测试文档")
+    # n1（2 片叶子）密度最高 → 其首个叶子 n2；随后 n3、n5（各 1 片）
+    assert ga._fallback_sample(_fake_tree_state(), _SECTIONS, n=3) == ["n2", "n3", "n5"]
+
+
+def test_step2_fallback_empty_still_degrades(no_expensive_rag):
+    """整棵树无有效节点 → 回退返回空 → 仍抛 ValueError（降级兜底保留）。"""
+    from agent.kg_granularity import GranularityAgent
+
+    ga, light_mock, llm_mock = _make_agent(json.dumps({"sample_node_ids": []}))
+    empty_nodes = {
+        "n1": [_fake_node("", "", 0)],
+        "n2": [_fake_node("", "", 0)],
+    }
+    tree_state = _FakeTreeState(_TOC, empty_nodes)
+
+    with pytest.raises(ValueError, match="section sampling failed"):
+        asyncio.run(ga.determine_meta_architecture(
+            granularity_description="只提取顶层架构",
+            tree_state=tree_state, sections=empty_nodes,
+        ))
+
+    assert light_mock.ainvoke.await_count == 2
+    llm_mock.ainvoke.assert_not_awaited()  # 采样失败后不进入 Step 3
