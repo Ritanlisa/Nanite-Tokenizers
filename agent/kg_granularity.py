@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import re
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -403,3 +404,129 @@ class GranularityAgent:
             len(meta.relation_patterns), len(meta.constraints),
         )
         return meta
+
+
+# ── 关系网络统计（T2：纯函数，无 I/O / 无 LLM / 无第三方依赖）──
+
+
+def analyze_relation_network(relations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """关系网络的元认知统计报告（kg-meta-architecture 计划 T2）。
+
+    输入 relations 的元素与 database/*/knowledge_graph.meta.json 的
+    relations 数组一致：``{"source": str, "target": str, "type": str, "name": str}``。
+    仅使用标准库（collections.deque / defaultdict / Counter），不引入 networkx。
+
+    输出字段（与 MetaArchitecture.relation_network 的 Optional[Dict] 挂载点兼容）：
+      relation_type_distribution: 关系类型 → 数量（{type: count}，键缺失记为 ""）
+      num_relations:             输入关系总数（含自环与重复边）
+      num_entities:              source + target 去重后的节点数
+      hub_nodes:                 按 degree（去重无向边）降序的 top10，元素
+                                 {"name": str, "degree": int}；空图返回 []
+      num_components:            无向图连通分量数（BFS；孤立节点各为 1 个分量）
+      component_sizes:           各分量节点数，降序
+      max_depth:                 所有分量内各起点 BFS 可达最大层数（最长最短
+                                 路径近似）的全局最大；空图返回 0
+      self_loops:                source == target 的关系数（原始计数）
+
+    实现约束：
+      - 自环计入 degree（去重后每个自环节点计 1）与 self_loops（原始计数）；
+        不参与 BFS 邻居传播（避免死循环）
+      - a→b 与 b→a 视为同一条边（frozenset 去重），degree 基于去重后的无向边集
+      - 空列表返回全零结构，不抛异常
+    """
+    from collections import Counter, defaultdict, deque
+
+    type_counter: Counter = Counter()
+    num_relations = 0
+    self_loops = 0
+    entities: set = set()
+    edges: set = set()          # 无向去重边（不含自环），元素 frozenset({u, v}) 且 u != v
+    self_loop_nodes: set = set()  # 出现自环的节点（去重）
+
+    for rel in relations:
+        src = rel.get("source") if isinstance(rel, dict) else None
+        tgt = rel.get("target") if isinstance(rel, dict) else None
+        if src is None or tgt is None:
+            continue  # 防御：跳过畸形关系（正常数据不含）
+        num_relations += 1
+        type_counter[rel.get("type", "")] += 1
+        entities.add(src)
+        entities.add(tgt)
+        if src == tgt:
+            self_loops += 1
+            self_loop_nodes.add(src)
+        else:
+            edges.add(frozenset((src, tgt)))
+
+    # degree：基于去重无向边集（自环去重后每个节点计 1）
+    degree: Dict[str, int] = defaultdict(int)
+    for edge in edges:
+        u, v = tuple(edge)
+        degree[u] += 1
+        degree[v] += 1
+    for node in self_loop_nodes:
+        degree[node] += 1
+
+    # 邻接表（自环不参与传播）；连通分量 BFS
+    adj: Dict[str, set] = defaultdict(set)
+    for edge in edges:
+        u, v = tuple(edge)
+        adj[u].add(v)
+        adj[v].add(u)
+
+    visited: set = set()
+    components: List[List[str]] = []
+    for node in entities:
+        if node in visited:
+            continue
+        queue = deque([node])
+        visited.add(node)
+        comp: List[str] = []
+        while queue:
+            cur = queue.popleft()
+            comp.append(cur)
+            for nb in adj.get(cur, ()):
+                if nb not in visited:
+                    visited.add(nb)
+                    queue.append(nb)
+        components.append(comp)
+
+    # max_depth：每个分量内所有起点的 BFS 最大层数，取全局最大
+    def _bfs_max_depth(start: str, adjacency: Dict[str, set]) -> int:
+        seen = {start}
+        queue = deque([start])
+        depth = {start: 0}
+        farthest = 0
+        while queue:
+            cur = queue.popleft()
+            for nb in adjacency.get(cur, ()):
+                if nb in seen:
+                    continue
+                seen.add(nb)
+                depth[nb] = depth[cur] + 1
+                if depth[nb] > farthest:
+                    farthest = depth[nb]
+                queue.append(nb)
+        return farthest
+
+    max_depth = 0
+    for comp in components:
+        for node in comp:
+            max_depth = max(max_depth, _bfs_max_depth(node, adj))
+
+    component_sizes = sorted((len(c) for c in components), reverse=True)
+    hub_nodes = [
+        {"name": name, "degree": deg}
+        for name, deg in sorted(degree.items(), key=lambda kv: (-kv[1], kv[0]))
+    ][:10]
+
+    return {
+        "relation_type_distribution": dict(type_counter),
+        "num_relations": num_relations,
+        "num_entities": len(entities),
+        "hub_nodes": hub_nodes,
+        "num_components": len(components),
+        "component_sizes": component_sizes,
+        "max_depth": max_depth,
+        "self_loops": self_loops,
+    }
