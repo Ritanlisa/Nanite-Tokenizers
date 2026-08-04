@@ -14,8 +14,9 @@ dependencies = [
   "uvicorn>=0.30.0",
   "pydantic>=2.5.0",
   "pydantic-settings>=2.0.0",
-  "langchain>=0.1.0",
-  "langchain-openai>=0.0.2",
+  "langchain>=1.2",
+  "langchain-core>=1.4",
+  "langchain-openai>=1.2",
   "llama-index>=0.10.0",
   "llama-index-vector-stores-chroma>=0.1.0",
   "llama-index-vector-stores-faiss>=0.1.0",
@@ -81,7 +82,7 @@ allow-insecure-host = ["github.com"]
 
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=1.0.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
