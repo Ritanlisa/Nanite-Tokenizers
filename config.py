@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Optional, Literal
 import os
 
+import _patch_py314  # noqa: F401  (Python 3.14+ PEP 649 compatibility; unified entry for all entry points)
+
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
