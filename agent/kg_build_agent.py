@@ -550,6 +550,7 @@ class CandidateExtractionEngine:
                     ]),
                     timeout=180,
                 )
+                raw = str(response.content) if hasattr(response, "content") else str(response)
                 logger.debug("  Phase1a LLM p%d c%d (%.1fs): prompt=%dch resp=%dch",
                              page, ci+1, time.time()-t_call, len(prompt), len(raw))
                 logger.debug("  Phase1a RESP p%d c%d: %s", page, ci+1, raw[:500])
