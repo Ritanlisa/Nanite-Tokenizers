@@ -2191,9 +2191,12 @@ class KGBuildAgent:
     # 递归级联 KG 构建 (cascading-recursive pipeline)
     # ═══════════════════════════════════════════════════════════════
 
-    async def build_kg_recursive(self, rag_doc) -> Dict[str, Any]:
+    async def build_kg_recursive(self, rag_doc,
+                                 granularity_description: Optional[str] = None,
+                                 ) -> Dict[str, Any]:
         """
         递归级联知识图谱构建管线:
+        Phase 0: 元架构确定（可选，granularity_description 提供时执行）
         Phase 0: gemma4:31b 识别根实体和起点小节
         Phase 1: gemma4:31b 根小节完整提取
         Phase 2: 实体传播 → 全文搜索 → 构建队列
@@ -2243,6 +2246,36 @@ class KGBuildAgent:
             sections = self._build_section_map(tree_state)
             # Build inverted index for Phase 2 propagation (>500 sections only)
             self._fts_index = self._build_inverted_index(sections)
+
+            # ── Phase 0: 元架构确定（可选，granularity_description 提供时执行）──
+            # kg-meta-architecture 计划 T4：断点续跑 + 版本化失效。
+            # 已有 meta_schema 且 version 匹配 → 跳过；version 不匹配 → 重新生成。
+            # 异常仅降级（无 meta 继续构建），不阻断管线。
+            meta_schema = build.get("meta_schema") if build else None
+            if meta_schema and meta_schema.get("version") == 1:
+                logger.info("Meta-phase already done (resume): %s", doc_name)
+            elif granularity_description:
+                try:
+                    from agent.kg_granularity import GranularityAgent
+                    ga = GranularityAgent(self, doc_name)
+                    meta_arch = await ga.determine_meta_architecture(
+                        granularity_description, tree_state, sections)
+                    meta_schema = meta_arch.to_dict()
+                    meta_schema["version"] = 1
+                    await self._mcp_session.call_tool("sysml_set_meta_schema", {
+                        "schema_json": meta_schema})
+                    self._save_recursive_state(doc_name, "recursive_phase0",
+                        meta_schema=meta_schema)
+                    logger.info(
+                        "Meta-phase done: %d entity types, %d relation patterns",
+                        len(meta_schema.get("entity_types", [])),
+                        len(meta_schema.get("relation_patterns", [])))
+                except Exception as e:
+                    logger.warning(
+                        "Meta-phase failed (continuing without meta): %s", e)
+            # relation_network 统计挂载点留给后续任务：meta-phase 阶段 sections 中
+            # 无已提取关系数据，跳过 analyze_relation_network（meta_arch.relation_network
+            # 由 GranularityAgent 或后续调用方填充，失败时自动省略）。
 
             # ── Phase 0: 根实体识别 ──
             root_entity = build.get("root_entity")
@@ -2888,8 +2921,9 @@ class KGBuildAgent:
         current_section_entity_queue: Optional[List[str]] = None,
         stats: Optional[Dict[str, Any]] = None,
         errors: Optional[List[Dict]] = None,
+        meta_schema: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """扩展的断点续跑状态保存（含队列状态）"""
+        """扩展的断点续跑状态保存（含队列状态 + meta_schema）"""
         try:
             bsf = self._build_state_file
             data = {}
@@ -2920,6 +2954,8 @@ class KGBuildAgent:
                 entry.setdefault("stats", {}).update(stats)
             if errors is not None:
                 entry.setdefault("errors", []).extend(errors)
+            if meta_schema is not None:
+                entry["meta_schema"] = meta_schema
 
             docs[doc_name] = entry
             data["documents"] = docs
