@@ -86,7 +86,6 @@ UNIFIED_EXTRACTION_SYSTEM_PROMPT = """你是技术文档知识提取专家。请
 - mcp__sysml_add_relation / mcp__sysml_get_connections / mcp__sysml_list_relations
 - mcp__sysml_model_summary"""
 
-
 # ── Fast Extraction Prompt (qwen3:8b — JSON output, no tool calls) ──
 
 # 原示例 (preserved for reference):
@@ -134,7 +133,6 @@ EXTRACTION_CANDIDATES_PROMPT = """你是一个技术文档实体提取器。阅�
 
 输入文本无任何系统架构内容时输出: []"""
 
-
 # ── Enrichment JSON Prompt (qwen3:8b — JSON enrichment instructions) ──
 
 ENRICHMENT_JSON_PROMPT = """你是SysML v2知识图谱专家。审查已有KG实体列表，以JSON格式输出需要添加的关系和别名。
@@ -178,14 +176,12 @@ UNIFIED_TOOL_NAMES = [
     "sysml_connected_components",
 ]
 
-
 MERGE_TOOL_NAMES = [
     "sysml_suggest_merge",
     "sysml_merge_entities",
     "sysml_list_entities",
     "sysml_search_entity",
 ]
-
 
 # ── Document Tree State ──────────────────────────────────────
 
@@ -201,7 +197,6 @@ class DocTreeNode:
     parent_id: str
     children: List[str] = field(default_factory=list)  # child node_ids
     processed: bool = False
-
 
 class DocumentTreeState:
     """
@@ -417,7 +412,6 @@ class DocumentTreeState:
             "complete": self.is_complete(),
         }
 
-
 # ── Navigation Tools (本地 LangChain 工具) ────────────────────
 
 def create_navigation_tools(tree_state: DocumentTreeState) -> List[BaseTool]:
@@ -476,7 +470,6 @@ def create_navigation_tools(tree_state: DocumentTreeState) -> List[BaseTool]:
 
     return [get_document_tree, read_section, mark_section_done, get_progress]
 
-
 # ── SectionInfo (保留向后兼容) ───────────────────────────────
 
 class SectionInfo:
@@ -494,7 +487,6 @@ class SectionInfo:
         if self.parent_title:
             return f"{self.parent_title} > {self.title}"
         return self.title
-
 
 # ── KGBuildAgent ─────────────────────────────────────────────
 
@@ -696,8 +688,6 @@ class CandidateExtractionEngine:
         Both paths use identical MCP arguments and identical create/update
         semantics; both return {"entities", "relations", "entity_map"}.
         """
-        pages_list = source_pages or [section_title or f"p{page}"]
-
         async def _serial_impl() -> dict:
             """系统直接调用 MCP 工具: 搜索去重 + 创建/更新实体和关系."""
             created_entities = 0
@@ -1164,7 +1154,6 @@ class RelationEnricher:
 
         section_groups: dict = {}
         for e in entities:
-            name = e.get("name", "")
             sections = e.get("source_sections") or e.get("source_section") or []
             if isinstance(sections, str):
                 sections = [sections]
@@ -1587,7 +1576,6 @@ class StatePersistence:
             return {}
 
 
-
 class KGBuildAgent:
     """知识图谱构建 Agent 协调器"""
 
@@ -1640,7 +1628,6 @@ class KGBuildAgent:
             eng = StatePersistence(self)
             self._state_persistence_cache = eng
         return eng
-
 
 
     @staticmethod
@@ -1734,6 +1721,8 @@ class KGBuildAgent:
             logger.info("Document %s already fully built, reusing stats", doc_name)
             return build.get("stats", {})
 
+        t0 = time.time()
+
         stats: Dict[str, Any] = {
             "entity_count_before": 0, "entity_count_after": 0,
             "relation_count_before": 0, "relation_count_after": 0,
@@ -1812,7 +1801,7 @@ class KGBuildAgent:
             summary = await self._summary()
             stats["entity_count_after"] = summary.get("total_entities", 0)
             stats["relation_count_after"] = summary.get("total_relations", 0)
-            stats["total_time_s"] = round(time.time(), 1)
+            stats["total_time_s"] = round(time.time() - t0, 1)
 
             self._save_build_state(doc_name, "done", stats=stats, errors=errors if errors else None)
             logger.info("KG build complete: entities %d→%d, relations %d→%d",
@@ -1875,7 +1864,6 @@ class KGBuildAgent:
 
         async def _extract_section(nodes: list) -> Any:
             async with sem:
-                page_range = f"p{nodes[0].page_start}-{nodes[-1].page_start}"
                 section_title = nodes[0].title[:40]
                 text_parts = [
                     f"## 页面{nd.page_start}: {nd.title}\n{nd.text}"
@@ -1971,30 +1959,6 @@ class KGBuildAgent:
         await self._trigger_save()
         return stats, errors
 
-    async def _run_phase3(
-        self, doc_name: str, processed_sections: set, stats: Dict[str, Any]
-    ) -> tuple:
-        """Phase 3: 并行 JSON 模式富化。支持断点续跑（跳过已处理小节）。"""
-        errors: List[Dict] = []
-        t3_start = time.time()
-        try:
-            await self._enrich_entities(doc_name, processed_sections, errors)
-        except Exception as e:
-            logger.error("Phase 3 enrichment error: %s", e)
-            errors.append({"phase": "phase3", "error": str(e)})
-        stats["phase3_time_s"] = round(time.time() - t3_start, 1)
-
-        post_enrich_summary = await self._summary()
-        stats["post_enrich_entities"] = post_enrich_summary.get("total_entities", 0)
-        stats["post_enrich_relations"] = post_enrich_summary.get("total_relations", 0)
-        post_orphan_count = await self._count_orphan_entities()
-        stats["post_enrich_orphans"] = post_orphan_count
-        logger.info("Post-enrichment: %d entities, %d relations, %d orphans",
-                     stats["post_enrich_entities"], stats["post_enrich_relations"],
-                     post_orphan_count)
-        await self._trigger_save()
-        return stats, errors
-
     async def _run_phase4(
         self, doc_name: str, stats: Dict[str, Any]
     ) -> tuple:
@@ -2016,30 +1980,25 @@ class KGBuildAgent:
         """T9 委托包装：转发到 CandidateExtractionEngine.extract_page_candidates。"""
         return await self._candidate_engine().extract_page_candidates(text, title, page)
 
-
     @staticmethod
     def _parse_candidates(raw: str) -> tuple:
         """T9 委托包装：转发到 CandidateExtractionEngine 静态方法。"""
         return CandidateExtractionEngine.parse_candidates(raw)
-
 
     @staticmethod
     def _parse_enrichment_json(raw: str) -> list:
         """T9 委托包装：转发到 CandidateExtractionEngine 静态方法。"""
         return CandidateExtractionEngine.parse_enrichment_json(raw)
 
-
     async def _process_candidates(self, candidates: list, relations: list, doc_name: str, page: int, section_title: str, source_pages: Optional[list]=None, batch: bool=True) -> dict:
         """T9 委托包装：转发到 CandidateExtractionEngine.process_candidates。"""
         return await self._candidate_engine().process_candidates(candidates, relations, doc_name, page, section_title, source_pages, batch)
-
 
     # ── Phase 3: Enrichment ──────────────────────────────────
 
     async def _enrich_entities(self, doc_name: str, processed_sections: set=None, errors: list=None) -> None:
         """T9 委托包装：转发到 RelationEnricher.enrich_entities。"""
         return await self._relation_enricher().enrich_entities(doc_name, processed_sections, errors)
-
 
     # ── 旧接口：向后兼容 ───────────────────────────────────────
 
@@ -2111,27 +2070,19 @@ class KGBuildAgent:
         stats["relation_count_after"] = summary.get("total_relations", 0)
         return stats
 
-    async def _count_orphan_entities(self) -> int:
-        """T9 委托包装：转发到 RelationEnricher.count_orphan_entities。"""
-        return await self._relation_enricher().count_orphan_entities()
-
-
     # ── Phase 4: Graph Aggregation ─────────────────────────────
 
     async def _aggregate_graph(self, doc_name: str) -> None:
         """T9 委托包装：转发到 RelationEnricher.aggregate_graph。"""
         return await self._relation_enricher().aggregate_graph(doc_name)
 
-
     async def _get_entities_with_sections(self, entity_names: list) -> dict:
         """T9 委托包装：转发到 RelationEnricher.get_entities_with_sections。"""
         return await self._relation_enricher().get_entities_with_sections(entity_names)
 
-
     async def _bridge_components(self, candidates: list) -> int:
         """T9 委托包装：转发到 RelationEnricher.bridge_components。"""
         return await self._relation_enricher().bridge_components(candidates)
-
 
     # ── Light model unload ─────────────────────────────────────
 
@@ -2215,36 +2166,26 @@ class KGBuildAgent:
         """构建状态文件路径（T9 委托 StatePersistence）。"""
         return self._state_persistence().build_state_file
 
-
     def _load_build_state(self, doc_name: str) -> Dict[str, Any]:
         """T9 委托包装：转发到 StatePersistence.load_build_state。"""
         return self._state_persistence().load_build_state(doc_name)
 
-
     def _save_build_state(self, doc_name: str, phase: str, processed_sections: Optional[List[str]]=None, phase1_processed_sections: Optional[List[str]]=None, stats: Optional[Dict[str, Any]]=None, errors: Optional[List[Dict]]=None) -> None:
         """T9 委托包装：转发到 StatePersistence.save_build_state。"""
         return self._state_persistence().save_build_state(doc_name, phase, processed_sections, phase1_processed_sections, stats, errors)
-
 
     async def _trigger_save(self) -> None:
         """T9 委托包装：转发到 StatePersistence.trigger_save。"""
         return await self._state_persistence().trigger_save()
 
 
-    async def _do_save(self) -> None:
-        """T9 委托包装：转发到 StatePersistence.do_save。"""
-        return await self._state_persistence().do_save()
-
-
     async def _save_knowledge_graph(self) -> None:
         """T9 委托包装：转发到 StatePersistence.save_knowledge_graph。"""
         return await self._state_persistence().save_knowledge_graph()
 
-
     async def _summary(self) -> Dict[str, Any]:
         """T9 委托包装：转发到 StatePersistence.summary。"""
         return await self._state_persistence().summary()
-
 
     # ═══════════════════════════════════════════════════════════════
     # 递归级联 KG 构建 (cascading-recursive pipeline)
@@ -2989,7 +2930,6 @@ class KGBuildAgent:
             tmp.replace(bsf)
         except Exception as e:
             logger.warning("Failed to save recursive build state: %s", e)
-
 
 def _build_simple_tree(doc_name: str, sections: List[SectionInfo]) -> DocumentTreeState:
     """从 flat SectionInfo 列表构建简易文档树（用于向后兼容）"""

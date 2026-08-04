@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import json
 import logging
 import math
 import os
 import re
 import shutil
-import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Set, cast
 
@@ -71,60 +69,17 @@ class DocumentRegistry:
         self.last_load_time = 0.0
         self.cache_ttl = 300
 
-    def _lock_shared(self, handle) -> None:
-        if sys.platform == "win32":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle, fcntl.LOCK_SH)
-
-    def _lock_exclusive(self, handle) -> None:
-        if sys.platform == "win32":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle, fcntl.LOCK_EX)
-
-    def _unlock(self, handle) -> None:
-        if sys.platform == "win32":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle, fcntl.LOCK_UN)
-
     def _load_with_lock(self) -> Set[str]:
         now = time.time()
         if self.cache and (now - self.last_load_time) < self.cache_ttl:
             return self.cache
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        with open(self.path, "a+", encoding="utf-8") as handle:
-            self._lock_shared(handle)
-            handle.seek(0)
-            try:
-                data = json.load(handle)
-            except json.JSONDecodeError:
-                data = []
-            finally:
-                self._unlock(handle)
+        data = _read_json_file_locked(self.path, [])
         self.cache = set(data)
         self.last_load_time = now
         return self.cache
 
     def _save_with_lock(self) -> None:
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        with open(self.path, "w", encoding="utf-8") as handle:
-            self._lock_exclusive(handle)
-            json.dump(sorted(self.cache or set()), handle)
-            self._unlock(handle)
+        _write_json_file_locked(self.path, sorted(self.cache or set()))
 
     def get_existing_ids(self) -> Set[str]:
         if self.cache is None:
