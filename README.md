@@ -9,7 +9,11 @@ Goals
 Project layout
 --------------
 - `src/nanite_tokenizers/`: main package
-- `web_server.py`: **入口 / single entry point** — FastAPI web server + static UI
+- `web_server.py`: **主入口 / primary web entry point** — FastAPI web server + static UI
+- `main.py`: CLI entry point (interactive REPL / batch mode); also hosts shared startup
+  helpers (`setup_logging`, `health_check`) reused by web_server.py and gradio_app.py
+- `gradio_app.py`: Gradio GUI alternative entry point
+- `start_server.py`: thin wrapper that runs `web_server.main()` (KG viz testing)
 
 Quickstart
 ----------

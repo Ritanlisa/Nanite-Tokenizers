@@ -1,3 +1,13 @@
+"""
+Nanite Agent FastAPI web server (primary web entry point).
+===========================================================
+Serves the chat API + static UI (web/). Shared startup helpers
+(setup_logging / health_check) are reused from main.py; the Gradio
+alternative lives in gradio_app.py; the CLI entry point is main.py.
+
+Run:  python web_server.py --host 0.0.0.0 --port 7860
+"""
+
 import argparse
 import asyncio
 import json

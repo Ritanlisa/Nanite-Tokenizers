@@ -1,3 +1,24 @@
+"""
+Nanite Agent CLI entry point + shared startup infrastructure.
+=============================================================
+This module is the command-line entry point for the RAG + MCP agent
+(interactive REPL and batch mode). It also hosts the shared startup
+helpers reused by the web entry points:
+
+  - setup_logging() / health_check(): shared by web_server.py and gradio_app.py
+  - batch_process(): batch mode (--batch-file)
+  - main(): CLI REPL loop (or batch mode); not a web server
+
+Entry points:
+  - web_server.py : FastAPI web server + static UI (primary web entry point)
+  - gradio_app.py : Gradio GUI
+  - main.py       : CLI (interactive REPL / batch file) — this module
+  - start_server.py: thin wrapper that runs web_server.main() (KG viz testing)
+
+Run the CLI:  python main.py [--batch-file queries.txt] [--output-file results.json]
+Run the web:  python web_server.py --host 0.0.0.0 --port 7860
+"""
+
 import argparse
 import asyncio
 import csv

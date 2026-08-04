@@ -1,3 +1,12 @@
+"""
+Nanite Agent Gradio GUI (alternative web entry point).
+======================================================
+Shared startup helpers are reused from main.py; the FastAPI web server
+is web_server.py; the CLI entry point is main.py.
+
+Run:  python gradio_app.py --host 127.0.0.1 --port 7860
+"""
+
 import argparse
 import asyncio
 import logging
